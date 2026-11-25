@@ -4,6 +4,7 @@ All GitHub responses are fixtures shaped like live REST/GraphQL data.
 """
 import importlib.util
 from pathlib import Path
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -29,22 +30,63 @@ class RenovateCycleRefusalTests(unittest.TestCase):
     def setUp(self):
         tmp=tempfile.TemporaryDirectory();self.addCleanup(tmp.cleanup)
         root=Path(tmp.name)
-        (root/'checkout').mkdir()
-        cfg={'name':'demo','repo':REPO,'directory':str(root/'checkout'),'project_owner':'own','project_number':1}
+        # A real clean checkout on main, so checkout_neutral() reflects reality.
+        checkout=root/'checkout'
+        subprocess.run(['git','init','-q','-b','main',str(checkout)],check=True)
+        (checkout/'README').write_text('x')
+        subprocess.run(['git','-C',str(checkout),'add','README'],check=True)
+        subprocess.run(['git','-C',str(checkout),'-c','user.name=offline-test','-c','user.email=offline-test@example.invalid',
+                        'commit','-q','-m','init'],check=True)
+        cfg={'name':'demo','repo':REPO,'directory':str(checkout),'project_owner':'own','project_number':1}
         self.w=m.ProjectWorker(cfg,{'state_dir':str(root/'state'),'opencode':'oc','wrapper':'wrapper'},
                                threading.Event(),threading.Lock())
 
     def test_unverified_renovate_pr_refused_without_agent_call(self):
         # The live PR is a fork PR authored by the genuine bot: identity holds, repository does not.
         fork=renovate_pr(8,head={'ref':'renovate/pkg-8','sha':SHA,'repo':{'full_name':'attacker/repo'}})
+        m.json_atomic(self.w.cycle_state,{'kind':'renovate','number':8,'url':URL,'phase':'code','started':0})
         with patch.object(self.w,'related_pr',return_value=fork),patch.object(self.w,'run_wrapper') as run, \
-             patch.object(self.w,'quota_clear') as clear,patch.object(m,'pr_data') as pr_data:
+             patch.object(self.w,'quota_clear') as clear:
             self.w._cycle('renovate',8,URL,None)
         run.assert_not_called();clear.assert_not_called()
+        # Code phase, no pending marker, neutral checkout: the checkpoint is cleared.
         self.assertFalse(self.w.cycle_state.exists())
-        self.assertIn('renovate:8',self.w.retry_map())
         self.assertGreater(self.w.retry_map()['renovate:8']['until'],0)
-        pr_data.assert_not_called()
+
+    def test_repair_phase_refusal_keeps_checkpoint_and_never_runs_agent(self):
+        # Main-is-red obligation: the repair checkpoint must survive an unverified PR.
+        fork=renovate_pr(8,head={'ref':'renovate/pkg-8','sha':SHA,'repo':{'full_name':'attacker/repo'}})
+        checkpoint={'kind':'renovate','number':8,'url':URL,'phase':'repair','pr_number':8,'started':0}
+        m.json_atomic(self.w.cycle_state,checkpoint)
+        with patch.object(self.w,'related_pr',return_value=fork),patch.object(self.w,'run_wrapper') as run:
+            self.w._cycle('renovate',8,URL,None)
+        run.assert_not_called()
+        self.assertEqual(m.json_read(self.w.cycle_state),checkpoint)
+        self.assertGreater(self.w.retry_map()['renovate:8']['until'],0)
+
+    def test_code_phase_refusal_with_pending_marker_keeps_checkpoint(self):
+        fork=renovate_pr(8,head={'ref':'renovate/pkg-8','sha':SHA,'repo':{'full_name':'attacker/repo'}})
+        checkpoint={'kind':'renovate','number':8,'url':URL,'phase':'code','started':0}
+        m.json_atomic(self.w.cycle_state,checkpoint)
+        m.json_atomic(self.w.pending,{'status':'resuming','session_id':'ses-test'})
+        with patch.object(self.w,'related_pr',return_value=fork),patch.object(self.w,'run_wrapper') as run:
+            self.w._cycle('renovate',8,URL,None)
+        run.assert_not_called()
+        self.assertEqual(m.json_read(self.w.cycle_state),checkpoint)
+        self.assertGreater(self.w.retry_map()['renovate:8']['until'],0)
+
+    def test_fork_open_pr_through_real_related_pr_fails_closed_without_agent(self):
+        # Drives the real related_pr -> pr_data path (only gh_json is faked).
+        # pr_data rejects an open PR whose head is another repository: a
+        # ControllerError, which surfaces to the worker loop as a temporary
+        # error. No agent is ever invoked. pr_data semantics are unchanged.
+        fork_open={'number':8,'state':'open','merged_at':None,'draft':False,'user':BOT,
+                   'head':{'ref':'renovate/pkg-8','sha':SHA,'repo':{'full_name':'attacker/repo'}},
+                   'base':{'ref':'main','repo':{'full_name':REPO}}}
+        with patch.object(m,'gh_json',return_value=fork_open),patch.object(self.w,'run_wrapper') as run:
+            with self.assertRaisesRegex(m.ControllerError,'head must originate'):
+                self.w._cycle('renovate',8,URL,None)
+        run.assert_not_called()
 
     def test_branch_prefix_only_pr_refused_without_agent_call(self):
         spoofed=renovate_pr(9,user={'login':'attacker','type':'User','id':7})

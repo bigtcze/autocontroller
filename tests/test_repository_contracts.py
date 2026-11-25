@@ -6,6 +6,7 @@ parser so the suite stays dependency-free.
 import os
 from pathlib import Path
 import re
+import subprocess
 import unittest
 
 import bootstrap_policy
@@ -21,7 +22,22 @@ IMAGES = ('debian:12', 'debian:13', 'ubuntu:24.04', 'ubuntu:26.04')
 
 
 def tracked_like_files():
-    """Filesystem walk of repository content (no git dependency)."""
+    """Repository content: git-tracked paths when available, else a filesystem walk.
+
+    git may be missing, the checkout may not be a repository, or it may refuse
+    (e.g. ownership checks in a copied CI checkout). Any failure falls back.
+    """
+    try:
+        proc = subprocess.run(['git', '-C', str(ROOT), 'ls-files', '-z', '--cached', '--others', '--exclude-standard'],
+                              capture_output=True, timeout=60, check=False)
+        if proc.returncode == 0:
+            names = [n for n in proc.stdout.decode('utf-8', 'surrogateescape').split('\0') if n]
+            paths = [ROOT / n for n in names if (ROOT / n).is_file()]
+            if paths:
+                yield from paths
+                return
+    except (OSError, subprocess.SubprocessError):
+        pass
     for dirpath, dirnames, filenames in os.walk(ROOT):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         for name in filenames:
@@ -92,6 +108,15 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn('if: always()', block)
         self.assertIn('needs:', block)
         self.assertIn('needs.regression.result', block)
+
+    def test_required_concurrency_group_is_not_shared_for_push(self):
+        text = workflow_text('required.yml')
+        group = re.search(r'(?m)^  group: (.+)$', text)
+        self.assertIsNotNone(group, 'concurrency group missing')
+        # Push runs (including pushes to main) must each get a unique group.
+        self.assertIn('github.run_id', group.group(1))
+        self.assertIn("github.event_name == 'pull_request'", group.group(1))
+        self.assertRegex(text, r"(?m)^  cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}$")
 
     def test_no_continue_on_error(self):
         for path in WORKFLOWS.glob('*.yml'):

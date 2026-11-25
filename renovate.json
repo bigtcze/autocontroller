@@ -2,14 +2,5 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
   "dependencyDashboard": true,
-  "automerge": false,
-  "packageRules": [
-    {
-      "description": "The debian/ubuntu images define the support matrix; never propose major bumps automatically.",
-      "matchDatasources": ["docker"],
-      "matchPackageNames": ["debian", "ubuntu"],
-      "matchUpdateTypes": ["major"],
-      "enabled": false
-    }
-  ]
+  "automerge": false
 }

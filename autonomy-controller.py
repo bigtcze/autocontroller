@@ -310,7 +310,7 @@ def linked_issue_pr(repo: str, number: int) -> dict | None:
     for p in candidates:
         head = (p.get("headRepository") or {}).get("nameWithOwner") or ""
         if p.get("isCrossRepository") is not False or head.lower() != repo.lower():
-            LOG.warning("Ignoring closing PR #%s from another repository (head %r) for %s#%s",
+            LOG.debug("Ignoring closing PR #%s from another repository (head %r) for %s#%s",
                         p.get("number"), head or "unknown", repo, number)
             continue
         own.append(p)
@@ -1111,7 +1111,7 @@ class ProjectWorker:
             if not active:
                 prs=releases.merged_since(self.repo,self.base_branch,current["published_at"],
                                            gh_json,pr_data)
-                if releases.maintenance_due(current,datetime.now(timezone.utc),prs,
+                if releases.maintenance_due(current,datetime.now(timezone.utc),prs,self.repo,
                      days=int(self.release_cfg.get("maintenance_days",14)),
                      minimum=int(self.release_cfg.get("maintenance_min_renovate_prs",3))):
                     tag=releases.next_patch_tag(current["tag_name"])
@@ -1119,7 +1119,7 @@ class ProjectWorker:
                     # precedence, even if it is still in Backlog.
                     if not any(releases.release_issue_tag(x.get("title",""))==tag for x in items):
                         decision={"tag":tag,"previous":current["tag_name"],
-                                  "renovate_count":sum(releases.renovate_pr(p) for p in prs)}
+                                  "renovate_count":sum(releases.renovate_pr(p,self.repo) for p in prs)}
         # Low-frequency GitHub API discovery even if the normal issue poll is 5m.
         json_atomic(self.release_cache,{"until":now+1800,"decision":decision})
         return decision
@@ -1252,7 +1252,10 @@ class ProjectWorker:
                         f"Renovate PR #{number} is not a verified same-repository Renovate bot PR; refusing to run an agent on it",
                         warning=True)
             self.retry(key,"Renovate PR failed bot identity / same-repository verification",min_seconds=3600)
-            self.cycle_state.unlink(missing_ok=True)
+            # A repair checkpoint carries the main-is-red obligation: never discard it.
+            # A code checkpoint is cleared only when no work is pending in the checkout.
+            if phase=="code" and not self.pending.exists() and self.checkout_neutral():
+                self.cycle_state.unlink(missing_ok=True)
             return
 
         if phase == "code":

@@ -63,7 +63,7 @@ class SelectionTests(unittest.TestCase):
                      {"login":"renovate[bot]"}):                            # missing type/id
             with self.subTest(user=user):
                 self.assertFalse(m.is_renovate({"user":user,**same_repo},repo))
-                self.assertFalse(m.releases.renovate_pr({"user":user,**same_repo}))
+                self.assertFalse(m.releases.renovate_pr({"user":user,**same_repo},repo))
         self.assertTrue(m.is_renovate({"user":{"login":"Renovate[bot]","type":"Bot","id":29139614},**same_repo},repo))
 
     def test_fork_renovate_pr_from_genuine_bot_rejected(self):
@@ -72,7 +72,7 @@ class SelectionTests(unittest.TestCase):
               "head":{"ref":"renovate/pkg","repo":{"full_name":"attacker/example-project"}},
               "base":{"ref":"main","repo":{"full_name":repo}}}
         self.assertFalse(m.is_renovate(fork,repo))
-        self.assertFalse(m.releases.renovate_pr(fork))
+        self.assertFalse(m.releases.renovate_pr(fork,repo))
 
     def test_missing_head_repository_rejected(self):
         repo="example-owner/example-project"

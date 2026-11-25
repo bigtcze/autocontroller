@@ -5,8 +5,10 @@ on:
     branches: [main]
 permissions:
   contents: read
+# Pushes to main never share a group: a queued older push run must not be
+# cancelled, since the controller reads merge-commit CI for its exact SHA.
 concurrency:
-  group: required-${{ github.ref }}
+  group: required-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   regression:

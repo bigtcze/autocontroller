@@ -110,29 +110,28 @@ def same_repository_pr(pr: dict, repo: str) -> bool:
     return base_repo is None or str((base_repo or {}).get('full_name') or '').lower() == repo
 
 
-def technical_pr(pr: dict) -> bool:
+def renovate_pr(pr: dict, repo: str) -> bool:
+    """Single verified predicate: genuine Renovate bot AND same-repository head.
+
+    Branch prefix, logins and labels never establish identity. Missing head
+    repository data fails closed (see same_repository_pr).
+    """
+    return is_renovate_identity(pr.get('user')) and same_repository_pr(pr, repo)
+
+
+def technical_pr(pr: dict, repo: str) -> bool:
     labels={str(x.get('name') or '').lower() for x in (pr.get('labels') or [])}
-    return renovate_pr(pr) or bool(labels & TECHNICAL_LABELS)
+    return renovate_pr(pr, repo) or bool(labels & TECHNICAL_LABELS)
 
 
-def renovate_pr(pr: dict) -> bool:
-    # Branch prefix alone is never sufficient. The head repository must be
-    # present (fail closed) and, when base repository data exists, identical.
-    if not is_renovate_identity(pr.get('user')):
-        return False
-    head_repo = str(((pr.get('head') or {}).get('repo') or {}).get('full_name') or '').lower()
-    base_repo = str(((pr.get('base') or {}).get('repo') or {}).get('full_name') or '').lower()
-    return bool(head_repo) and (not base_repo or head_repo == base_repo)
-
-
-def maintenance_due(release: dict | None, now: datetime, prs: list[dict],
+def maintenance_due(release: dict | None, now: datetime, prs: list[dict], repo: str,
                     *, days=14, minimum=3, feature_active=False) -> bool:
     if release is None or feature_active or released_since(release,now)<days:
         return False
     # Avoid silently publishing a feature under a patch version.
-    if any(not technical_pr(p) for p in prs):
+    if any(not technical_pr(p, repo) for p in prs):
         return False
-    return sum(renovate_pr(p) for p in prs)>=minimum
+    return sum(renovate_pr(p, repo) for p in prs)>=minimum
 
 
 def approve_request_body(tag: str, sha: str) -> str:

@@ -55,8 +55,10 @@ bash scripts/offline-tests.sh
 `scripts/offline-tests.sh` runs `python3 -m unittest discover -s tests -v`
 with an isolated temporary `HOME`, no GitHub/provider tokens and blocking shims
 for `gh`, `opencode`, `systemctl`, `loginctl`, `sudo`, `curl` and `engram`.
-CI (`.github/workflows/required.yml`) runs the same checks on Debian 12/13 and
-Ubuntu 24.04/26.04 containers; the aggregate check `required` must be green.
+CI (`.github/workflows/required.yml` → `regression.yml`) runs the syntax checks
+and `mise run ci` on the hosted runner and the offline suite in clean Debian
+12/13 and Ubuntu 24.04/26.04 containers; the aggregate check `required` must be
+green.
 
 ## Coding guidance
 

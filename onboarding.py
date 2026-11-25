@@ -206,7 +206,7 @@ def onboard(url=None):
         if not existing.get('enabled',True): raise ValueError('Repository already configured but disabled; refusing to change its state.')
         print('Repository already configured. Resuming service.'); run('systemctl','--user','enable','--now','autocontroller.service'); return
     # Show the material authorization once, before any remote mutation.
-    print(f'AutoController will clone {requested}, create a dedicated GitHub Project, import open issues, create a bootstrap issue, and autonomously run AI coding sessions and merge reviewed green PRs. GitHub branch protection remains enforced. An empty repository will receive a minimal first commit. AI and CI can incur costs.')
+    print(f'AutoController will clone {requested}, create a dedicated GitHub Project, import open issues authored by the owner, members or collaborators, create a bootstrap issue, and autonomously run AI coding sessions and merge reviewed green PRs. GitHub branch protection remains enforced. An empty repository will receive a minimal first commit. AI and CI can incur costs.')
     if input('Enable autonomous development? [y/N] ').strip().lower() not in ('y','yes'): raise ValueError('Setup cancelled; no repository mutation performed.')
     info,repo,branch,method=repo_details(requested)
     if any(x['repo'].lower()==repo.lower() for x in config['projects']): raise ValueError('Repository already configured under canonical identity')
