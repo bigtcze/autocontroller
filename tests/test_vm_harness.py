@@ -9,6 +9,8 @@ import copy
 import hashlib
 import io
 import json
+import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -236,7 +238,8 @@ class CloudInitTests(unittest.TestCase):
         self.assertEqual(json.loads(cloudinit.meta_data('vmtest-abc123'))['instance-id'], 'vmtest-abc123')
         with self.assertRaises(ValueError):
             cloudinit.meta_data('bad id;rm')
-        self.assertEqual(cloudinit.smbios_argument(8080), 'type=1,serial=ds=nocloud;s=http://10.0.2.2:8080/')
+        # nocloud-net is required by cloud-init 22.4.x (debian-12); the bare `nocloud` name is not.
+        self.assertEqual(cloudinit.smbios_argument(8080), 'type=1,serial=ds=nocloud-net;s=http://10.0.2.2:8080/')
         with self.assertRaises(ValueError):
             cloudinit.smbios_argument(80)
 
@@ -336,6 +339,19 @@ class SourceArchiveTests(TempDirTest):
         self.assertTrue(all(m.mtime == 0 and m.uid == 0 and m.gid == 0 for m in members))
         self.assertEqual(source.build_archive(root), archive)  # byte-identical on rebuild
 
+    def test_archive_is_identical_across_a_clock_change(self):
+        # Rebuild after the file mtimes move and after time passes, so a clock-based gzip
+        # header or file mtime would change the bytes. Compare the gzip header mtime too.
+        root = self.dir / 'src'
+        (root / 'vmtest').mkdir(parents=True)
+        (root / 'install.sh').write_text('echo ok\n', encoding='utf-8')
+        (root / 'vmtest' / 'harness.py').write_text('x = 1\n', encoding='utf-8')
+        first = source.build_archive(root)
+        os.utime(root / 'install.sh', (1_900_000_000, 1_900_000_000))
+        second = source.build_archive(root)
+        self.assertEqual(first, second)
+        self.assertEqual(first[4:8], b'\x00\x00\x00\x00')  # gzip header MTIME field is zero
+
 
 class RunnerSemanticsTests(TempDirTest):
     def _run(self, steps):
@@ -430,6 +446,23 @@ class HarnessWiringTests(unittest.TestCase):
     def test_tcg_boot_budget_fits_the_job_limit(self):
         self.assertLessEqual(harness.BOOT_TIMEOUT['tcg'], 1800)
         self.assertLess(harness.BOOT_TIMEOUT['kvm'], harness.BOOT_TIMEOUT['tcg'])
+
+    def test_tcg_scales_fixed_waits_and_kvm_stays_at_baseline(self):
+        self.assertEqual(harness.WAIT_FACTOR['kvm'], 1)
+        self.assertGreater(harness.WAIT_FACTOR['tcg'], 1)
+
+    def test_tcg_worst_case_fits_the_vm_job_timeout_parsed_from_workflow(self):
+        workflow = (ROOT / '.github' / 'workflows' / 'vm-lifecycle.yml').read_text(encoding='utf-8')
+        vm_job = workflow.split('\n  vm:\n', 1)[1]
+        body = re.split(r'(?m)^  [A-Za-z0-9_-]+:\n', vm_job, maxsplit=1)[0]  # stop at the next job
+        match = re.search(r'(?m)^    timeout-minutes: (\d+)$', body)
+        self.assertIsNotNone(match, 'vm job has no timeout-minutes')
+        minutes = int(match.group(1))
+        # Worst case: boot budget plus the scaled reboot/readiness waits plus the fixed sleeps.
+        scale = harness.WAIT_FACTOR['tcg']
+        worst_tcg_seconds = harness.BOOT_TIMEOUT['tcg'] + (600 + 300 + 900 + 300) * scale
+        self.assertLessEqual(worst_tcg_seconds, minutes * 60,
+                             f'TCG worst case {worst_tcg_seconds}s exceeds vm job {minutes} min')
 
 
 class StandInTestBase(TempDirTest):

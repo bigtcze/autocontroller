@@ -21,12 +21,13 @@ clean install, Engram failure and recovery, logout and reboot persistence, an En
 rollback, a crash and a repeated install. See [VM_TESTING.md](VM_TESTING.md) for the
 scenario, the real/stand-in split and the limits.
 
-- **Status:** the workflow has **not yet run on GitHub**. Local runs of the suite are
+- **Status:** the workflow has **not yet run on GitHub**. A `schedule` or `workflow_dispatch`
+  trigger only exists once the workflow file is on the default branch, so its first green run
+  is a post-merge follow-up, not part of this PR's checks. Local runs of the suite are
   recorded under "Local VM evidence" below. The workflow is not a required check, and
   `required.yml` and `regression.yml` do not reference it.
-- **Local VM evidence:** the debian-13 scenario passed end to end (KVM) in one local run;
-  the ubuntu-24.04 run is recorded below. Each run's pass or fail detail is recorded
-  exactly as the harness reported it.
+- **Local VM evidence:** on the final tree (`-final2`), all four distros passed 16/16 steps
+  (KVM). Each result is recorded exactly as the harness reported it.
 - **Still not covered by this suite:** arm64, live GitHub authentication and onboarding,
   real GitHub Project/PR/CI behaviour, live OpenCode/OMO sessions and provider behaviour,
   release publication. The OpenCode and GitHub CLI used by the controller are stand-ins.
@@ -39,10 +40,17 @@ harness `report.json` overall result on the tree at that time.
 
 | Distro | Run | Overall | Notes |
 | --- | --- | --- | --- |
-| ubuntu-24.04 | r2 | passed (16/16 steps) | Run 1 failed at step h because of a readiness race in the harness, since fixed; run 2 is on the final tree. |
-| debian-13 | r8 | passed (16/16 steps) | Predates the step-h readiness wait and the gh method tightening. |
-| debian-13 | r9 | passed (16/16 steps) | Final tree; KVM, QEMU 10.0.13. |
-| debian-12, ubuntu-26.04 | — | not run locally | Covered only by the scheduled workflow once it has run on GitHub. |
+| debian-12 | final2 | passed (16/16 steps) | KVM, QEMU 10.0.13; `ds=nocloud-net` seed; artifacts `art-debian-12-final2`. |
+| debian-13 | final2 | passed (16/16 steps) | KVM, QEMU 10.0.13; `ds=nocloud-net` seed; artifacts `art-debian-13-final2`. |
+| ubuntu-24.04 | final2 | passed (16/16 steps) | KVM, QEMU 10.0.13; `ds=nocloud-net` seed; artifacts `art-ubuntu-24.04-final2`. |
+| ubuntu-26.04 | final2 | passed (16/16 steps) | KVM, QEMU 10.0.13; `ds=nocloud-net` seed; artifacts `art-ubuntu-26.04-final2`. |
+
+Earlier `final` runs (before the seed string change): debian-13, ubuntu-24.04 and ubuntu-26.04
+passed 16/16; debian-12 failed at boot because cloud-init 22.4.2 ignored the `ds=nocloud` seed
+and fell back to `DataSourceNone`. The `nocloud-net` name fixed it. Earlier history: ubuntu-24.04
+run 2 and debian-13 run 9 passed on an earlier tree; ubuntu-24.04 run 1 failed at step h on a
+readiness race, since fixed in the harness.
+
 
 These are local runs. The scheduled workflow has not run on GitHub.
 

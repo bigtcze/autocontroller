@@ -49,7 +49,25 @@ def sudo_out(ctx, argv: list[str], timeout: float = 120) -> str:
     return ssh_out(ctx, 'vmadmin', ['sudo', '-n', *argv], timeout=timeout)
 
 
+def wait_cloud_init(ctx, timeout: float = 900) -> str:
+    """Bounded wait for the NoCloud runcmd marker and for apt/dpkg to be idle (no lock holder)."""
+    import time
+    deadline = time.monotonic() + timeout
+    last = 'no output yet'
+    while time.monotonic() < deadline:
+        marker = root_run(ctx, ['test', '-e', '/var/lib/vmtest-cloud-init-done'], timeout=30).returncode == 0
+        # flock -n fails while another process holds the dpkg frontend lock.
+        lock = root_run(ctx, ['sh', '-c', 'flock -n /var/lib/dpkg/lock-frontend true && echo idle || echo busy'],
+                        timeout=30).stdout.decode('utf-8', 'replace').strip()
+        last = f'marker={marker} apt_lock={lock}'
+        if marker and lock != 'busy':
+            return last
+        time.sleep(10)
+    raise ScenarioAbort(f'cloud-init or apt lock not idle within {timeout:.0f}s: {last}')
+
+
 def step_preconditions(ctx) -> str:
+    wait_cloud_init(ctx)
     osr = ssh_out(ctx, 'vmadmin', ['cat', '/etc/os-release'])
     fields = dict(re.findall(r'^([A-Z_]+)="?([^"\n]*)"?$', osr, re.M))
     expect = SUPPORTED_OS[ctx.distro]

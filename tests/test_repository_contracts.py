@@ -188,6 +188,17 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertEqual(sorted(x.strip().strip('"') for x in listed.group(1).split(',')),
                          ['debian-12', 'debian-13', 'ubuntu-24.04', 'ubuntu-26.04'])
 
+    def test_vm_lifecycle_run_step_passes_matrix_and_paths_through_env(self):
+        # Interpolating ${{ }} inside run: is a script-injection shape; values go through env:.
+        block = job_block(workflow_text('vm-lifecycle.yml'), 'vm')
+        run_step = re.search(r'(?ms)^      - name: Run lifecycle scenario\n(.*?)(?=^      - name: |\Z)', block)
+        self.assertIsNotNone(run_step, 'run lifecycle scenario step missing')
+        body = run_step.group(1)
+        env_part, _, run_part = body.partition('        run: |')
+        self.assertIn('DISTRO: ${{ matrix.distro }}', env_part)
+        self.assertNotIn('${{', run_part, 'run: must not interpolate expressions directly')
+        self.assertIn('"$DISTRO"', run_part)
+
     def test_vm_lifecycle_has_no_job_level_matrix_if(self):
         # `matrix` is not valid in job-level `if:`; the input must be resolved in the plan job.
         block = job_block(workflow_text('vm-lifecycle.yml'), 'vm')

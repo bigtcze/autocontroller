@@ -4,6 +4,7 @@ or caches.
 """
 from __future__ import annotations
 
+import gzip
 import io
 import os
 import subprocess
@@ -47,10 +48,13 @@ def list_files(root: Path) -> list[str]:
 
 
 def build_archive(root: Path) -> bytes:
-    """Deterministic gzip tar of the allowed source files; returns bytes."""
+    """Deterministic gzip tar of the allowed source files; returns bytes.
+
+    The tar is built uncompressed with normalized metadata (mtime 0, uid/gid 0, empty owner
+    names, fixed mode), then gzipped with mtime=0 so the output does not depend on the clock."""
     root = Path(root).resolve()
     buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode='w:gz') as tar:
+    with tarfile.open(fileobj=buffer, mode='w', format=tarfile.PAX_FORMAT) as tar:
         for relative in sorted(set(list_files(root))):
             if is_excluded(relative):
                 continue
@@ -61,6 +65,7 @@ def build_archive(root: Path) -> bytes:
             info.uid = info.gid = 0
             info.uname = info.gname = ''
             info.mtime = 0
+            info.mode = 0o755 if os.access(path, os.X_OK) else 0o644
             with path.open('rb') as src:
                 tar.addfile(info, src)
-    return buffer.getvalue()
+    return gzip.compress(buffer.getvalue(), mtime=0)

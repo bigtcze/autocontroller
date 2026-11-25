@@ -30,6 +30,12 @@ def _wait_service(ctx, want_state: str, timeout: float) -> None:
     raise AssertionError(f'service did not reach {want_state} (last {state!r}) within {timeout:.0f}s')
 
 
+def _upgrade_failures(ctx) -> int:
+    """upgrade_failure_total from metrics.json (0 when the file has no such key)."""
+    metrics = ssh_out(ctx, 'tester', ['cat', f'{MEMORY}/metrics.json']).strip()
+    return int(json.loads(metrics).get('upgrade_failure_total', 0))
+
+
 def step_engram_upgrade_rollback(ctx) -> str:
     """Force an upgrade attempt: latest() succeeds, staging fails (github.com blackholed)."""
     ctx.ssh.run('tester', ['systemctl', '--user', 'stop', SERVICE], timeout=180, check=False)
@@ -45,10 +51,13 @@ def step_engram_upgrade_rollback(ctx) -> str:
     ctx.ssh.run('tester', ['sh', '-c', f'rm -f {MEMORY}/checked-boot'], timeout=30)
     ctx.ssh.run('tester', ['python3', f'{GUEST_HOME}/.local/state/vmtest/set_active_version.py',
                            active_path, 'v0.0.1'], timeout=60)
+    failures_before = _upgrade_failures(ctx)
+    # Guest clock at step start bounds the journal window, so older lines cannot satisfy the checks.
+    since = ssh_out(ctx, 'tester', ['date', '+%Y-%m-%d %H:%M:%S']).strip()
     _hosts_blackhole(ctx, GH_HOSTS)
     try:
         ctx.ssh.run('tester', ['systemctl', '--user', 'start', SERVICE], timeout=120)
-        time.sleep(60)
+        time.sleep(60 * ctx.data.get('wait_factor', 1))
     finally:
         _hosts_restore(ctx)
     _wait_service(ctx, 'active', 300)
@@ -56,10 +65,12 @@ def step_engram_upgrade_rollback(ctx) -> str:
     require(json.loads(after)['generation'] == generation_before, 'active generation changed on failed upgrade')
     gens = ssh_out(ctx, 'tester', ['sh', '-c', f'ls -1 {MEMORY} | grep -c "^gen-" || true']).strip()
     require(gens in ('0', '1'), f'leftover gen-* directories: {gens}')
-    metrics = ssh_out(ctx, 'tester', ['cat', f'{MEMORY}/metrics.json']).strip()
-    require(json.loads(metrics).get('upgrade_failure_total', 0) >= 1, 'upgrade_failure_total not incremented')
-    journal = ssh_out(ctx, 'tester', ['sh', '-c', f'journalctl --user -u {SERVICE} --no-pager -n 400 || true'])
-    require('Engram upgrade failed; previous generation required' in journal, 'rollback journal line missing')
+    failures_after = _upgrade_failures(ctx)
+    require(failures_after - failures_before == 1,
+            f'upgrade_failure_total delta {failures_after - failures_before}, expected exactly +1')
+    journal = ssh_out(ctx, 'tester', ['sh', '-c', f'journalctl --user -u {SERVICE} --no-pager --since "{since}" || true'])
+    require('Engram upgrade failed; previous generation required' in journal,
+            'upgrade attempt (rollback journal line) missing inside step window')
     save(ctx, 'journal-upgrade-rollback.txt', journal)
     # Restore the original pin; the version is re-checked on next boot.
     ctx.ssh.run('tester', ['python3', f'{GUEST_HOME}/.local/state/vmtest/set_active_version.py',
@@ -67,17 +78,15 @@ def step_engram_upgrade_rollback(ctx) -> str:
     return f'upgrade failed as designed; generation {generation_before} unchanged; metrics and journal recorded'
 
 
-def _wait_engram_ready(ctx, *, deadline: float) -> None:
-    """Bounded wait until the restarted controller logged 'Engram ready' and cleared the marker.
-
-    The marker check goes through sudo (state is in the mode-700 tester home). Any journal
-    line newer than the restart counts; a failed startup never reaches 'Engram ready'."""
+def _wait_engram_ready(ctx, *, pid: str, deadline: float) -> None:
+    """Bounded wait until the restarted controller (MainPID `pid`) logged 'Engram ready' and
+    cleared the marker. Filtering on _PID keeps old lines from earlier processes from counting.
+    The marker check goes through sudo (state is in the mode-700 tester home)."""
     last = 'no output yet'
     while time.monotonic() < deadline:
         marker = sudo_out(ctx, ['sh', '-c', f'test -e {MEMORY}/failure && echo yes || echo no'],
                           timeout=30).strip()
-        ready = sudo_out(ctx, ['sh', '-c', f'journalctl _UID={ctx.data.get("tester_uid", 1000)} '
-                                           f'_SYSTEMD_USER_UNIT={SERVICE} --no-pager -n 50 '
+        ready = sudo_out(ctx, ['sh', '-c', f'journalctl _PID={pid} --no-pager '
                                            f'| grep -c "Engram ready" || true'], timeout=60).strip()
         last = f'marker={marker} ready_lines_recent={ready}'
         if marker == 'no' and ready not in ('', '0'):
@@ -94,7 +103,8 @@ def step_engram_crash_recovery(ctx) -> str:
     engram_pid = engram_pid[0] if engram_pid else ''
     require(engram_pid.isdigit(), 'no engram serve process found')
     ctx.ssh.run('tester', ['kill', '-KILL', engram_pid], timeout=30)
-    deadline = time.monotonic() + 600
+    scale = ctx.data.get('wait_factor', 1)
+    deadline = time.monotonic() + 600 * scale
     while time.monotonic() < deadline:
         pid = _service_show(ctx, 'MainPID')
         restarts = int(_service_show(ctx, 'NRestarts') or 0)
@@ -107,7 +117,7 @@ def step_engram_crash_recovery(ctx) -> str:
     # Readiness race: MainPID and ActiveState change at ExecStart, but memory.py clears the
     # failure marker only after startup() finishes. Wait for that completion (logged as
     # "Engram ready" after the restart, and no marker) before probing health.
-    _wait_engram_ready(ctx, deadline=time.monotonic() + 300)
+    _wait_engram_ready(ctx, pid=pid, deadline=time.monotonic() + 300 * scale)
     health = ssh_out(ctx, 'tester', ['sh', '-c', f'{GUEST_HOME}/.local/bin/autocontroller memory'], timeout=120)
     require('"status": "ok"' in health or '"status":"ok"' in health, 'Engram not healthy after recovery')
     ctx.data['main_pid_after_crash'] = pid

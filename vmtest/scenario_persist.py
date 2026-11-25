@@ -220,13 +220,14 @@ def step_logout_persistence(ctx) -> str:
 def step_reboot_persistence(ctx) -> str:
     old_boot = _read_boot_id(ctx)
     root_run(ctx, ['systemctl', 'reboot'], timeout=30)
-    new_boot = vm.wait_for_reboot(lambda: _read_boot_id(ctx), old_boot_id=old_boot, timeout=600)
+    scale = ctx.data.get('wait_factor', 1)
+    new_boot = vm.wait_for_reboot(lambda: _read_boot_id(ctx), old_boot_id=old_boot, timeout=600 * scale)
     ctx.data['boot_id'] = new_boot
-    ctx.ssh.wait('vmadmin', timeout=300)
+    ctx.ssh.wait('vmadmin', timeout=300 * scale)
     require(new_boot != old_boot, 'boot_id did not change')
     # Lingering must start the user manager and the service with no tester login.
     # Checked via vmadmin only, so no tester SSH session is opened before the proof.
-    deadline = time.monotonic() + 600
+    deadline = time.monotonic() + 600 * scale
     uid = ctx.data['tester_uid']
     while True:
         # Root has no user bus; run systemctl --user as tester with its runtime dir, via sudo.

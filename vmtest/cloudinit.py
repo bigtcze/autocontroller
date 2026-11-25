@@ -36,6 +36,8 @@ def user_data(*, client_pubkey: str, host_private: str, host_public: str) -> str
         'users': users,
         'ssh_keys': {'ed25519_private': host_private, 'ed25519_public': host_public},
         'runcmd': [
+            # Disposable VM only: stop background apt so it cannot hold the dpkg lock during the scenario.
+            ['sh', '-c', 'systemctl disable --now apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service >/dev/null 2>&1 || true'],
             ['sh', '-c', f'if dpkg -s {purge} >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get purge -y {purge}; fi'],
             ['sh', '-c', 'touch /var/lib/vmtest-cloud-init-done'],
         ],
@@ -53,4 +55,6 @@ def smbios_argument(port: int) -> str:
     """NoCloud-net seed location. 10.0.2.2 is the QEMU slirp alias for the host loopback."""
     if not 1024 <= port <= 65535:
         raise ValueError('seed port out of range')
-    return f'type=1,serial=ds=nocloud;s=http://10.0.2.2:{port}/'
+    # `nocloud-net` is the datasource name cloud-init 22.4.x (debian-12) requires for an HTTP seed;
+    # newer releases accept it as an alias of `nocloud`, so one string serves all four distros.
+    return f'type=1,serial=ds=nocloud-net;s=http://10.0.2.2:{port}/'

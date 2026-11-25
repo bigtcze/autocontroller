@@ -57,7 +57,10 @@ Git config, removes GitHub/provider tokens, and puts failing shims for `gh`,
   and whose stand-ins replace OpenCode and the GitHub CLI. arm64 is not covered.
 - Live GitHub: device authorization, Project provisioning, branch protection,
   merge methods, real CI interaction, Renovate App behaviour.
-- Live OpenCode/OMO sessions, provider quotas and real Engram releases.
+- Live OpenCode/OMO sessions and provider quotas.
+- Real Engram releases: the VM suite exercises first install, upgrade-failure rollback
+  (download blackholed) and crash recovery with a real Engram binary. It does not perform
+  a real upgrade between two real Engram versions, which remains a gap.
 - Release workflow publication (never triggered during development).
 
 These are tracked in `docs/VALIDATION.md` and dedicated Issues.

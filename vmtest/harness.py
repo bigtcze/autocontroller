@@ -23,6 +23,9 @@ ROOT = Path(__file__).resolve().parents[1]
 # Seconds to first SSH answer, bounded per accelerator. TCG is software emulation (roughly
 # several times slower); 1800s keeps a worst-case TCG boot inside the 150-minute CI job limit.
 BOOT_TIMEOUT = {'kvm': 900, 'tcg': 1800}
+# Scale for fixed scenario waits (reboot, readiness, sleeps). KVM-tuned numbers are the baseline;
+# TCG is several times slower, so waits scale instead of false-failing. Each wait stays bounded.
+WAIT_FACTOR = {'kvm': 1, 'tcg': 3}
 DEFAULT_CACHE = Path.home() / '.cache' / 'vmtest'
 
 
@@ -114,6 +117,7 @@ def run(distro: str, artifacts: str, cache: str, accel: str) -> int:
                     gs = ssh.GuestSsh.create(guest.ssh_port, client_priv, host_pub, work)
                     ctx = runner.Context(distro=distro, repo_root=ROOT, artifacts=art, ssh=gs, guest=guest)
                     ctx.data['boot_timeout'] = BOOT_TIMEOUT[resolved]
+                    ctx.data['wait_factor'] = WAIT_FACTOR[resolved]
                     ok = runner.execute(steps(), ctx, report, report_path)
                 except Exception as exc:
                     _fail(report, report_path, 'setup: start guest', exc)

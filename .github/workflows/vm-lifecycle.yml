@@ -80,11 +80,15 @@ jobs:
           fi
 
       - name: Run lifecycle scenario
+        env:
+          DISTRO: ${{ matrix.distro }}
+          ARTIFACTS: ${{ runner.temp }}/vmtest-artifacts/${{ matrix.distro }}
+          CACHE: ${{ runner.temp }}/vmtest-cache
         run: |
           python3 -m vmtest.harness run \
-            --distro "${{ matrix.distro }}" \
-            --artifacts "${{ runner.temp }}/vmtest-artifacts/${{ matrix.distro }}" \
-            --cache "${{ runner.temp }}/vmtest-cache" \
+            --distro "$DISTRO" \
+            --artifacts "$ARTIFACTS" \
+            --cache "$CACHE" \
             --accel auto
 
       - name: Upload artifacts (always, including failures)

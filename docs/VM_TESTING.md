@@ -14,7 +14,9 @@ against real GitHub credentials. The harness never reads or writes `~/scripts/au
 ## Status
 
 Results come from local runs. The scheduled and manual workflow
-(`.github/workflows/vm-lifecycle.yml`) has **not yet run on GitHub**. Until it has, treat
+(`.github/workflows/vm-lifecycle.yml`) has **not yet run on GitHub**. GitHub only offers
+`schedule` and `workflow_dispatch` for a workflow once that file is on the default branch, so
+its first green run is a post-merge follow-up, not part of this PR's checks. Until it has, treat
 the suite as a local, reproducible check, not as CI evidence.
 
 ## Prerequisites
@@ -22,7 +24,9 @@ the suite as a local, reproducible check, not as CI evidence.
 - Linux x86_64 host with `qemu-system-x86` and `qemu-utils` (`qemu-img`), `ovmf`
   (UEFI firmware), `openssh-client`, `python3` ≥ 3.11 and `git`.
 - Network access on the first run, to download the pinned images (cached by digest afterwards).
-  Downloads go only to `https://cloud.debian.org` and `https://cloud-images.ubuntu.com`.
+  Downloads start at `https://cloud.debian.org` or `https://cloud-images.ubuntu.com`. Those hosts may
+  redirect to vendor mirrors; integrity comes from the pinned digest, not from the host name.
+  Any image that fails the digest is discarded.
 - About 12 GB of free disk space and 2 GB of guest RAM plus host overhead.
 - KVM is optional. Without `/dev/kvm`, the harness uses TCG (software emulation), which is much slower.
 
@@ -118,7 +122,9 @@ controller activity.
 ## Injected failures
 
 - `api.github.com` in `/etc/hosts` (between `# vmtest-begin` and `# vmtest-end`) to force
-  an Engram install and upgrade failure. It is removed afterwards.
+  the first Engram install failure (step d). It is removed afterwards.
+- `github.com` in `/etc/hosts` for the upgrade rollback (step g; the release download host).
+  `api.github.com` stays reachable in step g. It is removed afterwards.
 - Killing the Engram process with `SIGKILL` (step h).
 - A real `systemctl reboot` (step f).
 - `loginctl terminate-session` on `tester` login sessions (step e).
@@ -159,10 +165,18 @@ The cache is keyed by digest, so a changed pin never reuses an old file.
 
 - Disposable VM only. Passwordless `sudo` exists only inside the guest, for `tester` and
   `vmadmin`; it is never configured on the host.
-- Host access is limited to `qemu`, `qemu-img`, `ssh-keygen` and `ssh` as argv lists, each with a timeout.
+- Host commands are limited to `qemu-system-x86_64`, `qemu-img`, `ssh-keygen`, `ssh`, `git`
+  (source archive) and one `urllib` HTTPS download of the pinned image, all as argv lists with timeouts.
 - The guest SSH forward is bound to `127.0.0.1` only. QEMU has no display and no
   remote graphics. The seed server listens on `127.0.0.1` and serves one fixed
-  NoCloud payload.
+  NoCloud payload. The guest learns the seed URL from the SMBIOS serial
+  `ds=nocloud-net;s=http://10.0.2.2:<port>/`. The `nocloud-net` name is required by
+  cloud-init 22.4.x (debian-12); newer releases accept it as an alias.
+- **Network exposure:** the user-mode network runs with `restrict=off`, so the guest can reach
+  host loopback services through `10.0.2.2`. While it runs, the guest executes internet-sourced
+  code with passwordless sudo. Run the suite only on a disposable host or container with no
+  sensitive local services. A stricter `restrict=on` with a guestfwd for the seed server
+  was not adopted, because apt and Engram downloads need general outbound access.
 - Ephemeral keys are generated per run in a temporary directory. No passwords are set.
 - The source archive excludes `.git`, `state/`, `config.json`, lock files, logs and `.env` files.
 
