@@ -5,8 +5,9 @@ authorization.
 
 ## Contract
 
-- Versions are stable SemVer tags `vMAJOR.MINOR.PATCH`; no pre-release tags
-  trigger publication.
+- Versions are stable SemVer tags `vMAJOR.MINOR.PATCH`. No pre-release tags or
+  releases (release candidates, previews, etc.) are published, and no
+  pre-release tag triggers publication.
 - `.github/workflows/release.yml` runs on such tag pushes: it re-runs the full
   regression matrix (`regression.yml`), verifies the tagged commit is on
   `main`, then creates the GitHub Release with generated notes, or with
@@ -15,16 +16,15 @@ authorization.
 - Tags are created only by the controller/owner at a commit whose push CI is
   green. Agents never run `gh release create` or push tags.
 - Feature releases need the owner's explicit approval of tag and exact SHA;
-  technical maintenance follows controller policy.
+  technical maintenance releases need no owner approval and follow controller
+  cadence policy, but meet every per-release requirement below.
 - Release notes follow Keep a Changelog sections and describe only merged,
   verified changes and known limitations.
 - Every public stable release is published only for one exact candidate commit
   on `main` whose `required` push CI is green, and must have:
   - Reproducible release artifacts with a verified SHA256 manifest.
   - No open release-blocking Issues.
-  - No pre-release tags or releases (release candidates, previews, etc.) and
-    no partial releases, such as source code without verified artifacts.
-  - No automatic deployment to any installed controller.
+  - No partial releases, such as source code without verified artifacts.
 - The initial release and every feature release additionally require:
   - Recorded real evidence for that candidate: regression, integration and
     disposable systemd VM tests on every supported distribution, and live
@@ -41,10 +41,13 @@ authorization.
 
 ## Not yet implemented (tracked in GitHub Issues)
 
-Release archives, SHA256 manifests, artifact install/upgrade/rollback
-verification, managed update and automated enforcement of the qualification
-above are not implemented. Consequently, no public release can qualify until
-they are. The qualification evidence, artifact and release-blocking-Issue
-requirements above are not enforced by automation today; `release.yml` only
-re-runs `regression.yml`, verifies the SemVer tag and main ancestry and creates
-the GitHub Release.
+Release archives, the SHA256 manifest and artifact install/upgrade/rollback
+verification are not implemented. Managed update is not implemented. Nothing
+automated verifies artifact integrity, checks open release-blocking Issues or
+checks recorded live evidence. This applies both to `release.yml` (which re-runs
+`regression.yml`, verifies the SemVer tag and main ancestry, and creates the
+GitHub Release) and to the controller's automated maintenance-release path.
+Owner approval bound to tag and SHA and green main CI are enforced by the
+controller today. Consequently, no public release can qualify until the missing
+pieces above exist, and that enforcement must exist before the initial release
+is approved.

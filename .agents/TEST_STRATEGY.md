@@ -40,6 +40,11 @@ Git config, removes GitHub/provider tokens, and puts failing shims for `gh`,
   without merge, missing evidence).
 - No silent skipping: tests must not `skipTest` based on environment to hide
   failures. Full suite green is required for acceptance.
+- Scope: the rules above govern the regression suite and PR/push CI. Release
+  live acceptance (see `.agents/RELEASE_QUALITY.md`) is a separate, explicitly
+  invoked path. It uses isolated nonproduction sandbox credentials and
+  repositories with bounded AI spend, and never runs in PR jobs or with
+  privileged secrets.
 
 ## Inherited gaps (not covered by automation)
 

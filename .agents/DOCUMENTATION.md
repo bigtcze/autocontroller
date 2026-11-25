@@ -2,7 +2,7 @@
 
 - `README.md`: user-facing overview, install, daily use, operating model,
   security boundary, development commands, license. Must describe actual
-  behavior and the unreleased status/limitations honestly.
+  behavior and the actual release status and limitations honestly.
 - `docs/VALIDATION.md`: release-readiness matrix — what automated tests and CI
   prove, and what still requires live VM/GitHub acceptance.
 - `AGENTS.md` and `.agents/*`: engineering contracts (owner-authorized changes

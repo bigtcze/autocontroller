@@ -31,10 +31,8 @@ Status: unreleased; under development. No public release has been published.
 
 Web UI, database service, Docker runtime requirement, own model/provider,
 sandboxing agents, managing non-GitHub forges, desktop OSes or other Linux
-distributions, unrestricted automatic adding or enrollment of Issues into the
-Project (admission is an explicit maintainer action; onboarding's one-time
-import of owner/member/collaborator Issues is the only exception), bypassing
-protections.
+distributions, unrestricted automatic adding of Issues to the Project (admission
+is explicit; see `.agents/SECURITY.md`), bypassing protections.
 
 ## Explicit unknowns / not yet available
 
