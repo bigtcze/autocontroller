@@ -27,12 +27,12 @@ for file in "${PY_FILES[@]}"; do
   echo "py_compile ok: $file"
 done
 
-for file in install.sh scripts/*.sh; do
+for file in install.sh scripts/*.sh vmtest/guest/gh vmtest/guest/opencode; do
   bash -n -- "$file"
   echo "bash -n ok: $file"
 done
 
-for file in renovate.json config.example.json; do
+for file in renovate.json config.example.json vmtest/images.json; do
   python3 -m json.tool --no-ensure-ascii -- "$file" > /dev/null
   echo "json ok: $file"
 done

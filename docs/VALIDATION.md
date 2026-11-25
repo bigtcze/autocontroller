@@ -12,6 +12,49 @@ The `required` check (`.github/workflows/required.yml` → `regression.yml`) run
 
 The suite simulates GitHub, OpenCode and Engram: scheduling, checkpoints and recovery, CI/merge gates, Renovate identity and fork rejection, onboarding import authorization, release policy, safe-wrapper recovery against a fake OpenCode API, and Engram runtime staging with fake binaries. Containers prove OS/Python compatibility only. They do **not** prove systemd, lingering, APT installation, reboot survival, live GitHub/OpenCode behaviour or release publication; those remain in the live acceptance below.
 
+## Scheduled and manual VM lifecycle suite
+
+`.github/workflows/vm-lifecycle.yml` runs `vmtest/` weekly (cron) and on manual dispatch
+(optional single-distro input), one matrix job per distribution (debian-12, debian-13,
+ubuntu-24.04, ubuntu-26.04), using pinned official cloud images in QEMU. It covers a
+clean install, Engram failure and recovery, logout and reboot persistence, an Engram
+rollback, a crash and a repeated install. See [VM_TESTING.md](VM_TESTING.md) for the
+scenario, the real/stand-in split and the limits.
+
+- **Status:** the workflow has **not yet run on GitHub**. A `schedule` or `workflow_dispatch`
+  trigger only exists once the workflow file is on the default branch, so its first green run
+  is a post-merge follow-up, not part of this PR's checks. Local runs of the suite are
+  recorded under "Local VM evidence" below. The workflow is not a required check, and
+  `required.yml` and `regression.yml` do not reference it.
+- **Local VM evidence:** on the final tree (`-final3`), all four distros passed 16/16 steps
+  (KVM). Each result is recorded exactly as the harness reported it.
+- **Still not covered by this suite:** arm64, live GitHub authentication and onboarding,
+  real GitHub Project/PR/CI behaviour, live OpenCode/OMO sessions and provider behaviour,
+  release publication. The OpenCode and GitHub CLI used by the controller are stand-ins.
+- **TCG:** timings without `/dev/kvm` are unmeasured; see VM_TESTING.md.
+
+### Local VM evidence
+
+Local runs on a KVM host (QEMU 10.0.13, docker recipe in VM_TESTING.md). Each row is the
+harness `report.json` overall result on the tree at that time.
+
+| Distro | Run | Overall | Notes |
+| --- | --- | --- | --- |
+| debian-12 | final3 | passed (16/16 steps) | KVM, QEMU 10.0.13; POSIX dpkg-lock and apt-unit idle wait; artifacts `art-debian-12-final3`. |
+| debian-13 | final3 | passed (16/16 steps) | KVM, QEMU 10.0.13; POSIX dpkg-lock and apt-unit idle wait; artifacts `art-debian-13-final3`. The wrapper log lacks the trailing rc lines (wrapper interrupted after teardown); the result is taken from `report.json` (step j collected, teardown reached). |
+| ubuntu-24.04 | final3 | passed (16/16 steps) | KVM, QEMU 10.0.13; POSIX dpkg-lock and apt-unit idle wait; artifacts `art-ubuntu-24.04-final3`. |
+| ubuntu-26.04 | final3 | passed (16/16 steps) | KVM, QEMU 10.0.13; POSIX dpkg-lock and apt-unit idle wait; artifacts `art-ubuntu-26.04-final3`. |
+
+Earlier `final2` runs (before the dpkg-lock probe fix) also passed 16/16 on all four distros.
+Earlier `final` runs (before the seed string change): debian-13, ubuntu-24.04 and ubuntu-26.04
+passed 16/16; debian-12 failed at boot because cloud-init 22.4.2 ignored the `ds=nocloud` seed
+and fell back to `DataSourceNone`. The `nocloud-net` name fixed it. Earlier history: ubuntu-24.04
+run 2 and debian-13 run 9 passed on an earlier tree; ubuntu-24.04 run 1 failed at step h on a
+readiness race, since fixed in the harness.
+
+
+These are local runs. The scheduled workflow has not run on GitHub.
+
 ## Live acceptance (not yet performed)
 
 - Fresh VM per supported distribution: install with no Git, gh, mise or Engram; complete GitHub device authorization and repository URL prompt; detach SSH; confirm continued service and reboot survival.

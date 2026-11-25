@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# VM stand-in for the GitHub CLI used by the controller's IDLE cycle only.
+# Deterministic, never contacts the network, and fails closed (exit 4) on any
+# call it does not recognise.
+#
+# Every invocation is logged to ~/.local/state/vmtest/gh-calls.log as
+#   <seq> <utc-time> <origin> <args...>
+# where origin is:
+#   svc  - started from a systemd unit (INVOCATION_ID is set; the controller's
+#          gh subprocesses inherit it), i.e. controller work
+#   cli  - anything else (install.sh probes, operator commands)
+# The scenario asserts on svc lines only, so installer probes do not count as
+# controller activity.
+#
+# Capability probes: install.sh runs `gh project link --help` and
+# `gh pr checks --help | grep -- --json` once this stand-in is on PATH; both
+# are answered below, so the installer does not replace the stand-in with the
+# real gh. Only --help is answered for them; every other use is refused.
+set -euo pipefail
+umask 077
+log_dir="${HOME}/.local/state/vmtest"
+mkdir -p -- "$log_dir"
+log_file="$log_dir/gh-calls.log"
+seq_file="$log_dir/gh-calls.seq"
+now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+origin=cli
+[[ -n ${INVOCATION_ID:-} ]] && origin=svc
+seq=$(( $(cat "$seq_file" 2>/dev/null || echo 0) + 1 ))
+printf '%s' "$seq" > "$seq_file"
+printf '%s %s %s %s\n' "$seq" "$(now)" "$origin" "$*" >> "$log_file"
+
+OWNER=example-owner
+REPO=example-repo
+PROJECT=7
+
+refuse() {
+  printf '%s %s REFUSED %s\n' "$seq" "$(now)" "$*" >> "$log_file"
+  echo "vmtest gh stand-in: unsupported call: $*" >&2
+  exit 4
+}
+
+if [[ ${1:-} == project && ${2:-} == link && ${3:-} == --help ]]; then
+  echo "Usage: gh project link [<number>] [flags]  (vmtest stand-in; --owner, --repo, --json not used)"
+  exit 0
+fi
+if [[ ${1:-} == pr && ${2:-} == checks && ${3:-} == --help ]]; then
+  echo "Usage: gh pr checks [<number>|<url>|<branch>] [flags]  (vmtest stand-in; --json supported)"
+  echo "      --json fields   Output JSON with the specified fields"  # flag line: install.sh greps -- --json
+  exit 0
+fi
+
+# Only the GET API endpoints an idle controller uses. Anything else is refused.
+api_endpoint() {
+  local endpoint=""
+  shift  # 'api'
+  while (($#)); do
+    case "$1" in
+      # Read-only only: an explicit method must be GET, and field/body flags (which make gh
+      # send a POST) are refused outright, so no write can reach an allowlisted endpoint.
+      --method|-X) [[ ${2:-} == GET ]] || refuse "$@"; shift 2 ;;
+      -f|-F|--field|--raw-field|--input) refuse "$@" ;;
+      -H|--jq|-q|--hostname) shift 2 ;;
+      --paginate|--slurp|-i|--include) shift ;;
+      -*) refuse "$@" ;;
+      *) if [[ -z $endpoint ]]; then endpoint=$1; shift; else refuse "$@"; fi ;;
+    esac
+  done
+  printf '%s' "$endpoint"
+}
+
+case "${1:-}" in
+  project)
+    case "${2:-}" in
+      view)
+        printf '{"id":"PVT_vmtest_standin","number":%s,"title":"AutoController vmtest","url":"https://github.com/orgs/%s/projects/%s"}\n' "$PROJECT" "$OWNER" "$PROJECT"
+        exit 0 ;;
+      field-list)
+        printf '%s\n' '{"fields":[{"id":"PVTSSF_vmtest_status","name":"Status","options":[{"id":"opt_backlog","name":"Backlog"},{"id":"opt_todo","name":"Todo"},{"id":"opt_inprogress","name":"In progress"},{"id":"opt_done","name":"Done"}]}],"totalCount":1}'
+        exit 0 ;;
+      item-list)
+        printf '%s\n' '{"items":[],"totalCount":0}'
+        exit 0 ;;
+    esac
+    refuse "$@" ;;
+  api)
+    endpoint=$(api_endpoint "$@")
+    case "$endpoint" in
+      "repos/${OWNER}/${REPO}/pulls?state=open&per_page=100"|\
+      "repos/${OWNER}/${REPO}/releases?per_page=100"|\
+      "repos/${OWNER}/${REPO}/issues?state=open&per_page=100")
+        # --paginate --slurp: an array of pages, here one empty page.
+        printf '%s\n' '[[]]'; exit 0 ;;
+      "repos/${OWNER}/${REPO}/branches/main")
+        refuse "$@" ;;
+    esac
+    refuse "$@" ;;
+esac
+refuse "$@"

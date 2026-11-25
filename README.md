@@ -63,7 +63,7 @@ bash scripts/check-syntax.sh  # same checks without mise
 bash scripts/offline-tests.sh
 ```
 
-The tests use a simulated GitHub/OpenCode/Engram backend, an isolated temporary `HOME`, no tokens and blocking shims for `gh`, `opencode`, `systemctl`, `loginctl`, `sudo`, `curl` and `engram`; they spend no AI tokens and never write to GitHub. The `required` GitHub check runs them on clean Debian 12/13 and Ubuntu 24.04/26.04 containers (OS/Python compatibility, not a systemd VM test). See [validation and limitations](docs/VALIDATION.md) for what still requires live VM/GitHub acceptance before a public release.
+The tests use a simulated GitHub/OpenCode/Engram backend, an isolated temporary `HOME`, no tokens and blocking shims for `gh`, `opencode`, `systemctl`, `loginctl`, `sudo`, `curl` and `engram`; they spend no AI tokens and never write to GitHub. The `required` GitHub check runs them on clean Debian 12/13 and Ubuntu 24.04/26.04 containers (OS/Python compatibility, not a systemd VM test). A separate scheduled/manual VM suite (`vmtest/`, see [docs/VM_TESTING.md](docs/VM_TESTING.md)) boots disposable pinned cloud images in QEMU to exercise real systemd, lingering and reboot; it runs on a disposable VM only, never on a production host. See [validation and limitations](docs/VALIDATION.md) for what still requires live VM/GitHub acceptance before a public release.
 
 ## License
 

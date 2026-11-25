@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# VM stand-in for OpenCode V2. Deterministic; no model calls, no network.
+# Every invocation is appended to ~/.local/state/vmtest/opencode-calls.log.
+set -euo pipefail
+umask 077
+log_dir="${HOME}/.local/state/vmtest"
+mkdir -p -- "$log_dir"
+printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$log_dir/opencode-calls.log"
+
+if [[ ${1:-} == api && ${2:-} == GET && ${3:-} == /api/info ]]; then
+  printf '%s\n' '{"data":{"version":"2.0.0-vmtest-standin"}}'
+  exit 0
+fi
+if [[ ${1:-} == api && ${2:-} == GET && ${3:-} =~ ^/api/agent/(orchestrator|fixer|oracle)$ ]]; then
+  role=${BASH_REMATCH[1]}
+  printf '{"data":{"name":"%s","standin":true}}\n' "$role"
+  exit 0
+fi
+echo "vmtest opencode stand-in: refusing '$*' (no model calls in the VM harness)" >&2
+exit 3

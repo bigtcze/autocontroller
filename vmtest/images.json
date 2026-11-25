@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "arch": "amd64",
+  "images": {
+    "debian-12": {
+      "url": "https://cloud.debian.org/images/cloud/bookworm/20261117-2665/debian-12-genericcloud-amd64-20261117-2665.qcow2",
+      "algorithm": "sha512",
+      "digest": "946b917a37882f16e5b3b0b2cbe5744637d0cd36190b5b53cbb21d14a54557d5b45e9e523021b8f52c1707dbe470489f3515458e0680ded76ee2574b4a8daf1b",
+      "format": "qcow2",
+      "os_release": {"ID": "debian", "VERSION_ID": "12"}
+    },
+    "debian-13": {
+      "url": "https://cloud.debian.org/images/cloud/trixie/20261123-2671/debian-13-genericcloud-amd64-20261123-2671.qcow2",
+      "algorithm": "sha512",
+      "digest": "76488ba3bea2349cc595fedad7748b8ba98d6b36da398eaf2bbbae3db896ba1017d4ff41cd277926784cef2c1c11145a0d600f9b4afde9b8f174d698db0cda03",
+      "format": "qcow2",
+      "os_release": {"ID": "debian", "VERSION_ID": "13"}
+    },
+    "ubuntu-24.04": {
+      "url": "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img",
+      "algorithm": "sha256",
+      "digest": "04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94",
+      "format": "qcow2",
+      "os_release": {"ID": "ubuntu", "VERSION_ID": "24.04"}
+    },
+    "ubuntu-26.04": {
+      "url": "https://cloud-images.ubuntu.com/releases/resolute/release-20261108/ubuntu-26.04-server-cloudimg-amd64.img",
+      "algorithm": "sha256",
+      "digest": "7b90593f5532b49b7e3fe3d2743f0d1f0d822e5b07cebcd8e00c0df8069ecab9",
+      "format": "qcow2",
+      "os_release": {"ID": "ubuntu", "VERSION_ID": "26.04"}
+    }
+  }
+}

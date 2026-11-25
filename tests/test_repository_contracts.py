@@ -143,6 +143,96 @@ class RepositoryContractTests(unittest.TestCase):
                 self.assertRegex(path.read_text(encoding='utf-8'),
                                  r'(?m)^permissions:\n  contents: read$')
 
+    def test_vm_lifecycle_triggers_are_schedule_and_manual_only(self):
+        text = workflow_text('vm-lifecycle.yml')
+        self.assertRegex(text, r'(?m)^on:\n  schedule:\n    - cron: ')
+        self.assertIn('  workflow_dispatch:', text)
+        for trigger in ('pull_request', 'push:', 'pull_request_target', 'workflow_call', 'release'):
+            with self.subTest(trigger=trigger):
+                self.assertNotIn(trigger, text.split('permissions:', 1)[0].split('on:', 1)[1])
+
+    def test_vm_lifecycle_has_no_secrets(self):
+        self.assertNotIn('secrets.', workflow_text('vm-lifecycle.yml'))
+
+    def test_vm_lifecycle_every_job_has_a_timeout(self):
+        text = workflow_text('vm-lifecycle.yml')
+        jobs = re.findall(r'(?m)^  ([A-Za-z0-9_-]+):\n(?=    )', text.split('\njobs:\n', 1)[1])
+        self.assertEqual(jobs, ['plan', 'vm'])
+        for job in jobs:
+            with self.subTest(job=job):
+                block = job_block(text, job)
+                self.assertRegex(block, r'(?m)^    timeout-minutes: (\d+)$')
+                minutes = int(re.search(r'(?m)^    timeout-minutes: (\d+)$', block).group(1))
+                self.assertLessEqual(minutes, 150)
+
+    def test_vm_lifecycle_uploads_artifacts_always(self):
+        block = job_block(workflow_text('vm-lifecycle.yml'), 'vm')
+        self.assertRegex(block, r'uses: actions/upload-artifact@[0-9a-f]{40} # v\d')
+        # Split the job into steps at each `      - ` header; the upload step must carry if: always().
+        steps = re.split(r'(?m)^(?=      - )', block)
+        upload = [s for s in steps if 'upload-artifact@' in s]
+        self.assertEqual(len(upload), 1, 'exactly one upload-artifact step expected')
+        self.assertIn('        if: always()', upload[0])
+        retention = re.search(r'retention-days: (\d+)', block)
+        self.assertIsNotNone(retention, 'artifact retention missing')
+        self.assertLessEqual(int(retention.group(1)), 14)
+
+    def test_vm_lifecycle_matrix_covers_all_four_distros(self):
+        text = workflow_text('vm-lifecycle.yml')
+        block = job_block(text, 'vm')
+        self.assertIn('fail-fast: false', block)
+        self.assertIn('fromJSON(needs.plan.outputs.matrix)', block)
+        plan = job_block(text, 'plan')
+        listed = re.search(r"matrix='\[([^\]]+)\]'", plan)
+        self.assertIsNotNone(listed, 'plan job does not list the distro matrix')
+        self.assertEqual(sorted(x.strip().strip('"') for x in listed.group(1).split(',')),
+                         ['debian-12', 'debian-13', 'ubuntu-24.04', 'ubuntu-26.04'])
+
+    def test_vm_lifecycle_run_step_passes_matrix_and_paths_through_env(self):
+        # Interpolating ${{ }} inside run: is a script-injection shape; values go through env:.
+        block = job_block(workflow_text('vm-lifecycle.yml'), 'vm')
+        run_step = re.search(r'(?ms)^      - name: Run lifecycle scenario\n(.*?)(?=^      - name: |\Z)', block)
+        self.assertIsNotNone(run_step, 'run lifecycle scenario step missing')
+        body = run_step.group(1)
+        env_part, _, run_part = body.partition('        run: |')
+        self.assertIn('DISTRO: ${{ matrix.distro }}', env_part)
+        self.assertNotIn('${{', run_part, 'run: must not interpolate expressions directly')
+        self.assertIn('"$DISTRO"', run_part)
+
+    def test_vm_lifecycle_has_no_job_level_matrix_if(self):
+        # `matrix` is not valid in job-level `if:`; the input must be resolved in the plan job.
+        block = job_block(workflow_text('vm-lifecycle.yml'), 'vm')
+        for line in block.splitlines():
+            if line.startswith('    if:'):
+                self.assertNotIn('matrix.', line)
+
+    def test_vm_lifecycle_checkout_is_pinned_without_persisted_credentials(self):
+        block = job_block(workflow_text('vm-lifecycle.yml'), 'vm')
+        self.assertIn('actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7', block)
+        self.assertIn('persist-credentials: false', block)
+
+    def test_vm_lifecycle_concurrency_never_cancels_a_running_vm(self):
+        text = workflow_text('vm-lifecycle.yml')
+        self.assertRegex(text, r'(?m)^  cancel-in-progress: false$')
+
+    def test_vm_lifecycle_is_not_a_required_gate(self):
+        for name in ('required.yml', 'regression.yml', 'release.yml'):
+            with self.subTest(workflow=name):
+                self.assertNotIn('vm-lifecycle', workflow_text(name))
+
+    def test_vm_lifecycle_runs_the_harness_with_auto_accel(self):
+        block = job_block(workflow_text('vm-lifecycle.yml'), 'vm')
+        self.assertIn('python3 -m vmtest.harness run', block)
+        self.assertIn('--accel auto', block)
+
+    def test_check_syntax_covers_vm_stand_ins_and_manifest(self):
+        text = (ROOT / 'scripts' / 'check-syntax.sh').read_text(encoding='utf-8')
+        self.assertIn('vmtest/guest/gh', text)
+        self.assertIn('vmtest/guest/opencode', text)
+        self.assertIn('vmtest/images.json', text)
+        # Python is byte-compiled from git ls-files, so vmtest/*.py and guest helpers are included.
+        self.assertIn("git ls-files --cached --others --exclude-standard -- '*.py'", text)
+
     def test_no_personal_paths_in_tracked_text(self):
         for path in tracked_like_files():
             text = read_text(path)
