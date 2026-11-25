@@ -1,0 +1,10 @@
+/config.json
+/state/
+/onboarding.lock
+__pycache__/
+.pytest_cache/
+*.pyc
+*.log
+.env
+.env.*
+*.zip

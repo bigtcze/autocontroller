@@ -1,0 +1,22 @@
+[Unit]
+Description=Autonomous multi-project OpenCode controller
+After=network-online.target opencode-v2.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/scripts/autocontroller
+ExecStart=%h/scripts/autocontroller/autonomy-controller.py --config %h/scripts/autocontroller/config.json
+Restart=on-failure
+RestartSec=120
+TimeoutStopSec=90
+KillMode=control-group
+RuntimeDirectory=autocontroller-memory
+RuntimeDirectoryMode=0700
+UMask=0077
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=%h/.local/bin:%h/.opencode/bin:/usr/local/bin:/usr/bin:/bin
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

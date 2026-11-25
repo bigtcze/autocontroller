@@ -1,0 +1,37 @@
+# AutoController Golden Standard v1
+
+This is a repository-independent engineering baseline. Derive project-specific content from actual code, existing documentation, GitHub issues, established public interfaces, and genuine verification. Existing owner-authorized requirements win over generic defaults. Never invent features, product requirements, toolchains, supported platforms, or results. Do not turn this document into a second backlog or a controller configuration.
+
+## Governance and product contracts
+
+Create or reconcile the following documents; preserve stronger existing requirements. All documents must describe the actual repository and actionable, enduring requirements (not ticket history or aspirational features represented as complete).
+
+- `AGENTS.md`: concise entry point; reading map for the authoritative contracts; concrete commands for local verification and release; ordinary runtime-independent coding guidance. No agent assignments, scheduler instructions or release calendar.
+- `.agents/CHARTER.md`: purpose, audience, fundamental invariants, boundaries and ownership of product decisions.
+- `.agents/PRODUCT_SCOPE.md`: implemented and authorized scope, non-goals, explicit unknowns and compatibility obligations.
+- `.agents/ARCHITECTURE.md`: real components, interfaces, data flows, storage, deployment, trust boundaries and architectural constraints.
+- `.agents/GUARDRAILS.md`: reviewable PRs, no force push or bypass, preserve unrelated user work, no secrets or unauthorized product changes, no fabricated evidence, no weakening quality gates. Changes to product/security/engineering contracts require an explicit owner-authorized issue; preserve existing lock manifests and update them only within that authorization.
+- `.agents/SECURITY.md`: threat model relevant to this application, least privilege, secrets, safe inputs, dependencies, sensitive data, supply-chain controls, vulnerability reporting; do not change remote settings or grant permissions without authorization.
+- `.agents/CODE_QUALITY.md`: idiomatic language-specific implementation, reuse, clear boundaries, error handling, static analysis, compatibility, maintainability.
+- `.agents/TEST_STRATEGY.md`: reproducible commands; unit, integration and real E2E where applicable; deterministic isolated fixtures, regression tests that fail before the fix, negative/security cases, full-suite acceptance. No paid external services or production credentials in tests; no false success or silent skipping. Identify inherited gaps explicitly.
+- `.agents/DOCUMENTATION.md`: maintain accurate README, user and developer instructions, examples, configuration and compatibility. Document actual functionality and known limitations.
+- `.agents/DEFINITION_OF_DONE.md`: acceptance criteria, tests, independent review, green PR and merged-base CI, documentation and relevant compatibility evidence. An issue is the unit of work, not a separate local task list.
+- `.agents/RELEASE_QUALITY.md`: native tag-triggered release, SemVer, reproducible artifacts if applicable, verified install/upgrade behavior, changelog and release notes. Preserve existing release contract and artifact consumers.
+- Additional contracts only when justified: API, UX, metrics, protocol feasibility, migrations, hardware, privacy, etc. Do not create irrelevant boilerplate. Roadmap is optional product direction, not a task backlog.
+- `.agents/STANDARD_VERSION`: a text file containing only `1`.
+
+## Reproducible tooling and CI
+
+Inspect the existing toolchain before making changes. Create or preserve a supported `mise.toml` (or existing `.mise.toml`/`.mise/config.toml`) that pins appropriate tool versions or derives them from authoritative manifests, and defines real local verification tasks. Keep package-manager lockfiles consistent. Use non-interactive commands. Never run unreviewed untrusted repository tasks with elevated privileges. Do not require Docker unless the product's existing verification or runtime requires it. Report missing host prerequisites honestly. Do not invent a passing check for an empty application: use meaningful repository validation (e.g. lint, contract consistency and build when applicable).
+
+Preserve all existing workflows, checks, branch protection and release consumers. Create or reconcile `.github/workflows/required.yml`, triggered on `pull_request` targeting the actual default branch and on `push` to that branch (no path filters that suppress required runs). Provide a job whose visible check name is exactly `required`. Make it depend on and fail if required verification fails or is skipped unexpectedly; no continue-on-error masking. Use least privilege, trusted actions pinned appropriately, bounded timeouts and genuine tests. Verify PR and resulting default branch independently. The first bootstrap PR must introduce its own genuine gate; it may not merge before that gate passes. Preserve existing required workflow protections, and do not change branch protection settings merely to make a PR mergeable.
+
+Create or reconcile `.github/workflows/release.yml` for native stable SemVer tag-triggered qualification and publication of product-appropriate artifacts and release notes. Do not publish or push tags during bootstrap. Ensure least privilege, actual validation and safe artifact behavior. Preserve existing publishing pipelines; avoid duplicate publication, and if adapting an existing pipeline requires a product decision, report the blocker instead of guessing. Controller-managed feature releases require the configured owner's explicit approval; routine technical patch releases follow existing controller policy.
+
+## Dependencies
+
+Create or reconcile existing Renovate configuration (one authoritative configuration), with `config:recommended` where compatible, `dependencyDashboard: true`, appropriate managers for actual dependencies including GitHub Actions and toolchain where supported. Preserve project-specific settings and schedules. Do not enable blanket automerge that bypasses controller review. The GitHub App must be installed by the repository owner; do not pretend it has been authorized. Include its setup link in delivery notes.
+
+## Delivery
+
+Use the ordinary orchestrator → fixer → independent oracle review workflow. Run meaningful actual verification; distinguish inherited issues and do not fake success. Create a single PR linked to the bootstrap issue. Never close or merge it yourself, never change the controller, never create another backlog, and never start unrelated work. The controller verifies the exact PR commit, then checks the merged default branch. If anything cannot be made safe, leave the PR draft and explain the concrete blocker.

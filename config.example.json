@@ -1,0 +1,14 @@
+{
+  "agent": "orchestrator",
+  "poll_seconds": 300,
+  "post_cycle_seconds": 15,
+  "ci_poll_seconds": 90,
+  "github_cache_seconds": 900,
+  "log_keep_days": 30,
+  "log_keep_count": 200,
+  "log_max_bytes": 2147483648,
+  "cycle_timeout_seconds": 14400,
+  "drain_timeout_seconds": 600,
+  "retry_max_seconds": 14400,
+  "projects": []
+}

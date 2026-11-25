@@ -1,0 +1,222 @@
+"""Deterministic GitHub quality gates; independent review belongs to OMO."""
+from contextlib import ExitStack
+from pathlib import Path
+import importlib.util
+import json
+import tempfile
+import threading
+import unittest
+from unittest.mock import patch
+
+spec=importlib.util.spec_from_file_location('quality_controller',str(Path(__file__).resolve().parents[1]/'autonomy-controller.py'))
+m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+SHA='a'*40
+MERGE='b'*40
+URL='https://github.com/org/demo/issues/11'
+
+class Gates(unittest.TestCase):
+    def setUp(self):
+        tmp=tempfile.TemporaryDirectory();self.addCleanup(tmp.cleanup)
+        root=Path(tmp.name)
+        cfg={'name':'demo','repo':'org/demo','directory':str(root/'checkout'),
+             'project_owner':'org','project_number':1}
+        (root/'checkout').mkdir()
+        self.w=m.ProjectWorker(cfg,{'state_dir':str(root/'state'),'opencode':'oc','wrapper':'wrapper'},
+                               threading.Event(),threading.Lock())
+        self.pr={'number':21,'state':'open','merged_at':None,'draft':False,
+                 'head':{'sha':SHA,'repo':{'full_name':'org/demo'}},
+                 'base':{'ref':'main'},'merge_commit_sha':None}
+        self.item={'number':11,'status':'In Progress','item_id':'item','url':URL}
+        self.agent_calls=[]
+        self.merge_calls=[]
+        self.agent_output=(0,'Orchestrator: fixer completed; oracle reviewed, no blockers')
+
+    def stage(self, phase, **extra):
+        cp={'kind':'issue','number':11,'url':URL,'phase':phase,
+            'pr_number':21,'retry_same_task':True,**extra}
+        self.w.save_checkpoint(cp)
+
+    def patches(self,ci='passed',main='passed'):
+        stack=ExitStack();self.addCleanup(stack.close)
+        stack.enter_context(patch.object(self.w,'related_pr',side_effect=lambda *a:dict(self.pr)))
+        stack.enter_context(patch.object(m,'pr_data',side_effect=lambda *a:dict(self.pr)))
+        def fake_agent(prompt,kind,number,**kw):
+            self.agent_calls.append((prompt,kw))
+            return self.agent_output
+        stack.enter_context(patch.object(self.w,'run_wrapper',side_effect=fake_agent))
+        stack.enter_context(patch.object(m,'pr_ci_state',return_value=ci))
+        stack.enter_context(patch.object(m,'main_ci_state',return_value=main))
+        def fake_command(argv,**kwargs):
+            if argv[:3]==['gh','pr','merge']:
+                self.merge_calls.append(argv)
+                self.pr.update(state='closed',merged_at='2026-11-24T10:00:00Z',merge_commit_sha=MERGE)
+            return ''
+        stack.enter_context(patch.object(m,'command',side_effect=fake_command))
+        stack.enter_context(patch.object(self.w,'checkout_state',return_value=('main',False)))
+        stack.enter_context(patch.object(self.w,'cleanup_checkout'))
+        stack.enter_context(patch.object(self.w.project,'set_status'))
+        stack.enter_context(patch.object(self.w.project,'items',return_value=[self.item]))
+        stack.enter_context(patch.object(m,'issue_state',return_value='closed'))
+        return stack
+
+    def test_full_flow_one_omo_session_and_real_github_gates(self):
+        self.patches()
+        for phase in ('ci','merge','postmerge'):
+            self.w._cycle('issue',11,URL,self.item)
+            self.assertEqual(m.json_read(self.w.cycle_state)['phase'],phase)
+            self.w.project.set_status.assert_not_called()
+        self.w._cycle('issue',11,URL,self.item)
+        self.assertFalse(self.w.cycle_state.exists())
+        self.w.project.set_status.assert_called_once_with(self.item,'Done')
+        self.assertEqual(len(self.agent_calls),1)
+        self.assertIn('native OMO',self.agent_calls[0][0])
+        self.assertIn('`oracle`',self.agent_calls[0][0])
+        self.assertEqual(self.merge_calls[0][-1],SHA)
+        self.assertIn('--match-head-commit',self.merge_calls[0])
+
+    def test_ci_pending_never_spawns_ai_or_merges(self):
+        self.stage('ci');self.patches(ci='pending')
+        self.w._cycle('issue',11,URL,None)
+        self.assertEqual(m.json_read(self.w.cycle_state)['phase'],'ci')
+        self.assertEqual(self.agent_calls,[])
+        self.assertEqual(self.merge_calls,[])
+
+    def test_ci_failed_returns_to_omo_fixer_and_oracle(self):
+        self.stage('ci');self.patches(ci='failed')
+        self.w._cycle('issue',11,URL,None)
+        cp=m.json_read(self.w.cycle_state)
+        self.assertEqual(cp['phase'],'code')
+        self.assertIn('CI failed',cp['review_feedback'])
+        self.assertIn('issue:11',self.w.retry_map())
+        self.assertEqual(self.agent_calls,[])
+
+    def test_exact_head_change_restarts_omo_review(self):
+        self.stage('merge',ready_sha='d'*40);self.patches()
+        self.w._cycle('issue',11,URL,None)
+        cp=m.json_read(self.w.cycle_state)
+        self.assertEqual(cp['phase'],'code')
+        self.assertIn('head changed',cp['review_feedback'])
+        self.assertFalse(self.merge_calls)
+
+    def test_ci_rechecked_before_merge_pending(self):
+        self.stage('merge',ready_sha=SHA);self.patches(ci='pending')
+        self.w._cycle('issue',11,URL,None)
+        self.assertEqual(m.json_read(self.w.cycle_state)['phase'],'ci')
+        self.assertFalse(self.merge_calls)
+
+    def test_ci_rechecked_before_merge_failed(self):
+        self.stage('merge',ready_sha=SHA);self.patches(ci='failed')
+        self.w._cycle('issue',11,URL,None)
+        self.assertEqual(m.json_read(self.w.cycle_state)['phase'],'code')
+        self.assertFalse(self.merge_calls)
+
+    def test_green_main_pending_not_done(self):
+        self.stage('postmerge',ready_sha=SHA,merge_commit=MERGE)
+        self.pr.update(state='closed',merged_at='now',merge_commit_sha=MERGE)
+        self.patches(main='pending')
+        self.w._cycle('issue',11,URL,None)
+        self.assertTrue(self.w.cycle_state.exists())
+        self.w.project.set_status.assert_not_called()
+
+    def test_red_main_enters_protected_repair(self):
+        self.stage('postmerge',ready_sha=SHA,merge_commit=MERGE)
+        self.pr.update(state='closed',merged_at='now',merge_commit_sha=MERGE)
+        self.patches(main='failed')
+        self.w._cycle('issue',11,URL,None)
+        self.assertEqual(m.json_read(self.w.cycle_state)['phase'],'repair')
+        self.w.project.set_status.assert_not_called()
+
+    def test_crash_after_merge_before_persist_recovers_without_remerge(self):
+        self.stage('merge',ready_sha=SHA)
+        self.pr.update(state='closed',merged_at='now',merge_commit_sha=MERGE)
+        self.patches()
+        self.w._cycle('issue',11,URL,None)
+        cp=m.json_read(self.w.cycle_state)
+        self.assertEqual((cp['phase'],cp['merge_commit']),('postmerge',MERGE))
+        self.assertEqual(self.merge_calls,[])
+        self.assertEqual(self.agent_calls,[])
+
+    def test_unexpected_merge_before_ci_gate_is_not_done(self):
+        self.stage('ci')
+        self.pr.update(state='closed',merged_at='now',merge_commit_sha=MERGE)
+        self.patches()
+        with self.assertRaises(m.ControllerError):self.w._cycle('issue',11,URL,None)
+        self.w.project.set_status.assert_not_called()
+
+    def test_code_not_allowed_to_retroactively_accept_merged_pr(self):
+        self.stage('code')
+        self.pr.update(state='closed',merged_at='now',merge_commit_sha=MERGE)
+        self.patches()
+        with self.assertRaises(m.ControllerError):self.w._cycle('issue',11,URL,None)
+
+    def test_draft_pr_after_agent_cannot_enter_ci(self):
+        self.pr['draft']=True
+        self.patches()
+        self.w._cycle('issue',11,URL,None)
+        self.assertEqual(m.json_read(self.w.cycle_state)['phase'],'code')
+        self.assertIn('issue:11',self.w.retry_map())
+        self.assertEqual(self.agent_calls.__len__(),1)
+        self.assertFalse(self.merge_calls)
+
+    def test_draft_pr_in_ci_returns_to_agent(self):
+        self.stage('ci');self.pr['draft']=True;self.patches()
+        self.w._cycle('issue',11,URL,None)
+        self.assertEqual(m.json_read(self.w.cycle_state)['phase'],'code')
+        self.assertFalse(self.merge_calls)
+
+    def test_draft_pr_in_merge_cannot_merge(self):
+        self.stage('merge',ready_sha=SHA);self.pr['draft']=True;self.patches()
+        self.w._cycle('issue',11,URL,None)
+        self.assertEqual(m.json_read(self.w.cycle_state)['phase'],'code')
+        self.assertFalse(self.merge_calls)
+
+    def test_dirty_checkout_returns_to_agent_without_merging(self):
+        self.stage('ci');self.patches()
+        with patch.object(self.w,'checkout_state',return_value=('feature',True)):
+            self.w._cycle('issue',11,URL,None)
+        cp=m.json_read(self.w.cycle_state)
+        self.assertEqual(cp['phase'],'code')
+        self.assertIn('Checkout is dirty',cp['review_feedback'])
+
+    def test_repair_pr_uses_ci_without_standalone_review_phase(self):
+        self.stage('repair',review_feedback='Fix failing main CI')
+        self.pr.update(state='closed',merged_at='now',merge_commit_sha=MERGE)
+        self.patches()
+        repair={'number':22,'state':'open','head':{'sha':SHA},'base':{'ref':'main'}}
+        with patch.object(m,'repair_pr',return_value=repair):
+            self.w._cycle('issue',11,URL,None)
+        cp=m.json_read(self.w.cycle_state)
+        self.assertEqual((cp['phase'],cp['pr_number']),('ci',22))
+        self.assertIn('Autocontroller-Repair-For: #21',self.agent_calls[0][0])
+        self.assertIn('`oracle`',self.agent_calls[0][0])
+
+    def test_old_completed_review_merge_checkpoint_still_recovers(self):
+        self.stage('merge',reviewed_sha=SHA)  # before migration: independent gate was completed
+        self.patches()
+        self.w._cycle('issue',11,URL,None)
+        self.assertEqual(m.json_read(self.w.cycle_state)['phase'],'postmerge')
+
+    def test_closed_unmerged_renovate_not_false_positive(self):
+        self.pr.update(state='closed',merged_at=None)
+        self.patches()
+        with patch.object(self.w,'related_pr',side_effect=lambda *a:dict(self.pr)):
+            self.w._cycle('renovate',21,'https://github.com/org/demo/pull/21',None)
+        self.assertFalse(self.w.cycle_state.exists())
+
+    def test_terminal_project_status_is_not_candidate(self):
+        self.assertIn('done',m.TERMINAL_PROJECT_STATUSES)
+        self.assertIn('completed',m.TERMINAL_PROJECT_STATUSES)
+
+    def test_required_aggregate_check_cannot_be_substituted(self):
+        class Result:
+            returncode=0;stderr='';stdout=''
+        def run(rows):
+            p=Result();p.stdout=json.dumps(rows);return p
+        with patch.object(m.subprocess,'run',return_value=run([{'name':'other','bucket':'pass'}])):
+            self.assertEqual(m.pr_ci_state('org/demo',21),'pending')
+        with patch.object(m.subprocess,'run',return_value=run([{'name':'required','bucket':'pass'},{'name':'lint','bucket':'fail'}])):
+            self.assertEqual(m.pr_ci_state('org/demo',21),'failed')
+        with patch.object(m.subprocess,'run',return_value=run([{'name':'required','bucket':'pass'},{'name':'lint','bucket':'pass'}])):
+            self.assertEqual(m.pr_ci_state('org/demo',21),'passed')
+
+if __name__=='__main__':unittest.main()
