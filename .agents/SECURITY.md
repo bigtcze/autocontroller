@@ -37,9 +37,9 @@ repositories. Relevant threats:
 - Runtime files 0600/0700, `UMask=0077`, `NoNewPrivileges=true`; the memory
   socket directory must be private; Engram downloads are checksum-verified and
   size-bounded.
-- The offline suite and PR/push CI are offline: no tokens, no network, no
-  `gh`/`opencode`/`systemctl`, isolated `HOME`. Live acceptance is governed
-  separately (see the scope rule in `.agents/TEST_STRATEGY.md`).
+- The regression suite (locally and in PR/push CI) runs offline: no tokens, no
+  network, no `gh`/`opencode`/`systemctl`, isolated `HOME`. Other test paths:
+  see the scope rule in `.agents/TEST_STRATEGY.md`.
 
 ## Known limitations
 
