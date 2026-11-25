@@ -43,9 +43,47 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(item['status'],'Development Queue')
 
     def test_renovate_login(self):
-        self.assertTrue(m.is_renovate({"user":{"login":"renovate[bot]"}}))
-        self.assertTrue(m.is_renovate({"head":{"ref":"renovate/go-something"}}))
-        self.assertFalse(m.is_renovate({"user":{"login":"dependabot[bot]"}}))
+        repo="example-owner/example-project"
+        same_repo={"head":{"ref":"renovate/go-something","repo":{"full_name":repo}},
+                   "base":{"ref":"main","repo":{"full_name":repo}}}
+        bot={"login":"renovate[bot]","type":"Bot","id":29139614}
+        self.assertTrue(m.is_renovate({"user":bot,**same_repo},repo))
+        self.assertFalse(m.is_renovate({"user":{"login":"dependabot[bot]","type":"Bot","id":1},**same_repo},repo))
+        # Branch prefix alone is never identity.
+        self.assertFalse(m.is_renovate({"head":{"ref":"renovate/go-something"}},repo))
+
+    def test_renovate_identity_rejects_impersonation(self):
+        repo="example-owner/example-project"
+        same_repo={"head":{"ref":"renovate/pkg","repo":{"full_name":repo}},
+                   "base":{"ref":"main","repo":{"full_name":repo}}}
+        for user in ({"login":"renovate","type":"User","id":5},             # human account named renovate
+                     {"login":"renovate[bot]","type":"User","id":29139614}, # bot login, wrong type
+                     {"login":"renovate[bot]","type":"Bot","id":1234},      # bot login, wrong id
+                     {"login":"app/renovate","type":"Bot","id":29139614},   # no GraphQL author path
+                     {"login":"renovate[bot]"}):                            # missing type/id
+            with self.subTest(user=user):
+                self.assertFalse(m.is_renovate({"user":user,**same_repo},repo))
+                self.assertFalse(m.releases.renovate_pr({"user":user,**same_repo}))
+        self.assertTrue(m.is_renovate({"user":{"login":"Renovate[bot]","type":"Bot","id":29139614},**same_repo},repo))
+
+    def test_fork_renovate_pr_from_genuine_bot_rejected(self):
+        repo="example-owner/example-project"
+        fork={"user":{"login":"renovate[bot]","type":"Bot","id":29139614},
+              "head":{"ref":"renovate/pkg","repo":{"full_name":"attacker/example-project"}},
+              "base":{"ref":"main","repo":{"full_name":repo}}}
+        self.assertFalse(m.is_renovate(fork,repo))
+        self.assertFalse(m.releases.renovate_pr(fork))
+
+    def test_missing_head_repository_rejected(self):
+        repo="example-owner/example-project"
+        bot={"login":"renovate[bot]","type":"Bot","id":29139614}
+        no_head={"user":bot,"head":{"ref":"renovate/pkg","repo":None},"base":{"ref":"main","repo":{"full_name":repo}}}
+        self.assertFalse(m.is_renovate(no_head,repo))
+        self.assertFalse(m.is_renovate({"user":bot,"head":{"ref":"renovate/pkg"}},repo))
+
+    def test_renovate_issue_filter_uses_identity_not_login_text(self):
+        self.assertTrue(m.releases.is_renovate_identity({"login":"renovate[bot]","type":"Bot","id":29139614}))
+        self.assertFalse(m.releases.is_renovate_identity({"login":"renovate","type":"User","id":29139614}))
     def test_rate_limit_classification(self):
         self.assertTrue(m.QUOTA_ERROR.search("HTTP 429 rate limit exceeded"))
         self.assertFalse(m.QUOTA_ERROR.search("Agent not found: orchestrator"))

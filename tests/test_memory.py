@@ -120,7 +120,15 @@ class SocketDirectoryTests(unittest.TestCase):
 
 class RuntimeTests(unittest.TestCase):
     def setUp(self):
-        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.r=m.Runtime(Path(self.tmp.name))
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+        # Never touch the real /run/user/<uid> socket: it may belong to the
+        # production Engram. Use a private 0700 directory instead.
+        self.sock_dir=Path(tempfile.mkdtemp(prefix='engram-test-'));self.sock_dir.chmod(0o700)
+        self.addCleanup(lambda:__import__('shutil').rmtree(self.sock_dir,ignore_errors=True))
+        self.sock_patch=patch.object(m,'socket_path',return_value=self.sock_dir/'engram.sock')
+        self.sock_patch.start();self.addCleanup(self.sock_patch.stop)
+        self.r=m.Runtime(Path(self.tmp.name))
+        self.assertNotIn('/run/user',str(self.r.sock))
         self.addCleanup(self.r.close)
     def old(self):
         p=self.r.root/'gen-0123456789abcdef';p.mkdir();(p/'engram').write_text('old');(p/'data').mkdir()

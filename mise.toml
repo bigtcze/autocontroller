@@ -1,0 +1,18 @@
+# Local and CI entry points. Everything here is offline.
+#
+# Python is deliberately NOT pinned by mise: the product targets the
+# distribution python3 (>= 3.11) that the supported OS images provide, and the
+# offline runner refuses anything older. Do not add a [tools] python entry.
+min_version = "2026.1.0"
+
+[tasks.syntax]
+description = "Byte-compile, shell-syntax and JSON checks"
+run = "bash scripts/check-syntax.sh"
+
+[tasks.test]
+description = "Full offline regression suite in an isolated HOME with blocking shims"
+run = "bash scripts/offline-tests.sh"
+
+[tasks.ci]
+description = "Everything the required PR check runs"
+depends = ["syntax", "test"]

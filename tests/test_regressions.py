@@ -16,6 +16,14 @@ m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 def issue(n,status='Backlog'):
     return {'number':n,'status':status,'item_id':f'pvti-{n}','title':'test','url':f'https://github.com/own/repo/issues/{n}'}
 
+# Realistic live REST shape of a genuine same-repository Renovate PR.
+RENOVATE_BOT={'login':'renovate[bot]','type':'Bot','id':29139614}
+def renovate_pr(number,**kw):
+    pr={'number':number,'state':'open','merged_at':None,'draft':False,'user':RENOVATE_BOT,
+        'head':{'ref':f'renovate/pkg-{number}','repo':{'full_name':'own/repo'}},
+        'base':{'ref':'main','repo':{'full_name':'own/repo'}}}
+    pr.update(kw);return pr
+
 
 class Regressions(unittest.TestCase):
     def setUp(self):
@@ -106,7 +114,7 @@ class Regressions(unittest.TestCase):
             with self.assertRaises(m.ControllerError):m.pull_request_state('own/repo',7)
 
     def test_closed_unmerged_pr_is_dismissed_not_successfully_merged(self):
-        pr={'number':8,'state':'closed','merged_at':None,'base':{'ref':'main'}}
+        pr=renovate_pr(8,state='closed')
         with patch.object(self.w,'related_pr',return_value=pr),patch.object(self.w,'run_wrapper') as run, \
              patch.object(self.w,'quota_clear') as clear,self.assertLogs('autonomous-dev',level='INFO') as logs:
             self.w._cycle('renovate',8,'https://github.com/own/repo/pull/8',None)
@@ -115,7 +123,7 @@ class Regressions(unittest.TestCase):
         run.assert_not_called();clear.assert_not_called()
 
     def test_open_pr_proceeds_to_review_but_not_done(self):
-        pr={'number':8,'state':'open','merged_at':None,'base':{'ref':'main'}}
+        pr=renovate_pr(8)
         with patch.object(self.w,'related_pr',return_value=pr),patch.object(self.w,'run_wrapper',return_value=(0,'')), \
              patch.object(self.w,'quota_clear') as clear:
             self.w._cycle('renovate',8,'https://github.com/own/repo/pull/8',None)
@@ -123,8 +131,7 @@ class Regressions(unittest.TestCase):
         clear.assert_called_once()
 
     def test_dirty_checkout_after_verified_merge_prevents_done(self):
-        pr={'number':8,'state':'closed','merged_at':'2026-11-24T10:00:00Z',
-            'merge_commit_sha':'b'*40,'base':{'ref':'main'}}
+        pr=renovate_pr(8,state='closed',merged_at='2026-11-24T10:00:00Z',merge_commit_sha='b'*40)
         m.json_atomic(self.w.cycle_state,{'kind':'renovate','number':8,'url':'https://github.com/own/repo/pull/8',
                                           'phase':'postmerge','pr_number':8,'merge_commit':'b'*40,'reviewed_sha':'a'*40})
         (self.repo/'temp.txt').write_text('uncommitted')
@@ -137,7 +144,7 @@ class Regressions(unittest.TestCase):
 
     def test_nonquota_error_preserves_pending_and_defers_retry(self):
         m.json_atomic(self.w.pending,{'status':'resuming','session_id':'ses-test'})
-        with patch.object(self.w,'related_pr',return_value={'number':5,'state':'open','merged_at':None,'base':{'ref':'main'}}),patch.object(self.w,'run_wrapper',return_value=(78,'Agent not found: orchestrator')),patch.object(self.w,'quota_pause') as quota:
+        with patch.object(self.w,'related_pr',return_value=renovate_pr(5)),patch.object(self.w,'run_wrapper',return_value=(78,'Agent not found: orchestrator')),patch.object(self.w,'quota_pause') as quota:
             self.w._cycle('renovate',5,'https://github.com/own/repo/pull/5',None)
             self.assertTrue(self.w.pending.exists())
             self.assertGreater(self.w.retry_map()['renovate:5']['until'],time.time()+500)

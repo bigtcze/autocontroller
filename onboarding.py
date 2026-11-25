@@ -14,6 +14,7 @@ import sys
 import fcntl
 
 from bootstrap_policy import VERSION
+import release_policy as releases
 
 ROOT = Path(__file__).resolve().parent
 CONFIG = ROOT/'config.json'
@@ -178,11 +179,20 @@ def find_or_create_bootstrap(repo, number):
     return int(i['number'])
 
 
+TRUSTED_ASSOCIATIONS={'OWNER','MEMBER','COLLABORATOR'}
+
+
 def import_issues(project):
+    """Import only issues written by trusted repository members.
+
+    Public repositories accept issues from anyone; an outsider's issue must never
+    be auto-scheduled. Missing or unknown author_association fails closed.
+    """
     seen={i['number'] for i in project.items()}
     issues=c.gh_api_pages(f'repos/{project.repo}/issues?state=open&per_page=100',max_items=10000)
     for issue in issues:
-        if issue.get('pull_request') or issue['number'] in seen or c.is_renovate(issue): continue
+        if issue.get('pull_request') or issue['number'] in seen or releases.is_renovate_identity(issue.get('user')): continue
+        if str(issue.get('author_association') or '').upper() not in TRUSTED_ASSOCIATIONS: continue
         run('gh','project','item-add',str(project.number),'--owner',project.owner,'--url',issue['html_url'])
 
 

@@ -17,9 +17,16 @@ OLD='b'*40
 NOW=datetime(2026,11,24,14,0,tzinfo=timezone.utc)
 PREV={'tag_name':'v1.2.4','published_at':'2026-11-01T14:00:00Z'}
 
+RENOVATE_BOT={'login':'renovate[bot]','type':'Bot','id':29139614}
+REPO='org/repo'
+
 def pr(n, user='renovate[bot]', labels=None, merged='2026-11-15T00:00:00Z'):
-    return {'number':n,'user':{'login':user},'head':{'ref':f'renovate/pkg-{n}' if user=='renovate[bot]' else f'feature/{n}'},
-            'merged_at':merged,'base':{'ref':'main'},'labels':[{'name':x} for x in labels or []]}
+    """Live-shaped merged PR: genuine Renovate bot user is the only Renovate identity."""
+    account=RENOVATE_BOT if user=='renovate[bot]' else {'login':user,'type':'User','id':1000+n}
+    branch=f'renovate/pkg-{n}' if user=='renovate[bot]' else f'feature/{n}'
+    return {'number':n,'user':account,'head':{'ref':branch,'repo':{'full_name':REPO}},
+            'merged_at':merged,'base':{'ref':'main','repo':{'full_name':REPO}},
+            'labels':[{'name':x} for x in labels or []]}
 
 
 class ReleasePolicyTests(unittest.TestCase):
@@ -76,6 +83,30 @@ class ReleasePolicyTests(unittest.TestCase):
         with self.assertRaises(ValueError):rp.merged_since('org/repo','main',PREV['published_at'],lambda *x:{'total_count':120,'items':[]},None)
     def test_no_previous_release_never_auto_patch(self):
         self.assertFalse(rp.maintenance_due(None,NOW,[pr(1),pr(2),pr(3)]))
+    def test_branch_prefix_alone_does_not_count_as_renovate(self):
+        spoofed=[{'number':n,'user':{'login':'attacker','type':'User','id':7},
+                  'head':{'ref':f'renovate/pkg-{n}','repo':{'full_name':REPO}},
+                  'base':{'ref':'main','repo':{'full_name':REPO}},'merged_at':'2026-11-15T00:00:00Z','labels':[]} for n in (1,2,3)]
+        self.assertFalse(any(rp.renovate_pr(p) for p in spoofed))
+        self.assertFalse(any(rp.technical_pr(p) for p in spoofed))
+        self.assertFalse(rp.maintenance_due(PREV,NOW,spoofed))
+    def test_human_login_renovate_is_not_renovate(self):
+        p=pr(9,user='renovate'); p['user']={'login':'renovate','type':'User','id':42}
+        self.assertFalse(rp.renovate_pr(p))
+        self.assertFalse(rp.technical_pr(p))
+    def test_fork_renovate_pr_not_counted_for_maintenance(self):
+        forks=[dict(pr(n),head={'ref':f'renovate/pkg-{n}','repo':{'full_name':'attacker/repo'}}) for n in (1,2,3)]
+        self.assertFalse(any(rp.renovate_pr(p) for p in forks))
+        self.assertFalse(rp.maintenance_due(PREV,NOW,forks))
+    def test_technical_label_still_allows_maintenance_from_maintainer_pr(self):
+        self.assertTrue(rp.technical_pr(pr(6,'example-owner',['dependencies'])))
+    def test_missing_head_repo_renovate_not_counted(self):
+        p=pr(4); p['head']={'ref':'renovate/pkg-4','repo':None}
+        self.assertFalse(rp.renovate_pr(p))
+        self.assertFalse(rp.same_repository_pr(p,REPO))
+    def test_genuine_same_repo_renovate_counted(self):
+        self.assertTrue(rp.renovate_pr(pr(7)))
+        self.assertTrue(rp.same_repository_pr(pr(7),'ORG/REPO'))
 
 
 class ControllerReleaseTests(unittest.TestCase):

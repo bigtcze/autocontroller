@@ -1,0 +1,69 @@
+# Reusable regression gate. Called by required.yml (PR/main) and release.yml
+# (before publication). Holds no secrets and needs only read access.
+#
+# Clean distribution containers prove OS/Python compatibility only. They do NOT
+# prove systemd, lingering, APT installation of the controller, reboot survival
+# or live GitHub/OpenCode behaviour; those are covered by the live acceptance in
+# docs/VALIDATION.md.
+name: regression
+on:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  syntax:
+    name: syntax
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Syntax checks
+        run: bash scripts/check-syntax.sh
+
+  distro:
+    name: distro (${{ matrix.image }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [debian:12, debian:13, ubuntu:24.04, ubuntu:26.04]
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - name: Install minimal prerequisites (root, distribution python3)
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git python3 ca-certificates
+          useradd --create-home --shell /bin/bash tester
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Make checkout readable by the unprivileged user
+        run: |
+          cp -a "$GITHUB_WORKSPACE" /src
+          chown -R tester:tester /src
+      - name: Report runtime
+        run: |
+          python3 --version
+          cat /etc/os-release
+      - name: Offline regression suite as unprivileged user
+        run: runuser -u tester -- bash /src/scripts/offline-tests.sh
+
+  mise:
+    name: mise ci
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db # v3
+        with:
+          install: false
+      - name: mise run ci
+        run: mise run ci

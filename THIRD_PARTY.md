@@ -1,3 +1,41 @@
 # Third-party provenance
 
-The packaged `skills/github-release/SKILL.md` is an adapted skill with its upstream source recorded in the file: https://github.com/github/awesome-copilot/tree/main/skills/github-release . Review the upstream license and include the applicable notice before a public distribution. Engram, OpenCode, OMO Slim, GitHub CLI and mise are external dependencies, not vendored binaries. This staging package does not select an open-source license for AutoController itself.
+AutoController itself is licensed under the MIT License (see `LICENSE`).
+
+## Adapted material
+
+### `skills/github-release/SKILL.md`
+
+Adapted from the `github-release` skill in
+[github/awesome-copilot](https://github.com/github/awesome-copilot/tree/main/skills/github-release),
+licensed under the MIT License:
+
+```
+MIT License
+
+Copyright GitHub, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## External dependencies (not vendored)
+
+Engram, OpenCode, OMO Slim, GitHub CLI and mise are installed separately and
+are governed by their own licenses. No third-party binaries are included in
+this repository.

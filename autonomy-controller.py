@@ -36,7 +36,6 @@ INSTALL_ROOT = DEFAULT_HOME / "scripts/autocontroller"
 DEFAULT_STATE = INSTALL_ROOT / "state"
 ISSUE_URL = re.compile(r"^https://github\.com/([^/]+)/([^/]+)/issues/(\d+)(?:$|[?#])")
 PR_URL = re.compile(r"^https://github\.com/([^/]+)/([^/]+)/pull/(\d+)(?:$|[?#])")
-RENOVATE_LOGINS = {"renovate[bot]", "app/renovate", "renovate"}
 QUOTA_ERROR = re.compile(r"(?:\b429\b|quota(?:\s|_)*(?:exhausted|exceeded|reached)|usage limit|too many requests|rate.?limit exceeded)", re.I)
 SHARED_QUOTA_FILE = "ai-cooldown.json"
 
@@ -118,11 +117,13 @@ def normalize_project_item(obj: dict, repo: str) -> dict | None:
             "priority":str(obj.get("priority") or obj.get("Priority") or "")}
 
 
-def is_renovate(pr: dict) -> bool:
-    user = pr.get("user") or {}
-    login = str(user.get("login") or "").lower()
-    branch = str((pr.get("head") or {}).get("ref") or "").lower()
-    return login in RENOVATE_LOGINS or branch.startswith("renovate/")
+def is_renovate(pr: dict, repo: str) -> bool:
+    """Verified Renovate PR of this repository: genuine bot identity AND same-repository head.
+
+    Branch names, logins and labels are untrusted text; they never establish identity.
+    """
+    return (releases.is_renovate_identity(pr.get("user"))
+            and releases.same_repository_pr(pr, repo))
 
 
 # Only objective project membership and terminal state are scheduler concerns.
@@ -254,7 +255,7 @@ def blockers_of(repo:str,number:int)->list[dict]:
 
 
 def renovate_prs(repo:str)->list[dict]:
-    return sorted((p for p in gh_api_pages(f"repos/{repo}/pulls?state=open&per_page=100") if is_renovate(p)),
+    return sorted((p for p in gh_api_pages(f"repos/{repo}/pulls?state=open&per_page=100") if is_renovate(p, repo)),
                   key=lambda p:(p.get("created_at") or "",p["number"]))
 
 
@@ -286,7 +287,7 @@ def linked_issue_pr(repo: str, number: int) -> dict | None:
     query = """query($owner:String!,$repo:String!,$number:Int!){
       repository(owner:$owner,name:$repo){issue(number:$number){
         closedByPullRequestsReferences(first:100,includeClosedPrs:true){
-          nodes{number url state headRefOid baseRefName mergeCommit{oid}}
+          nodes{number url state headRefOid baseRefName isCrossRepository headRepository{nameWithOwner} mergeCommit{oid}}
           pageInfo{hasNextPage}}}}}"""
     payload = gh_json("api", "graphql", "-f", f"query={query}",
                       "-F", f"owner={owner}", "-F", f"repo={name}",
@@ -303,6 +304,17 @@ def linked_issue_pr(repo: str, number: int) -> dict | None:
     if not isinstance(candidates, list):
         raise ControllerError("Malformed GitHub issue PR linkage")
     candidates = [p for p in candidates if p and p.get("baseRefName")]
+    # An outsider's fork PR may carry a closing reference too. Ignore it BEFORE
+    # the ambiguity/selection logic so it can neither block nor impersonate.
+    own = []
+    for p in candidates:
+        head = (p.get("headRepository") or {}).get("nameWithOwner") or ""
+        if p.get("isCrossRepository") is not False or head.lower() != repo.lower():
+            LOG.warning("Ignoring closing PR #%s from another repository (head %r) for %s#%s",
+                        p.get("number"), head or "unknown", repo, number)
+            continue
+        own.append(p)
+    candidates = own
     active = [p for p in candidates if p.get("state") == "OPEN"]
     if len(active) > 1:
         raise ControllerError(f"Issue #{number} has multiple open closing PRs; refusing ambiguous merge")
@@ -347,7 +359,9 @@ def repair_pr(repo: str, original_number: int) -> dict | None:
     """Find only a repair PR carrying the controller-requested reference."""
     candidates = gh_api_pages(f"repos/{repo}/pulls?state=open&per_page=100")
     marker = re.compile(rf"(?m)^Autocontroller-Repair-For:\s*#{original_number}\s*$")
+    # Fork PR bodies are untrusted: only same-repository heads may be repair PRs.
     matching = [p for p in candidates if p.get("number") != original_number
+                and releases.same_repository_pr(p, repo)
                 and marker.search(p.get("body") or "")]
     if len(matching) > 1:
         raise ControllerError("Multiple repair PRs match the same original PR")
@@ -358,7 +372,8 @@ def release_preparation_pr(repo: str, tag: str) -> dict | None:
     """The one PR which prepares notes/artifacts for this technical release."""
     candidates=gh_api_pages(f"repos/{repo}/pulls?state=open&per_page=100")
     marker=re.compile(rf"(?m)^Autocontroller-Release:\s*{re.escape(tag)}\s*$")
-    matching=[p for p in candidates if marker.search(p.get("body") or "")]
+    # Fork PR bodies are untrusted: only same-repository heads may prepare a release.
+    matching=[p for p in candidates if releases.same_repository_pr(p,repo) and marker.search(p.get("body") or "")]
     if len(matching)>1:
         raise ControllerError(f"Multiple release preparation PRs for {tag}")
     return matching[0] if matching else None
@@ -1226,6 +1241,19 @@ class ProjectWorker:
                 self.save_checkpoint(checkpoint)
                 self.retry(key,"Issue PR closed without merge; replace/reopen",min_seconds=900)
                 return
+
+        # Defense in depth: the selector filters too, but checkpoint recovery
+        # reaches here directly. Only phases that invoke an agent are gated here
+        # (after the closed-unmerged dismissal above, which runs no agent). In
+        # code/repair, related_pr resolves the original Renovate PR; later
+        # ci/merge phases may legitimately follow a controller-authored repair PR.
+        if kind=="renovate" and phase in ("code","repair") and not (pr and is_renovate(pr,self.repo)):
+            self.notice(f"unverified-renovate:{number}",
+                        f"Renovate PR #{number} is not a verified same-repository Renovate bot PR; refusing to run an agent on it",
+                        warning=True)
+            self.retry(key,"Renovate PR failed bot identity / same-repository verification",min_seconds=3600)
+            self.cycle_state.unlink(missing_ok=True)
+            return
 
         if phase == "code":
             if pr and pr.get("merged_at"):
