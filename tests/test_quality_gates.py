@@ -197,7 +197,9 @@ class Gates(unittest.TestCase):
         self.assertEqual(m.json_read(self.w.cycle_state)['phase'],'postmerge')
 
     def test_closed_unmerged_renovate_not_false_positive(self):
-        self.pr.update(state='closed',merged_at=None)
+        self.pr.update(state='closed',merged_at=None,user={'login':'renovate[bot]','type':'Bot','id':29139614},
+                       head={'ref':'renovate/pkg-21','sha':SHA,'repo':{'full_name':'org/demo'}},
+                       base={'ref':'main','repo':{'full_name':'org/demo'}})
         self.patches()
         with patch.object(self.w,'related_pr',side_effect=lambda *a:dict(self.pr)):
             self.w._cycle('renovate',21,'https://github.com/org/demo/pull/21',None)

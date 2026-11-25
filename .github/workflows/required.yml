@@ -5,16 +5,26 @@ on:
     branches: [main]
 permissions:
   contents: read
+# Pushes to main never share a group: a queued older push run must not be
+# cancelled, since the controller reads merge-commit CI for its exact SHA.
+concurrency:
+  group: required-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
+  regression:
+    name: regression
+    uses: ./.github/workflows/regression.yml
+  # Aggregate gate: a failed, cancelled or skipped regression job fails this check.
   required:
+    name: required
     runs-on: ubuntu-26.04
-    timeout-minutes: 15
+    timeout-minutes: 5
+    needs: [regression]
+    if: always()
     steps:
-      - uses: actions/checkout@v7
-      - name: Verify Python and shell syntax
+      - name: Require every regression job to succeed
+        env:
+          RESULT: ${{ needs.regression.result }}
         run: |
-          python3 --version
-          python3 -m py_compile *.py
-          bash -n install.sh
-      - name: Run offline regression tests
-        run: python3 -m unittest discover -s tests -v
+          echo "regression result: $RESULT"
+          test "$RESULT" = success

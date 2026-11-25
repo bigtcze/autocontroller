@@ -45,10 +45,26 @@ class OnboardingTests(unittest.TestCase):
         with patch.object(o.c,'gh_api_pages',return_value=[issue]),self.assertRaises(ValueError):o.find_or_create_bootstrap('org/demo',1)
     def test_import_skips_pr_and_existing_and_renovate(self):
         project=Mock(repo='org/demo',number=1,owner='org');project.items.return_value=[{'number':1}]
-        issues=[{'number':1},{'number':2,'pull_request':{} ,'html_url':'https://github.com/org/demo/pull/2'}, {'number':3,'user':{'login':'renovate[bot]'}}, {'number':4,'html_url':'https://github.com/org/demo/issues/4'}]
-        issues[1]['pull_request']={'url':'x'}
+        bot={'login':'renovate[bot]','type':'Bot','id':29139614}
+        issues=[{'number':1,'author_association':'OWNER'},
+                {'number':2,'pull_request':{'url':'x'},'html_url':'https://github.com/org/demo/pull/2','author_association':'OWNER'},
+                {'number':3,'user':bot,'author_association':'NONE'},
+                {'number':4,'html_url':'https://github.com/org/demo/issues/4','author_association':'MEMBER'}]
         with patch.object(o.c,'gh_api_pages',return_value=issues),patch.object(o,'run') as run:
             o.import_issues(project);run.assert_called_once_with('gh','project','item-add','1','--owner','org','--url','https://github.com/org/demo/issues/4')
+    def test_import_never_adds_outsider_or_unverified_issues(self):
+        project=Mock(repo='org/demo',number=1,owner='org');project.items.return_value=[]
+        fake_bot={'login':'renovate[bot]','type':'User','id':1}
+        issues=[{'number':10,'html_url':'https://github.com/org/demo/issues/10','author_association':'NONE'},
+                {'number':11,'html_url':'https://github.com/org/demo/issues/11','author_association':'CONTRIBUTOR'},
+                {'number':12,'html_url':'https://github.com/org/demo/issues/12'},
+                {'number':13,'html_url':'https://github.com/org/demo/issues/13','author_association':''},
+                # Not a verified Renovate identity (type User), so it is judged by association only.
+                {'number':14,'html_url':'https://github.com/org/demo/issues/14','user':fake_bot,'author_association':'NONE'},
+                {'number':15,'html_url':'https://github.com/org/demo/issues/15','author_association':'COLLABORATOR'}]
+        with patch.object(o.c,'gh_api_pages',return_value=issues),patch.object(o,'run') as run:
+            o.import_issues(project)
+        self.assertEqual([c.args[-1] for c in run.call_args_list],['https://github.com/org/demo/issues/15'])
     def test_project_refuses_shared_config(self):
         data={'projects':[{'title':'AutoController · org/demo','number':5}]}
         with patch.object(o,'gh',return_value=data),patch.object(o,'run') as run,self.assertRaises(ValueError):

@@ -14,6 +14,7 @@ import sys
 import fcntl
 
 from bootstrap_policy import VERSION
+import release_policy as releases
 
 ROOT = Path(__file__).resolve().parent
 CONFIG = ROOT/'config.json'
@@ -178,11 +179,20 @@ def find_or_create_bootstrap(repo, number):
     return int(i['number'])
 
 
+TRUSTED_ASSOCIATIONS={'OWNER','MEMBER','COLLABORATOR'}
+
+
 def import_issues(project):
+    """Import only issues written by trusted repository members.
+
+    Public repositories accept issues from anyone; an outsider's issue must never
+    be auto-scheduled. Missing or unknown author_association fails closed.
+    """
     seen={i['number'] for i in project.items()}
     issues=c.gh_api_pages(f'repos/{project.repo}/issues?state=open&per_page=100',max_items=10000)
     for issue in issues:
-        if issue.get('pull_request') or issue['number'] in seen or c.is_renovate(issue): continue
+        if issue.get('pull_request') or issue['number'] in seen or releases.is_renovate_identity(issue.get('user')): continue
+        if str(issue.get('author_association') or '').upper() not in TRUSTED_ASSOCIATIONS: continue
         run('gh','project','item-add',str(project.number),'--owner',project.owner,'--url',issue['html_url'])
 
 
@@ -196,7 +206,7 @@ def onboard(url=None):
         if not existing.get('enabled',True): raise ValueError('Repository already configured but disabled; refusing to change its state.')
         print('Repository already configured. Resuming service.'); run('systemctl','--user','enable','--now','autocontroller.service'); return
     # Show the material authorization once, before any remote mutation.
-    print(f'AutoController will clone {requested}, create a dedicated GitHub Project, import open issues, create a bootstrap issue, and autonomously run AI coding sessions and merge reviewed green PRs. GitHub branch protection remains enforced. An empty repository will receive a minimal first commit. AI and CI can incur costs.')
+    print(f'AutoController will clone {requested}, create a dedicated GitHub Project, import open issues authored by the owner, members or collaborators, create a bootstrap issue, and autonomously run AI coding sessions and merge reviewed green PRs. GitHub branch protection remains enforced. An empty repository will receive a minimal first commit. AI and CI can incur costs.')
     if input('Enable autonomous development? [y/N] ').strip().lower() not in ('y','yes'): raise ValueError('Setup cancelled; no repository mutation performed.')
     info,repo,branch,method=repo_details(requested)
     if any(x['repo'].lower()==repo.lower() for x in config['projects']): raise ValueError('Repository already configured under canonical identity')

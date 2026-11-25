@@ -14,7 +14,10 @@ RELEASE_ISSUE = re.compile(r'(?i)\b(?:feature\s+)?release\s*[:\-–]?\s*(v\d+\.\
 RELEASE_ISSUE_REVERSED = re.compile(r'(?i)\b(v\d+\.\d+\.\d+)\s+(?:feature\s+)?release\b')
 APPROVAL_REQUEST = 'AUTOCONTROLLER_FEATURE_RELEASE_REQUEST'
 APPROVAL_RESPONSE = 'APPROVE FEATURE RELEASE'
-RENO_LOGINS = {'renovate[bot]', 'app/renovate', 'renovate'}
+# Verified identity of the GitHub.com Renovate App bot user. Logins, branch
+# names and labels are attacker-chosen text: none of them is proof on its own.
+RENOVATE_BOT_LOGIN = 'renovate[bot]'
+RENOVATE_BOT_ID = 29139614  # GitHub.com Renovate App bot user (type Bot)
 TECHNICAL_LABELS = {'dependencies','dependency','maintenance','chore','security','bugfix','bug','fix'}
 
 
@@ -89,27 +92,46 @@ def merged_since(repo: str, base: str, published_at: str, gh_json: Callable, fet
     return out
 
 
-def technical_pr(pr: dict) -> bool:
-    login=str((pr.get('user') or {}).get('login') or '').lower()
-    branch=str((pr.get('head') or {}).get('ref') or '').lower()
+def is_renovate_identity(user: Any) -> bool:
+    """Only the genuine GitHub.com Renovate App bot account (login + type + id)."""
+    if not isinstance(user, dict):
+        return False
+    return (str(user.get('login') or '').lower() == RENOVATE_BOT_LOGIN
+            and user.get('type') == 'Bot' and user.get('id') == RENOVATE_BOT_ID)
+
+
+def same_repository_pr(pr: dict, repo: str) -> bool:
+    """PR head must be a branch of `repo` itself; fork or missing head repo is False."""
+    repo = str(repo or '').lower()
+    head_repo = (pr.get('head') or {}).get('repo')
+    if not repo or not isinstance(head_repo, dict) or str(head_repo.get('full_name') or '').lower() != repo:
+        return False
+    base_repo = (pr.get('base') or {}).get('repo')
+    return base_repo is None or str((base_repo or {}).get('full_name') or '').lower() == repo
+
+
+def renovate_pr(pr: dict, repo: str) -> bool:
+    """Single verified predicate: genuine Renovate bot AND same-repository head.
+
+    Branch prefix, logins and labels never establish identity. Missing head
+    repository data fails closed (see same_repository_pr).
+    """
+    return is_renovate_identity(pr.get('user')) and same_repository_pr(pr, repo)
+
+
+def technical_pr(pr: dict, repo: str) -> bool:
     labels={str(x.get('name') or '').lower() for x in (pr.get('labels') or [])}
-    return login in RENO_LOGINS or branch.startswith('renovate/') or bool(labels & TECHNICAL_LABELS)
+    return renovate_pr(pr, repo) or bool(labels & TECHNICAL_LABELS)
 
 
-def renovate_pr(pr: dict) -> bool:
-    login=str((pr.get('user') or {}).get('login') or '').lower()
-    branch=str((pr.get('head') or {}).get('ref') or '').lower()
-    return login in RENO_LOGINS or branch.startswith('renovate/')
-
-
-def maintenance_due(release: dict | None, now: datetime, prs: list[dict],
+def maintenance_due(release: dict | None, now: datetime, prs: list[dict], repo: str,
                     *, days=14, minimum=3, feature_active=False) -> bool:
     if release is None or feature_active or released_since(release,now)<days:
         return False
     # Avoid silently publishing a feature under a patch version.
-    if any(not technical_pr(p) for p in prs):
+    if any(not technical_pr(p, repo) for p in prs):
         return False
-    return sum(renovate_pr(p) for p in prs)>=minimum
+    return sum(renovate_pr(p, repo) for p in prs)>=minimum
 
 
 def approve_request_body(tag: str, sha: str) -> str:
