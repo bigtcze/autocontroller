@@ -25,6 +25,15 @@ Git config, removes GitHub/provider tokens, and puts failing shims for `gh`,
   repository's own bootstrap contract files, workflow safety properties
   (no `pull_request_target`, no secrets, pinned actions, aggregate `required`)
   and absence of personal paths/tokens.
+- **Disposable VM lifecycle (`vmtest/`)**: boots pinned official Debian/Ubuntu
+  cloud images in QEMU (KVM, or TCG as a slower fallback) and runs the install,
+  systemd user manager, lingering, reboot, Engram failure/rollback/crash and
+  repeated-install scenario against real APT, systemd and a real Engram binary,
+  with deterministic OpenCode and GitHub CLI stand-ins. It runs only in the
+  scheduled/manual workflow `.github/workflows/vm-lifecycle.yml`, never as a
+  required check, and only on disposable VMs. Its harness logic is unit-tested
+  offline (`tests/test_vm_harness.py`), and workflow safety is checked by
+  `tests/test_repository_contracts.py`. See [docs/VM_TESTING.md](../docs/VM_TESTING.md).
 - **CI matrix**: `.github/workflows/regression.yml` runs syntax checks, the
   suite as an unprivileged user in clean `debian:12`, `debian:13`,
   `ubuntu:24.04`, `ubuntu:26.04` containers, and `mise run ci`. Containers
@@ -43,7 +52,9 @@ Git config, removes GitHub/provider tokens, and puts failing shims for `gh`,
 
 ## Inherited gaps (not covered by automation)
 
-- Installer and systemd lifecycle on fresh VMs, reboot survival, lingering.
+- Installer and systemd lifecycle on fresh VMs, reboot survival, lingering: covered
+  only by the local/scheduled VM suite (`vmtest/`), which has not yet run on GitHub
+  and whose stand-ins replace OpenCode and the GitHub CLI. arm64 is not covered.
 - Live GitHub: device authorization, Project provisioning, branch protection,
   merge methods, real CI interaction, Renovate App behaviour.
 - Live OpenCode/OMO sessions, provider quotas and real Engram releases.

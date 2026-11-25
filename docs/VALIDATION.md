@@ -12,6 +12,40 @@ The `required` check (`.github/workflows/required.yml` → `regression.yml`) run
 
 The suite simulates GitHub, OpenCode and Engram: scheduling, checkpoints and recovery, CI/merge gates, Renovate identity and fork rejection, onboarding import authorization, release policy, safe-wrapper recovery against a fake OpenCode API, and Engram runtime staging with fake binaries. Containers prove OS/Python compatibility only. They do **not** prove systemd, lingering, APT installation, reboot survival, live GitHub/OpenCode behaviour or release publication; those remain in the live acceptance below.
 
+## Scheduled and manual VM lifecycle suite
+
+`.github/workflows/vm-lifecycle.yml` runs `vmtest/` weekly (cron) and on manual dispatch
+(optional single-distro input), one matrix job per distribution (debian-12, debian-13,
+ubuntu-24.04, ubuntu-26.04), using pinned official cloud images in QEMU. It covers a
+clean install, Engram failure and recovery, logout and reboot persistence, an Engram
+rollback, a crash and a repeated install. See [VM_TESTING.md](VM_TESTING.md) for the
+scenario, the real/stand-in split and the limits.
+
+- **Status:** the workflow has **not yet run on GitHub**. Local runs of the suite are
+  recorded under "Local VM evidence" below. The workflow is not a required check, and
+  `required.yml` and `regression.yml` do not reference it.
+- **Local VM evidence:** the debian-13 scenario passed end to end (KVM) in one local run;
+  the ubuntu-24.04 run is recorded below. Each run's pass or fail detail is recorded
+  exactly as the harness reported it.
+- **Still not covered by this suite:** arm64, live GitHub authentication and onboarding,
+  real GitHub Project/PR/CI behaviour, live OpenCode/OMO sessions and provider behaviour,
+  release publication. The OpenCode and GitHub CLI used by the controller are stand-ins.
+- **TCG:** timings without `/dev/kvm` are unmeasured; see VM_TESTING.md.
+
+### Local VM evidence
+
+Local runs on a KVM host (QEMU 10.0.13, docker recipe in VM_TESTING.md). Each row is the
+harness `report.json` overall result on the tree at that time.
+
+| Distro | Run | Overall | Notes |
+| --- | --- | --- | --- |
+| ubuntu-24.04 | r2 | passed (16/16 steps) | Run 1 failed at step h because of a readiness race in the harness, since fixed; run 2 is on the final tree. |
+| debian-13 | r8 | passed (16/16 steps) | Predates the step-h readiness wait and the gh method tightening. |
+| debian-13 | r9 | passed (16/16 steps) | Final tree; KVM, QEMU 10.0.13. |
+| debian-12, ubuntu-26.04 | — | not run locally | Covered only by the scheduled workflow once it has run on GitHub. |
+
+These are local runs. The scheduled workflow has not run on GitHub.
+
 ## Live acceptance (not yet performed)
 
 - Fresh VM per supported distribution: install with no Git, gh, mise or Engram; complete GitHub device authorization and repository URL prompt; detach SSH; confirm continued service and reboot survival.
