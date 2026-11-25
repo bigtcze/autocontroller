@@ -41,7 +41,7 @@ harness `report.json` overall result on the tree at that time.
 | Distro | Run | Overall | Notes |
 | --- | --- | --- | --- |
 | debian-12 | final3 | passed (16/16 steps) | KVM, QEMU 10.0.13; POSIX dpkg-lock and apt-unit idle wait; artifacts `art-debian-12-final3`. |
-| debian-13 | final3 | passed (16/16 steps) | KVM, QEMU 10.0.13; POSIX dpkg-lock and apt-unit idle wait; artifacts `art-debian-13-final3`. |
+| debian-13 | final3 | passed (16/16 steps) | KVM, QEMU 10.0.13; POSIX dpkg-lock and apt-unit idle wait; artifacts `art-debian-13-final3`. The wrapper log lacks the trailing rc lines (wrapper interrupted after teardown); the result is taken from `report.json` (step j collected, teardown reached). |
 | ubuntu-24.04 | final3 | passed (16/16 steps) | KVM, QEMU 10.0.13; POSIX dpkg-lock and apt-unit idle wait; artifacts `art-ubuntu-24.04-final3`. |
 | ubuntu-26.04 | final3 | passed (16/16 steps) | KVM, QEMU 10.0.13; POSIX dpkg-lock and apt-unit idle wait; artifacts `art-ubuntu-26.04-final3`. |
 
