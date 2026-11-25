@@ -35,7 +35,7 @@ class RenovateCycleRefusalTests(unittest.TestCase):
         subprocess.run(['git','init','-q','-b','main',str(checkout)],check=True)
         (checkout/'README').write_text('x')
         subprocess.run(['git','-C',str(checkout),'add','README'],check=True)
-        subprocess.run(['git','-C',str(checkout),'-c','user.name=offline-test','-c','user.email=offline-test@example.invalid',
+        subprocess.run(['git','-C',str(checkout),'-c','user.name=offline-test','-c','user.email=offline-test@example.invalid','-c','commit.gpgsign=false',
                         'commit','-q','-m','init'],check=True)
         cfg={'name':'demo','repo':REPO,'directory':str(checkout),'project_owner':'own','project_number':1}
         self.w=m.ProjectWorker(cfg,{'state_dir':str(root/'state'),'opencode':'oc','wrapper':'wrapper'},

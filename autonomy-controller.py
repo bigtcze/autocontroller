@@ -1249,7 +1249,7 @@ class ProjectWorker:
         # ci/merge phases may legitimately follow a controller-authored repair PR.
         if kind=="renovate" and phase in ("code","repair") and not (pr and is_renovate(pr,self.repo)):
             self.notice(f"unverified-renovate:{number}",
-                        f"Renovate PR #{number} is not a verified same-repository Renovate bot PR; refusing to run an agent on it",
+                        f"Renovate PR #{number} is not a verified same-repository Renovate bot PR; refusing to run an agent on it; if a checkpoint remains, manual checkpoint reconciliation is required",
                         warning=True)
             self.retry(key,"Renovate PR failed bot identity / same-repository verification",min_seconds=3600)
             # A repair checkpoint carries the main-is-red obligation: never discard it.
