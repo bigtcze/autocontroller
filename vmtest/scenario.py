@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 
 from .runner import ScenarioAbort
@@ -49,21 +50,48 @@ def sudo_out(ctx, argv: list[str], timeout: float = 120) -> str:
     return ssh_out(ctx, 'vmadmin', ['sudo', '-n', *argv], timeout=timeout)
 
 
+# Run as root in the guest. apt and dpkg take POSIX (fcntl) record locks; flock(1) uses BSD locks
+# that they do not see, so the probe must use fcntl.lockf. Any error (including a missing lock
+# file) counts as busy, so the wait fails closed.
+DPKG_LOCK_PROBE = [
+    'python3', '-c',
+    'import fcntl, os\n'
+    'busy = False\n'
+    'for path in ("/var/lib/dpkg/lock-frontend", "/var/lib/dpkg/lock"):\n'
+    '    try:\n'
+    '        fd = os.open(path, os.O_RDWR)\n'
+    '    except OSError:\n'
+    '        busy = True\n'
+    '        continue\n'
+    '    try:\n'
+    '        fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n'
+    '        fcntl.lockf(fd, fcntl.LOCK_UN)\n'
+    '    except OSError:\n'
+    '        busy = True\n'
+    '    finally:\n'
+    '        os.close(fd)\n'
+    'print("busy" if busy else "idle")\n',
+]
+APT_UNITS = ('apt-daily.service', 'apt-daily-upgrade.service', 'unattended-upgrades.service')
+
+
 def wait_cloud_init(ctx, timeout: float = 900) -> str:
-    """Bounded wait for the NoCloud runcmd marker and for apt/dpkg to be idle (no lock holder)."""
-    import time
-    deadline = time.monotonic() + timeout
+    """Bounded wait until the NoCloud runcmd marker exists, both dpkg locks are free and no apt
+    timer or service is active. The bound is scaled by wait_factor (TCG), like other waits."""
+    deadline = time.monotonic() + timeout * ctx.data.get('wait_factor', 1)
     last = 'no output yet'
     while time.monotonic() < deadline:
         marker = root_run(ctx, ['test', '-e', '/var/lib/vmtest-cloud-init-done'], timeout=30).returncode == 0
-        # flock -n fails while another process holds the dpkg frontend lock.
-        lock = root_run(ctx, ['sh', '-c', 'flock -n /var/lib/dpkg/lock-frontend true && echo idle || echo busy'],
-                        timeout=30).stdout.decode('utf-8', 'replace').strip()
-        last = f'marker={marker} apt_lock={lock}'
-        if marker and lock != 'busy':
+        locks = root_run(ctx, DPKG_LOCK_PROBE, timeout=30).stdout.decode('utf-8', 'replace').strip()
+        units = ctx.ssh.run('vmadmin', ['systemctl', 'is-active', *APT_UNITS], timeout=30,
+                            check=False).stdout.decode('utf-8', 'replace').split()
+        # Only inactive or failed (not running) counts as idle; an empty or short answer does not.
+        apt_idle = len(units) == len(APT_UNITS) and all(s in ('inactive', 'failed') for s in units)
+        last = f'marker={marker} dpkg_locks={locks} apt_units={" ".join(units) or "none"}'
+        if marker and locks == 'idle' and apt_idle:
             return last
         time.sleep(10)
-    raise ScenarioAbort(f'cloud-init or apt lock not idle within {timeout:.0f}s: {last}')
+    raise ScenarioAbort(f'cloud-init or apt not idle within {timeout * ctx.data.get("wait_factor", 1):.0f}s: {last}')
 
 
 def step_preconditions(ctx) -> str:

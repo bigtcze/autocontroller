@@ -84,7 +84,7 @@ Steps run in order. The first failure skips later steps. `j` always runs.
 |---|---|
 | boot | SSH as `vmadmin` answers using the pinned host key injected through NoCloud |
 | transfer | The source tree (git-tracked and untracked files minus state, config and secrets) reaches `tester` |
-| a preconditions | Expected OS release, PID 1 is systemd, git/gh/mise/Engram/OpenCode absent before install |
+| a preconditions | Bounded wait (scaled under TCG) until cloud-init's runcmd marker exists, both dpkg locks are free (probed with POSIX `fcntl.lockf`), and `apt-daily`, `apt-daily-upgrade` and `unattended-upgrades` are not active. Then: expected OS release, PID 1 is systemd, git/gh/mise/Engram/OpenCode absent before install |
 | b installer negatives | `install.sh` refuses root, bad arguments and a missing OpenCode with exit 2 |
 | b fake opencode | The deterministic OpenCode stand-in is installed on PATH |
 | c clean install | Full APT install of git/gh/mise, linger enabled, unit linked, `GH_TOKEN` refused with exit 1 before any GitHub contact |
@@ -94,7 +94,7 @@ Steps run in order. The first failure skips later steps. `j` always runs.
 | d marker cleared | `startup()` removes the failure marker after successful startup |
 | e logout | Terminates every `Class=user` login session of `tester` (a harness-held login is used); linger is kept, the controller PID is unchanged |
 | f reboot | After a real reboot the boot ID changed, no tester login session is open, the service is active through lingering, and the checked-boot record matches |
-| g upgrade rollback | With `api.github.com` blackholed and a newer version forced, the upgrade fails, the previous generation stays active, and the upgrade-failure metric and journal record it |
+| g upgrade rollback | With `github.com` blackholed and a newer version forced, the upgrade fails, the previous generation stays active, and the upgrade-failure metric and journal record it |
 | h crash recovery | Killing the Engram process makes the controller exit; systemd restarts it, the startup finishes, and `memory --health` is healthy again |
 | i repeated install | `install.sh` while active is refused; `--install-only` leaves `config.json` and `active.json` byte-identical |
 | j collect | Gathers the journal, unit status, memory state, stand-in logs and cloud-init. Any failed or empty mandatory file fails the step |

@@ -451,14 +451,30 @@ class HarnessWiringTests(unittest.TestCase):
         self.assertEqual(harness.WAIT_FACTOR['kvm'], 1)
         self.assertGreater(harness.WAIT_FACTOR['tcg'], 1)
 
-    def test_tcg_worst_case_fits_the_vm_job_timeout_parsed_from_workflow(self):
+    def test_dpkg_probe_uses_posix_locks_not_flock(self):
+        from vmtest import scenario
+        probe = ' '.join(scenario.DPKG_LOCK_PROBE)
+        self.assertIn('fcntl.lockf', probe)
+        self.assertIn('LOCK_NB', probe)
+        self.assertIn('/var/lib/dpkg/lock-frontend', probe)
+        self.assertIn('/var/lib/dpkg/lock"', probe)
+        self.assertNotIn('flock', probe)
+
+    def test_apt_units_are_waited_on(self):
+        from vmtest import scenario
+        self.assertEqual(set(scenario.APT_UNITS), {'apt-daily.service', 'apt-daily-upgrade.service',
+                                                   'unattended-upgrades.service'})
+
+    def test_scaled_scenario_waits_fit_the_vm_job_limit(self):
+        # Checks only that the TCG-scaled boot budget plus the scaled fixed waits fit the vm job's
+        # timeout-minutes parsed from the workflow. It is not a proof of worst-case runtime.
         workflow = (ROOT / '.github' / 'workflows' / 'vm-lifecycle.yml').read_text(encoding='utf-8')
         vm_job = workflow.split('\n  vm:\n', 1)[1]
         body = re.split(r'(?m)^  [A-Za-z0-9_-]+:\n', vm_job, maxsplit=1)[0]  # stop at the next job
         match = re.search(r'(?m)^    timeout-minutes: (\d+)$', body)
         self.assertIsNotNone(match, 'vm job has no timeout-minutes')
         minutes = int(match.group(1))
-        # Worst case: boot budget plus the scaled reboot/readiness waits plus the fixed sleeps.
+        # Boot budget plus the TCG-scaled reboot/readiness waits and fixed sleeps, as listed in the code.
         scale = harness.WAIT_FACTOR['tcg']
         worst_tcg_seconds = harness.BOOT_TIMEOUT['tcg'] + (600 + 300 + 900 + 300) * scale
         self.assertLessEqual(worst_tcg_seconds, minutes * 60,

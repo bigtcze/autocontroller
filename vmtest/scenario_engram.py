@@ -86,7 +86,7 @@ def _wait_engram_ready(ctx, *, pid: str, deadline: float) -> None:
     while time.monotonic() < deadline:
         marker = sudo_out(ctx, ['sh', '-c', f'test -e {MEMORY}/failure && echo yes || echo no'],
                           timeout=30).strip()
-        ready = sudo_out(ctx, ['sh', '-c', f'journalctl _PID={pid} --no-pager '
+        ready = sudo_out(ctx, ['sh', '-c', f'journalctl -b _PID={pid} --no-pager '
                                            f'| grep -c "Engram ready" || true'], timeout=60).strip()
         last = f'marker={marker} ready_lines_recent={ready}'
         if marker == 'no' and ready not in ('', '0'):

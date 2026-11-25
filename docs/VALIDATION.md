@@ -26,7 +26,7 @@ scenario, the real/stand-in split and the limits.
   is a post-merge follow-up, not part of this PR's checks. Local runs of the suite are
   recorded under "Local VM evidence" below. The workflow is not a required check, and
   `required.yml` and `regression.yml` do not reference it.
-- **Local VM evidence:** on the final tree (`-final2`), all four distros passed 16/16 steps
+- **Local VM evidence:** on the final tree (`-final3`), all four distros passed 16/16 steps
   (KVM). Each result is recorded exactly as the harness reported it.
 - **Still not covered by this suite:** arm64, live GitHub authentication and onboarding,
   real GitHub Project/PR/CI behaviour, live OpenCode/OMO sessions and provider behaviour,
@@ -40,11 +40,12 @@ harness `report.json` overall result on the tree at that time.
 
 | Distro | Run | Overall | Notes |
 | --- | --- | --- | --- |
-| debian-12 | final2 | passed (16/16 steps) | KVM, QEMU 10.0.13; `ds=nocloud-net` seed; artifacts `art-debian-12-final2`. |
-| debian-13 | final2 | passed (16/16 steps) | KVM, QEMU 10.0.13; `ds=nocloud-net` seed; artifacts `art-debian-13-final2`. |
-| ubuntu-24.04 | final2 | passed (16/16 steps) | KVM, QEMU 10.0.13; `ds=nocloud-net` seed; artifacts `art-ubuntu-24.04-final2`. |
-| ubuntu-26.04 | final2 | passed (16/16 steps) | KVM, QEMU 10.0.13; `ds=nocloud-net` seed; artifacts `art-ubuntu-26.04-final2`. |
+| debian-12 | final3 | passed (16/16 steps) | KVM, QEMU 10.0.13; POSIX dpkg-lock and apt-unit idle wait; artifacts `art-debian-12-final3`. |
+| debian-13 | final3 | passed (16/16 steps) | KVM, QEMU 10.0.13; POSIX dpkg-lock and apt-unit idle wait; artifacts `art-debian-13-final3`. |
+| ubuntu-24.04 | final3 | passed (16/16 steps) | KVM, QEMU 10.0.13; POSIX dpkg-lock and apt-unit idle wait; artifacts `art-ubuntu-24.04-final3`. |
+| ubuntu-26.04 | final3 | passed (16/16 steps) | KVM, QEMU 10.0.13; POSIX dpkg-lock and apt-unit idle wait; artifacts `art-ubuntu-26.04-final3`. |
 
+Earlier `final2` runs (before the dpkg-lock probe fix) also passed 16/16 on all four distros.
 Earlier `final` runs (before the seed string change): debian-13, ubuntu-24.04 and ubuntu-26.04
 passed 16/16; debian-12 failed at boot because cloud-init 22.4.2 ignored the `ds=nocloud` seed
 and fell back to `DataSourceNone`. The `nocloud-net` name fixed it. Earlier history: ubuntu-24.04
