@@ -250,6 +250,28 @@ class RepositoryContractTests(unittest.TestCase):
             with self.subTest(path=relative(path)):
                 self.assertIsNone(TOKEN.search(text), 'token-like string in repository text')
 
+    def test_release_contract_forbids_partial_public_releases(self):
+        # Whitespace is normalized so phrases may wrap across Markdown lines.
+        text = ' '.join((ROOT / '.agents' / 'RELEASE_QUALITY.md').read_text(encoding='utf-8').split()).lower()
+        self.assertNotIn('source-only', text)
+        for phrase in ('sha256 manifest', 'release-blocking', 'pre-release',
+                       'disposable systemd vm', 'live sandbox acceptance',
+                       'never a waived test'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+
+    def test_no_prerelease_stage_labels_in_user_docs_and_contracts(self):
+        paths = [ROOT / 'README.md', *sorted((ROOT / '.agents').glob('*.md'))]
+        for path in paths:
+            with self.subTest(path=relative(path)):
+                self.assertNotRegex(path.read_text(encoding='utf-8'), r'(?i)\b(alpha|beta)\b')
+
+    def test_issue_admission_is_not_described_as_planned_auto_enrollment(self):
+        pattern = r'(?i)automatic (?:enrollment|import|adding)[^.]*\b(?:yet|not (?:yet )?implemented)\b'
+        for name in ('README.md', 'docs/VALIDATION.md', '.agents/PRODUCT_SCOPE.md'):
+            with self.subTest(path=name):
+                self.assertNotRegex((ROOT / name).read_text(encoding='utf-8'), pattern)
+
 
 if __name__ == '__main__':
     unittest.main()

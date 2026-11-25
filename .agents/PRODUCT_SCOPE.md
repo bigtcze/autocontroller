@@ -1,6 +1,6 @@
 # Product scope
 
-Status: development alpha. No public release has been published.
+Status: unreleased; under development. No public release has been published.
 
 ## Implemented and authorized
 
@@ -31,15 +31,18 @@ Status: development alpha. No public release has been published.
 
 Web UI, database service, Docker runtime requirement, own model/provider,
 sandboxing agents, managing non-GitHub forges, desktop OSes or other Linux
-distributions, automatic adding of arbitrary Issues, bypassing protections.
+distributions, unrestricted automatic adding or enrollment of Issues into the
+Project (admission is an explicit maintainer action; onboarding's one-time
+import of owner/member/collaborator Issues is the only exception), bypassing
+protections.
 
 ## Explicit unknowns / not yet available
 
 - Live acceptance on fresh VMs and real GitHub/OpenCode services
   (`docs/VALIDATION.md`) has not been performed.
-- Release archives, checksums, managed upgrade, uninstall and controller
-  self-update are not implemented (tracked separately).
-- Automatic enrollment of future Issues outside the Project is not implemented.
+- Release archives, checksums, managed stable update with drain/rollback
+  (including controller self-update), project removal, uninstall and memory
+  inspection are not implemented (tracked in GitHub Issues).
 
 ## Compatibility obligations
 
