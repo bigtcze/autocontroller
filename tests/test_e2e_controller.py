@@ -29,6 +29,9 @@ def sha(seed: str) -> str:
 
 
 class E2EBase(unittest.TestCase):
+    # Subclasses set True to run the controller through the REAL safe wrapper (see World).
+    real_wrapper = False
+
     def setUp(self):
         # Defense in depth: remove ambient controller/OpenCode/Engram variables for the whole test,
         # restored on cleanup. Installed first, so anything the test sets later (for example a leak
@@ -46,7 +49,7 @@ class E2EBase(unittest.TestCase):
         self.addCleanup(self.sock_guard.stop)
         self.external_guard = ew.guard_external_access()
         self.addCleanup(self.external_guard.stop)
-        self.world = ew.World(self.tmp)
+        self.world = ew.World(self.tmp, real_wrapper=self.real_wrapper)
         self.gh = self.world.gh
         self.transport = self.world.transport()
         self.transport.__enter__()
@@ -138,10 +141,9 @@ class MemorySocketGuardTests(E2EBase):
         with self.assertRaises(ew._ForbiddenConnect):
             learning.Runtime.download('https://example.invalid/engram', 1)
 
-    def test_agent_memory_ops_refuse_a_missing_or_production_socket(self):
-        import os
-        import e2e_agent as agent
-        # Layout run_memory_ops expects: <state>/projects/<name> (pdir) and <state>/memory (root).
+    def _learning_session(self):
+        """A pdir with a real grant file and the exact instruction text memory.instruction() writes."""
+        import memory as learning
         state = self.tmp / 'state'
         pdir = state / 'projects' / 'alpha'
         pdir.mkdir(parents=True, exist_ok=True)
@@ -150,7 +152,16 @@ class MemorySocketGuardTests(E2EBase):
         (pdir / 'memory-grant.json').write_text(json.dumps(
             {'token': token, 'kind': 'issue', 'repo': R, 'number': 1, 'used': 0, 'queries': [],
              'records': 0, 'feedback': 0, 'returned': []}), encoding='utf-8')
-        instructions = f'--token {token}'
+        return pdir, learning.instruction(pdir, token)
+
+    def test_agent_memory_ops_refuse_a_missing_or_production_socket(self):
+        """The agent refuses an unset or /run/user socket before any launcher runs.
+
+        The launcher carries the same guard (see MemoryCliLauncherTests), so both layers refuse.
+        """
+        import os
+        import e2e_agent as agent
+        pdir, instructions = self._learning_session()
         for value in (None, '', f'/run/user/{os.getuid()}/autocontroller-memory/engram.sock'):
             env = {'AUTOCONTROLLER_LEARNING_INSTRUCTIONS': instructions}
             with unittest.mock.patch.dict(os.environ, env, clear=False):
@@ -160,6 +171,29 @@ class MemorySocketGuardTests(E2EBase):
                     os.environ['E2E_ENGRAM_SOCKET'] = value
                 with self.assertRaises(RuntimeError, msg=f'socket={value!r}'):
                     agent.run_memory_ops(pdir, [{'action': 'search', 'arg': 'x'}])
+
+    def test_memory_cli_launcher_refuses_a_missing_or_production_socket_and_runs_nothing(self):
+        import os
+        import subprocess
+        import sys
+        launcher = ew.TESTS / 'e2e_memory_cli.py'
+        pdir, instructions = self._learning_session()
+        grant = str(pdir / 'memory-grant.json')
+        token = instructions.split('--token ', 1)[1].split()[0]
+        cases = [
+            {'E2E_MEMORY_ROOT': str(self.tmp)},  # socket unset
+            {'E2E_MEMORY_ROOT': str(self.tmp), 'E2E_ENGRAM_SOCKET': ''},
+            {'E2E_MEMORY_ROOT': str(self.tmp),
+             'E2E_ENGRAM_SOCKET': f'/run/user/{os.getuid()}/autocontroller-memory/engram.sock'},
+        ]
+        for extra in cases:
+            env = {k: v for k, v in os.environ.items() if not k.startswith(('E2E_', 'AUTOCONTROLLER_'))}
+            env.update(extra)
+            proc = subprocess.run([sys.executable, str(launcher), '--grant', grant, '--token', token,
+                                   'search', 'x'], env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(proc.returncode, 3, (extra, proc.stdout, proc.stderr))
+            self.assertIn('launcher refused', proc.stderr)
+            self.assertEqual(proc.stdout, '', 'a refused launcher never prints a memory result')
 
 
 class SchedulerHappyPathTests(E2EBase):
@@ -568,6 +602,18 @@ class MidFlowEngramTests(E2EBase):
         found = learning.operation(self.world.runtime.api,
                                    dict(grant, queries=[], returned=[], used=0), 'search', 'working directory')
         self.assertEqual([r['id'] for r in found], [first['id']], 'learned entry persisted across the restart')
+        # The CLI path, as a session uses it, must work after the restart too: the launcher needs
+        # E2E_MEMORY_ROOT and E2E_ENGRAM_SOCKET republished by the restart, not only the runtime.
+        import e2e_agent as agent
+        pdir = self.world.state / 'projects' / 'alpha'
+        pdir.mkdir(parents=True, exist_ok=True)
+        # The same grant creation the controller uses, and the instruction text a session gets.
+        token = learning.grant(self.world.state, pdir, R, 'renovate', pr, pending=False)
+        script, grant_arg, session_token = agent.learning_grant_from_instructions(learning.instruction(pdir, token))
+        cli = agent.memory_cli(script, grant_arg, session_token, 'search', 'working directory',
+                               os.environ['E2E_ENGRAM_SOCKET'])
+        self.assertTrue(cli['ok'], f"CLI search after restart failed: {cli.get('error')}")
+        self.assertEqual([r['id'] for r in cli['result']], [first['id']])
 
         # The new worker continues the same task: merge, postmerge, complete. No AI work repeats.
         self.step_until('postmerge')

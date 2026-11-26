@@ -12,6 +12,7 @@ import json
 import os
 from contextlib import contextmanager
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -25,7 +26,12 @@ import e2e_github as eg  # noqa: E402  (loads autonomy-controller as eg.ctl)
 
 ctl = eg.ctl
 AGENT = TESTS / 'e2e_agent.py'
+REAL_WRAPPER = TESTS / 'e2e_real_wrapper.py'
+FAKE_OPENCODE = TESTS / 'e2e_opencode.py'
 ENGRAM_STANDIN = TESTS / 'e2e_engram_standin.py'
+ENGRAM_BINARY_ENV = 'E2E_ENGRAM_BINARY'
+ENGRAM_VERSION_ENV = 'E2E_ENGRAM_VERSION'
+STANDIN_VERSION = '3.2.0'  # must match tests/e2e_engram_standin.py STANDIN_VERSION
 GIT_TIMEOUT = 60
 # Ambient controller/OpenCode/Engram state. ProjectWorker.env() copies os.environ, so any of
 # these inherited from a shell would reach the fake agent. The E2E world removes them.
@@ -122,21 +128,120 @@ def guard_memory_socket(tmp: Path):
     return patcher
 
 
+def production_roots() -> list[Path]:
+    """Every `<home>/scripts/autocontroller` the real user could own, resolved.
+
+    `scripts/offline-tests.sh` points HOME at a temp dir, so `Path.home()` alone would miss the
+    real user's installed controller. The passwd entry for this uid is therefore also checked.
+    A uid with no passwd entry contributes nothing (KeyError is not an error here).
+    """
+    import pwd
+    homes = [Path.home()]
+    try:
+        homes.append(Path(pwd.getpwuid(os.getuid()).pw_dir))
+    except KeyError:
+        pass
+    roots = []
+    for home in homes:
+        root = (home / 'scripts' / 'autocontroller').resolve()
+        if root not in roots:
+            roots.append(root)
+    return roots
+
+
+def check_engram_binary_path(source: str) -> Path:
+    """Resolve E2E_ENGRAM_BINARY and refuse loudly on any unsafe path.
+
+    Refused: a path inside `<home>/scripts/autocontroller` for any candidate home (see
+    production_roots), a path under `/run/user/`, and anything that is not a regular executable
+    file. Resolution happens before the checks, so a symlink into a refused location is refused too.
+    """
+    origin = Path(source).expanduser().resolve()
+    for production in production_roots():
+        if origin == production or production in origin.parents:
+            raise AssertionError(f'{ENGRAM_BINARY_ENV} must not point inside the production controller: {origin}')
+    if str(origin).startswith('/run/user/'):
+        raise AssertionError(f'{ENGRAM_BINARY_ENV} must not point under /run/user/: {origin}')
+    if not origin.is_file() or not os.access(origin, os.X_OK):
+        raise AssertionError(f'{ENGRAM_BINARY_ENV} must be an existing executable regular file: {origin}')
+    return origin
+
+
+def install_engram_backend(folder: Path) -> Path:
+    """Install the `engram` executable that the real Runtime.start_process will run.
+
+    Default: the stand-in shim (`tests/e2e_engram_standin.py`), exactly as before.
+
+    `E2E_ENGRAM_BINARY=/path/to/engram`: the path is checked by check_engram_binary_path, then
+    the file is copied to `<folder>/engram-real` (0700). `<folder>/engram` is a small shell shim
+    that runs the copy with HOME set to a private temp directory, so the upstream binary never
+    reads or writes the real HOME. The real binary still does all the serving.
+    """
+    target = folder / 'engram'
+    source = os.environ.get(ENGRAM_BINARY_ENV, '')
+    if source:
+        origin = check_engram_binary_path(source)
+        real_copy = folder / 'engram-real'
+        if real_copy.exists():
+            real_copy.unlink()
+        shutil.copyfile(origin, real_copy)
+        real_copy.chmod(0o700)
+        private_home = folder / 'home'
+        private_home.mkdir(mode=0o700, exist_ok=True)
+        target.write_text(f'#!/bin/sh\nHOME={shlex.quote(str(private_home))} exec '
+                          f'{shlex.quote(str(real_copy))} "$@"\n', encoding='utf-8')
+    else:
+        target.write_text(f'#!/bin/sh\nexec {sys.executable} {ENGRAM_STANDIN} "$@"\n', encoding='utf-8')
+    target.chmod(0o700)
+    return target
+
+
+def record_engram_backend(runtime) -> dict:
+    """Probe the running Engram and record which backend answered (identity, not just health)."""
+    health = runtime.api.health()
+    source = os.environ.get(ENGRAM_BINARY_ENV, '')
+    return {
+        'backend': 'upstream-binary' if source else 'stand-in',
+        'binary': source or str(ENGRAM_STANDIN),
+        'expected_version': os.environ.get(ENGRAM_VERSION_ENV, '') or None,
+        'service': health.get('service'),
+        'status': health.get('status'),
+        'version': health.get('version'),
+    }
+
+
 class World:
-    def __init__(self, tmp: Path):
+    """One disposable E2E world.
+
+    Default (`real_wrapper=False`): the controller's `wrapper` is the scripted agent double
+    (tests/e2e_agent.py) and `opencode` is an exit-97 stub.
+
+    `real_wrapper=True`: the controller's `wrapper` is the launcher for the REAL
+    opencode-project-safe.py (tests/e2e_real_wrapper.py), and `opencode` (AUTONOMY_OPENCODE)
+    is a shim for the fake OpenCode V2 CLI (tests/e2e_opencode.py). The scripted steps still
+    come from script.json.
+    """
+
+    def __init__(self, tmp: Path, *, real_wrapper: bool = False):
         self.tmp = tmp
         self.state = tmp / 'state'
         self.e2e = self.state / 'e2e'
         self.e2e.mkdir(parents=True, mode=0o700)
         self.gh = eg.FakeGitHub(self.e2e / 'github.json')
         (self.e2e / 'script.json').write_text('{}', encoding='utf-8')
+        self.real_wrapper = real_wrapper
+        self.wrapper = REAL_WRAPPER if real_wrapper else AGENT
         self.opencode = tmp / 'opencode-stub'
-        self.opencode.write_text('#!/bin/sh\nexit 97\n', encoding='utf-8')
+        if real_wrapper:
+            self.opencode.write_text(f'#!/bin/sh\nexec {sys.executable} {FAKE_OPENCODE} "$@"\n', encoding='utf-8')
+        else:
+            self.opencode.write_text('#!/bin/sh\nexit 97\n', encoding='utf-8')
         self.opencode.chmod(0o700)
         self.quota_lock = threading.Lock()
         self.stop = threading.Event()
         self.projects: dict[str, dict] = {}
         self.runtime = None
+        self.engram_backend: dict | None = None  # which Engram binary ran, and its probe
 
     # ----- world construction ------------------------------------------------
     def add_project(self, name: str, repo: str, number: int, *, release: dict | None = None,
@@ -188,7 +293,7 @@ class World:
         return [r for r in rows if phase is None or r['phase'] == phase]
 
     def global_cfg(self) -> dict:
-        cfg = {'state_dir': str(self.state), 'wrapper': str(AGENT), 'opencode': str(self.opencode),
+        cfg = {'state_dir': str(self.state), 'wrapper': str(self.wrapper), 'opencode': str(self.opencode),
                'poll_seconds': 5, 'post_cycle_seconds': 0, 'ci_poll_seconds': 0,
                'cycle_timeout_seconds': 60, 'selection_timeout_seconds': 60,
                'drain_timeout_seconds': 5, 'agent': 'orchestrator', 'retry_max_seconds': 14400}
@@ -213,19 +318,28 @@ class World:
             runtime = learning.Runtime(self.state)
             folder = runtime.root / 'gen-0123456789abcdef'  # reused on restart: the store persists
             folder.mkdir(mode=0o700, exist_ok=True)
-            shim = folder / 'engram'
-            shim.write_text(f'#!/bin/sh\nexec {sys.executable} {ENGRAM_STANDIN} "$@"\n', encoding='utf-8')
-            shim.chmod(0o700)
+            install_engram_backend(folder)
             runtime.start_process(folder)
         except BaseException:
             if runtime is not None:
                 runtime.close()
             patcher.stop()
             raise
+        self._publish_engram(runtime, patcher)
+        return runtime
+
+    def _publish_engram(self, runtime, patcher):
+        """The one place a started Engram is published to the world and to the CLI launcher.
+
+        Sets the runtime, the private socket and memory root that `tests/e2e_memory_cli.py`
+        requires, and the backend probe. Both start_engram and restart_engram_via_startup call
+        it, so a restarted world keeps the same environment as a fresh one.
+        """
         self.runtime = runtime
         self.engram_patch = patcher
-        os.environ['E2E_ENGRAM_SOCKET'] = str(sock_dir / 'engram.sock')
-        return runtime
+        os.environ['E2E_ENGRAM_SOCKET'] = str(self.tmp / 'sock' / 'engram.sock')
+        os.environ['E2E_MEMORY_ROOT'] = str(self.tmp.resolve())
+        self.engram_backend = record_engram_backend(runtime)
 
     def restart_engram_via_startup(self):
         """Restart the stand-in through the REAL Runtime.startup() on the same data directory.
@@ -256,9 +370,7 @@ class World:
                 runtime.close()
             patcher.stop()
             raise
-        self.runtime = runtime
-        self.engram_patch = patcher
-        os.environ['E2E_ENGRAM_SOCKET'] = str(sock_dir / 'engram.sock')
+        self._publish_engram(runtime, patcher)
         return runtime
 
     def stop_engram(self):
@@ -269,6 +381,8 @@ class World:
             self.engram_patch.stop()
             self.engram_patch = None
         os.environ.pop('E2E_ENGRAM_SOCKET', None)
+        os.environ.pop('E2E_MEMORY_ROOT', None)
+        self.engram_backend = None
 
     def worker(self, name: str) -> 'ctl.ProjectWorker':
         worker = ctl.ProjectWorker(dict(self.projects[name]), self.global_cfg(), self.stop, self.quota_lock)

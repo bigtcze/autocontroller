@@ -41,11 +41,16 @@ rm -rf -- "$H"
 
 | Module | Role |
 | --- | --- |
-| `tests/test_e2e_controller.py` | 38 scenario, guard and hardening tests driving the real `ProjectWorker` |
-| `tests/e2e_world.py` | Disposable world: temp state, bare remotes, real git clones, transport patch, memory socket guard, external-access guard |
+| `tests/test_e2e_controller.py` | 40 scenario, guard and hardening tests driving the real `ProjectWorker`; the default World runs the scripted agent double as the wrapper |
+| `tests/test_e2e_real_wrapper.py` | 3 tests driving the controller through the **real safe wrapper** `opencode-project-safe.py` (happy path with one resume and one exact-SHA merge, learning-instruction routing, unstarted-quota recovery) |
+| `tests/test_e2e_memory_cli.py` | 13 tests running the **real `memory.cli()`** in a subprocess (refusals, stdin caps, failure marker, metrics counters, dead-backend marker) and the Engram backend identity probe |
+| `tests/e2e_world.py` | Disposable world: temp state, bare remotes, real git clones, transport patch, memory socket guard, external-access guard. `World(tmp, real_wrapper=True)` selects the real wrapper; `E2E_ENGRAM_BINARY` selects the Engram binary |
 | `tests/e2e_github.py` | Stateful, multi-repo, thread-safe **GitHub service double** patched at the `gh` argv level (loaded from `autonomy-controller.py` by path) |
-| `tests/e2e_agent.py` | **OMO agent double**: a scripted wrapper that runs under the real `run_wrapper`, plus a learning-CLI double |
-| `tests/e2e_engram_standin.py` | **Engram stand-in** (not upstream Engram): a SQLite-backed HTTP-over-Unix-socket server launched via the real `memory.Runtime.start_process` |
+| `tests/e2e_agent.py` | **Scripted step engine** (`perform_step`), shared by the scripted wrapper double and the fake OpenCode. Learning operations go through the real `memory.cli()` launcher |
+| `tests/e2e_real_wrapper.py` | Launcher that loads `opencode-project-safe.py` by path and runs its `main()`. Only settle timing is shortened: `QUIET_SECONDS=0` and `time.sleep` capped at 0.05 s |
+| `tests/e2e_opencode.py` | **Fake OpenCode V2 CLI** used only by the real wrapper: `api` discovery, session list/get, interrupt, `run --title`, `run --session`. `GET /api/session/active` always returns an empty list, so no session is ever active. Unmodelled forms exit 97 |
+| `tests/e2e_memory_cli.py` | Launcher that imports `memory` from the repository root and calls the real `memory.cli()`. Only `memory.ROOT` and `memory.socket_path` are redirected; it refuses an unset socket or one under `/run/user/` |
+| `tests/e2e_engram_standin.py` | **Engram stand-in** (not upstream Engram; the default backend): a SQLite-backed HTTP-over-Unix-socket server launched via the real `memory.Runtime.start_process` |
 
 Every E2E test runs against a private temporary state directory. The memory
 socket is replaced for the whole test by a path under a 0700 temp directory.
@@ -78,10 +83,12 @@ Each Issue #4 scenario, the tests that cover it, and what is simulated.
 | 5. Idle board and selection | `IdleAndSelectionTests.test_no_action_decision_stops_ai_until_the_board_changes`; `IdleBoardTests.test_empty_board_makes_no_session_and_no_mutation_over_several_iterations`; `IdleBoardTests.test_all_terminal_board_makes_no_session_and_no_mutation` | Board with no work; an all-Done board |
 | 6. Engram death: before work, mid-flow, restart | `MemoryOutageTests.test_engram_process_death_blocks_new_work_before_any_ai_session`; `MemoryOutageTests.test_learning_survives_engram_restart_from_the_sqlite_store`; `MidFlowEngramTests.test_engram_death_at_ci_fails_closed_then_startup_restart_completes_without_repeating_ai` | Engram process killed; restart through real `Runtime.startup()` with the upgrade lookup patched to raise |
 | 6. GitHub outage | `OutageTests.test_outage_after_selection_keeps_decision_and_restart_does_not_reselect`; `OutageTests.test_outage_before_any_ai_session_fails_closed_with_no_mutations`; `WorkerRunLoopOutageTests.test_outage_backs_off_persistently_without_ai_and_stops_cleanly` | GitHub returns HTTP 503 for every call; the real `run()` loop on a thread with a stop event |
-| 7. Quota and crash recovery | `CheckpointAndQuotaTests.test_quota_429_on_one_project_pauses_all_ai_then_recovers`; `CheckpointAndQuotaTests.test_quota_during_coding_keeps_checkpoint_and_resumes_same_task_once`; `CrashRecoveryTests.test_lost_merge_response_then_restart_completes_without_second_merge`; `CrashRecoveryTests.test_restart_at_ci_and_postmerge_never_duplicates_ai_or_merge` | Scripted quota exit (rc 78); log of `clear_unstarted` recorded by the agent double; lost merge response |
+| 7. Quota and crash recovery | `CheckpointAndQuotaTests.test_quota_429_on_one_project_pauses_all_ai_then_recovers`; `CheckpointAndQuotaTests.test_quota_during_coding_keeps_checkpoint_and_resumes_same_task_once`; `CrashRecoveryTests.test_lost_merge_response_then_restart_completes_without_second_merge`; `CrashRecoveryTests.test_restart_at_ci_and_postmerge_never_duplicates_ai_or_merge`; `RealWrapperUnstartedQuotaTests.test_unstarted_quota_is_cleared_by_the_real_wrapper_and_the_same_task_resumes_once` | Scripted quota exit (rc 78) in the scripted-wrapper tests; in the real-wrapper test, `HTTP 429: quota reached` from the fake OpenCode, with the real `--clear-unstarted-quota`; lost merge response |
+| 1–3, 7 through the real wrapper | `RealWrapperHappyPathTests.test_backlog_issue_through_the_real_wrapper_resumes_once_and_merges_exact_sha`; `RealWrapperHappyPathTests.test_learning_instructions_reach_the_coding_env_and_recovery_prompt_but_never_selection` | The real `opencode-project-safe.py` (guard title, one recovery turn into the coding session, pending marker removed) against the fake OpenCode V2 CLI; GitHub is still the service double |
+| Supporting: learning CLI through the real `memory.cli()` | `MemoryCliRefusalTests` (7 tests); `MemoryCliFailureTests.test_a_dead_backend_records_the_failure_marker`; `MemoryCliMetricsTests.test_scripted_learning_session_updates_every_operational_counter`; `EngramBackendIdentityTests` (4 tests) | Real `memory.cli()` in a subprocess; only `memory.ROOT` and `memory.socket_path` redirected; Engram backend per `E2E_ENGRAM_BINARY` |
 | 8. Release gate | `ReleaseGateTests.test_feature_release_needs_owner_approval_then_tags_exact_sha`; `ReleaseGateTests.test_release_verify_waits_for_required_asset_then_completes`; `ReleaseGateTests.test_approval_for_a_different_sha_does_not_release_this_candidate`; `ReleaseGateTests.test_existing_tag_at_other_sha_fails_closed_and_is_not_moved`; `MaintenanceDueTests.test_due_release_enters_maintenance_and_the_only_ai_call_is_release_preparation`; `MaintenanceDueTests.test_not_due_with_fewer_than_three_renovate_prs_makes_no_ai_call`; `MaintenanceDueTests.test_not_due_with_release_younger_than_fourteen_days_makes_no_ai_call`; `MaintenanceDueTests.test_a_non_technical_merged_pr_blocks_maintenance_even_with_three_renovate_prs` | GitHub releases, tags, assets and approval comments |
 | Supporting: exit-code mapping of `gh pr checks` | `FakeChecksExitCodeTests.test_exit_code_mapping`; `FakeChecksExitCodeTests.test_controller_reads_pending_failed_and_passed_from_the_fake` | The fake's exit codes: 8 pending, 1 failed, 0 passed |
-| Supporting: memory socket and network guards | `MemorySocketGuardTests` (5 tests) | None; asserts the guards themselves |
+| Supporting: memory socket and network guards | `MemorySocketGuardTests` (6 tests) | None; asserts the guards themselves |
 
 ### Maintenance due rule, as tested
 
@@ -105,27 +112,59 @@ against a live service by the offline suite.
 | Item | Status | What the offline suite does | What still needs live acceptance or an owner decision |
 | --- | --- | --- | --- |
 | GitHub (`gh`, REST, search, Projects, checks, merge, releases) | Simulated — needs live acceptance | `tests/e2e_github.py` at the `gh` argv seam | The live smoke (below), once run by the owner |
-| OMO / OpenCode session | Simulated — needs live acceptance or owner decision | `tests/e2e_agent.py` replaces the wrapper executable; prompts are checked, the model is not | A real session, through the live smoke, once run by the owner |
-| Real upstream Engram binary | Simulated — needs live acceptance or owner decision | `tests/e2e_engram_standin.py`, a SQLite-backed stand-in, launched through the real `memory.Runtime.start_process`. The real download is refused (`Runtime.download`) | The VM suite is the only place the real binary is exercised: `vmtest/runner.py` lists "Engram release binary downloaded from GitHub by memory.py (checksum verified)" as a real integration, and `.github/workflows/vm-lifecycle.yml` runs it weekly (cron) and on manual dispatch. Its last green result is what counts; see `docs/VM_TESTING.md` |
-| Real safe wrapper `opencode-project-safe.py` | Simulated — needs live acceptance or owner decision | **Not in the E2E flow.** The E2E tests replace the wrapper with `tests/e2e_agent.py`. The wrapper's recovery behaviour is covered separately by `tests/test_wrapper_recovery.py` against a fake OpenCode API | A real OpenCode run through the wrapper (the live smoke), and the decision whether the wrapper needs an E2E case of its own |
-| Learning CLI `memory.cli()` | Re-implemented — needs owner decision | The agent double re-implements the CLI. It mirrors the token check, the selection refusal and the `memory.operation()` call (which applies the grant budgets). `memory.cli()` itself is not run (its `socket_path()` is the real `/run/user` path) | See the skipped-checks list below |
-| Memory `failure` marker | Simulated | The E2E controller checks it (`memory_gate` → `runtime.check()`); the agent double does not | None beyond the list below |
-| Memory `cli()` checks skipped by the agent double | Not exercised in E2E | Listed next | Owner decision: whether to add a subprocess-level CLI test with a private socket |
+| OMO / OpenCode session | Simulated — needs live acceptance or owner decision | Scripted-wrapper mode (`tests/e2e_agent.py`) and real-wrapper mode (the real `opencode-project-safe.py` calling the fake OpenCode V2 CLI, `tests/e2e_opencode.py`). Prompts are checked, the model is not | A real session, through the live smoke, once run by the owner |
+| Real safe wrapper `opencode-project-safe.py` | Real code, fake OpenCode | `RealWrapperBase` tests run the real wrapper unchanged (settle timing shortened only, see `tests/e2e_real_wrapper.py`) against the fake OpenCode V2 CLI | A real OpenCode server and model run through the wrapper (the live smoke) |
+| Learning CLI `memory.cli()` | Real code, two seams redirected | `tests/e2e_memory_cli.py` runs the real `memory.cli()` in a subprocess. Only `memory.ROOT` (the world temp dir) and `memory.socket_path()` (the private stand-in socket) are redirected. Grant shape, token check, selection refusal, `failure` marker, stdin caps, JSON-object check, `operation()` budgets and `metrics.json` counters run unchanged inside `memory.cli()`. The launcher reproduces memory.py's `__main__` exception-to-exit mapping (MemoryError, ValueError, KeyError, TypeError, OSError → message on stderr, exit 1); memory.py's own `__main__` block and its `--health` path are not exercised | Live Engram behaviour (see the next row) |
+| Engram backend | Stand-in by default; upstream binary when opted in | Default: `tests/e2e_engram_standin.py`, a SQLite-backed stand-in, launched through the real `memory.Runtime.start_process`. With `E2E_ENGRAM_BINARY` set, a copy of that binary is launched through the same path instead. `EngramBackendIdentityTests` records which backend answered (`service`, `status`, `version`) and, with a binary, asserts the version is not the stand-in's and matches `E2E_ENGRAM_VERSION`, which is then required. The real download is refused (`Runtime.download`) | Real-binary run: on 2026-11-26 the full `scripts/offline-tests.sh` passed locally with `E2E_ENGRAM_BINARY` naming a copy of upstream Engram v3.7.2 `linux_amd64` (checksum verified against upstream `checksums.txt`). This was a manual run, and CI uses the stand-in; the evidence is on PR #17. The VM suite is the other real-binary check: `vmtest/runner.py` lists "Engram release binary downloaded from GitHub by memory.py (checksum verified)", run by `.github/workflows/vm-lifecycle.yml`; see `docs/VM_TESTING.md` |
+| Wrapper active-session paths | **NOT exercised** | The fake OpenCode and `tests/test_wrapper_recovery.py` both report `/api/session/active` as empty, so the wrapper's active-session paths never run: the settle loop while sessions are active, descendant re-reconciliation, adopting or interrupting an active owned session, and refusing a concurrent root session. This gap is inherited by `test_wrapper_recovery.py`, which hard-codes the same empty list | Live OpenCode, or a fake that models active and descendant sessions (not in this PR) |
+| Memory `failure` marker | Real code | `memory.cli()` refuses with `Memory blocked` when `<state>/memory/failure` exists, and a dead backend's `MemoryError` creates it (`MemoryCliFailureTests`). The E2E controller also checks it through `memory_gate` → `runtime.check()` | None beyond the live Engram row |
 
-### `memory.cli()` checks the agent double does NOT exercise
+### Real-Engram run (opt-in, owner or CI)
 
-The agent double (`tests/e2e_agent.py`, `run_memory_ops`) does not run these
-checks, which are in `memory.cli()`:
+The offline default uses the stand-in. To run the Engram-backed tests against
+upstream Engram, download the release binary, verify it against the upstream
+checksum list, and point the suite at a copy:
 
-- the grant path shape (`memory-grant.json`, parent `projects/`, state root `ROOT/state`);
-- the `root/failure` marker check (`MemoryError: Memory blocked`);
-- the 4096-byte stdin cap and the JSON-object requirement on stdin;
-- the `update_metrics` counter update;
-- the real `socket_path()` resolution.
+```sh
+# Download the release archive and checksums.txt from the upstream release page.
+sha256sum -c --ignore-missing checksums.txt        # must print "OK" for the archive
+tar -xzf engram_3.7.2_linux_amd64.tar.gz engram
+install -d -m 700 /path/to/engram-copy
+cp engram /path/to/engram-copy/engram && chmod 700 /path/to/engram-copy/engram
+E2E_ENGRAM_BINARY=/path/to/engram-copy/engram E2E_ENGRAM_VERSION=3.7.2 bash scripts/offline-tests.sh
+```
 
-The double takes the same `root/adapter.lock` `flock` around the grant read and
-write (`tests/e2e_agent.py`), so that lock is exercised. It does check the grant token (`secrets.compare_digest`), refuses
-`kind == 'selection'`, applies `operation()` budgets, and persists the grant.
+The supported entry point is `scripts/offline-tests.sh`, which runs the suite with a
+temporary `HOME` and the shims. Running the modules by hand with discovery is for
+debugging only.
+
+`E2E_ENGRAM_BINARY` is checked before anything is copied. It is resolved, then refused
+(the suite fails loudly, never silently falling back to the stand-in) when it points
+inside `~/scripts/autocontroller`, under `/run/user/`, or at anything that is not a
+regular executable file. A symlink into a refused location is refused too.
+
+Each test's generation folder gets a copy of the binary (`engram-real`) and an `engram`
+shell shim. The shim runs the copy with `HOME` set to a private temporary directory,
+so the upstream binary does not read or write the real HOME. The real binary still does
+all the serving.
+
+`E2E_ENGRAM_VERSION` is required whenever `E2E_ENGRAM_BINARY` is set. Without it the
+identity test fails with a message asking you to set it. The test then requires the
+probed version to equal `E2E_ENGRAM_VERSION` exactly. Socket directories are `tempfile`
+defaults under `/tmp`, not a fixed path.
+
+Use a copy, never the production Engram binary or database, and never
+`~/scripts/autocontroller`.
+
+### `memory.cli()` checks no longer covered only by a double
+
+The scripted agent double does not reimplement the CLI any more. Every learning
+operation in E2E runs through `tests/e2e_memory_cli.py`, so the checks listed in
+`tests/test_e2e_memory_cli.py` (grant path shape, `failure` marker, 4096-byte stdin
+cap, JSON-object requirement, `update_metrics` counters, socket refusal) are
+exercised by the real code. The agent only parses the grant path and token out of
+the instruction text it was given, substitutes `$first_returned`, and calls the
+launcher. The token comparison itself happens inside `memory.cli()`.
 
 ## Live smoke
 
@@ -382,11 +421,18 @@ evidence.
 
 - No test in this suite contacts GitHub, OpenCode, a model provider, the network,
   systemd, or the production Engram socket or database.
-- The Engram stand-in is not upstream Engram. Its schema and HTTP surface follow
-  `memory.py`, not the upstream project.
-- `memory.cli()` is not executed; the agent double re-implements the checks listed
-  above.
-- The real safe wrapper is not in the E2E flow (see the table).
+- The default Engram backend is the stand-in, not upstream Engram. Its schema and HTTP
+  surface follow `memory.py`, not the upstream project. The real binary runs only when
+  `E2E_ENGRAM_BINARY` is set (see "Real-Engram run" above).
+- `memory.cli()` runs for real, with two seams redirected: `memory.ROOT` and
+  `memory.socket_path()`. Nothing else in `memory.py` is patched.
+- The real safe wrapper runs for real in the `RealWrapper*` tests, but its OpenCode
+  is the fake V2 CLI. Only its settle timing is shortened. The real OpenCode server and
+  model are not used.
+- The fake OpenCode never reports an active session. The wrapper's active-session paths
+  (the settle loop with active sessions, descendant re-reconciliation, adopting or
+  interrupting an active owned session, refusing a concurrent root session) are not
+  exercised by the E2E suite or by `tests/test_wrapper_recovery.py`.
 - The worker `run()` outage test (`WorkerRunLoopOutageTests`) sets `worker._validated = True`.
   The E2E checkouts sit outside `DEFAULT_ROOT`, so `validate()` would reject them. That
   test therefore does NOT cover checkout validation. The outage alone drives the

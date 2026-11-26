@@ -1,24 +1,30 @@
 #!/usr/bin/env python3
-"""STAND-IN for the OpenCode/OMO safe wrapper, used only by the offline E2E suite.
+"""Scripted OMO agent for the offline E2E suite (two entry modes, one step engine).
 
-The real ProjectWorker.run_wrapper starts this file exactly as it would start
-opencode-project-safe.py: `python3 <wrapper> run --auto [--agent X] --title T PROMPT`
-in its own process group with a log file. Behaviour per session is scripted by
-the test in `<state_home>/e2e/script.json` (keyed by project name). Each session:
+Mode 1, scripted wrapper (default World): the real `ProjectWorker.run_wrapper` starts this file
+in place of opencode-project-safe.py: `python3 <this file> run --auto [--agent X] --title T PROMPT`.
 
-- pops the next scripted step for its project (no step => exit 97, loud failure);
-- appends one record to `<state_home>/e2e/invocations.jsonl` (argv, prompt,
-  env subset, phase);
+Mode 2, real wrapper (World(real_wrapper=True)): the real `opencode-project-safe.py` runs and
+calls the fake OpenCode V2 CLI (tests/e2e_opencode.py), which calls `perform_step` below.
+
+In both modes behaviour per session is scripted by the test in `<state>/e2e/script.json`
+(keyed by project name). `perform_step` does the same thing for each step:
+
 - applies the step's GitHub actions to the shared FakeGitHub as actor `agent`;
-- optionally leaves a `starting` pending marker (unstarted quota case);
-- prints the step's output and exits with the step's rc.
+- runs the step's learning operations through the REAL `memory.cli()` (tests/e2e_memory_cli.py);
+- optionally leaves a `starting` pending marker (scripted mode only);
+- prints the step's output and returns the step's rc.
 
-It never talks to a real model, network, gh or OpenCode server.
+Every session appends one record to `<state>/e2e/invocations.jsonl`. It never talks to a real
+model, network, gh or OpenCode server.
 """
 import fcntl
 import json
 import os
 from pathlib import Path
+import re
+import shlex
+import subprocess
 import sys
 import time
 
@@ -26,8 +32,11 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent))  # autonomy-controller imports release_policy/memory from the repo root
 
+MEMORY_LAUNCHER = HERE / 'e2e_memory_cli.py'
+MEMORY_TIMEOUT = 60
 ENV_KEYS = ('AUTONOMY_PHASE', 'AUTONOMY_PROJECT_NAME', 'AUTONOMY_PROJECT_ROOT')
 QUOTA_RC = 78
+UNMODELLED_RC = 97
 
 
 def e2e_dir(pending_marker: str) -> Path:
@@ -68,56 +77,97 @@ def clear_unstarted_quota(marker: Path) -> int:
     return 0
 
 
-def run_memory_ops(pdir: Path, ops: list[dict]) -> list[dict]:
-    """Model the learning CLI for the scripted agent, with the same checks as memory.cli().
+def learning_grant_from_instructions(instructions: str) -> tuple[Path, str] | None:
+    """Return (memory.py path, grant path, token) parsed from the controller's instruction text.
 
-    The token comes from the instructions the controller injected into this session's
-    environment, not from the test. The grant is checked against the file on disk.
-    Engram is the stand-in server at $E2E_ENGRAM_SOCKET (test-only variable; the
-    product code never reads it). Each op's outcome is returned, including refusals.
+    The controller writes `python3 <ROOT>/memory.py --grant <G> --token <T>` (memory.instruction).
+    The paths and token are shlex-quoted only when needed; parse each piece with shlex.
     """
-    import fcntl as _fcntl
-    import re as _re
-    import secrets as _secrets
-    import memory as m  # repo root is on sys.path
+    match = re.search(r"python3 ((?:'[^']*'|\"[^\"]*\"|\S)+) --grant ((?:'[^']*'|\"[^\"]*\"|\S)+) --token (\S+)",
+                      instructions)
+    if not match:
+        return None
+    script, grant, token = (shlex.split(match.group(1))[0], shlex.split(match.group(2))[0], match.group(3))
+    return Path(script), grant, token
 
+
+def memory_cli(script: Path, grant: str, token: str, action: str, arg, engram_socket: str) -> dict:
+    """Run the REAL memory.cli() through the launcher; return the records shape the tests read."""
+    argv = [sys.executable, str(MEMORY_LAUNCHER), '--grant', grant, '--token', token, action]
+    if action == 'search':
+        argv.append(str(arg))
+        stdio = {'stdin': subprocess.DEVNULL}
+    else:
+        stdio = {'input': json.dumps(arg, ensure_ascii=False)}  # record/feedback: JSON on stdin
+    # Build the launcher env explicitly: no ambient E2E_* leaks through, only the two values this
+    # session's world sets. E2E_ENGRAM_BINARY is an E2E_ name too, so it is stripped here as well.
+    env = {k: v for k, v in os.environ.items() if not k.startswith('E2E_')}
+    env['E2E_ENGRAM_SOCKET'] = engram_socket
+    env['E2E_MEMORY_ROOT'] = os.environ.get('E2E_MEMORY_ROOT', '')
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=MEMORY_TIMEOUT, env=env,
+                          check=False, **stdio)
+    if proc.returncode:
+        return {'ok': False, 'error': (proc.stderr or proc.stdout).strip()}
+    return {'ok': True, 'result': json.loads(proc.stdout)}
+
+
+def run_memory_ops(pdir: Path, ops: list[dict]) -> list[dict]:
+    """Execute learning operations for one session through the real memory.cli().
+
+    The token and grant path come from the instruction text the controller injected into this
+    session's environment. The memory.py path must be this repository's memory.py. Only
+    E2E_ENGRAM_SOCKET (the private stand-in socket) and E2E_MEMORY_ROOT (read by the launcher)
+    are test variables. A session with no grant gets a refusal record for each op.
+    """
     instructions = os.environ.get('AUTOCONTROLLER_LEARNING_INSTRUCTIONS', '')
-    match = _re.search(r'--token (\S+)', instructions)
-    grant_path = pdir / 'memory-grant.json'
-    state = pdir.parent.parent
-    root = state / 'memory'
-    if not match or not grant_path.exists():
-        return [{'ok': False, 'error': 'no learning grant in this session'}]
-    with (root / 'adapter.lock').open('a') as lock:
-        _fcntl.flock(lock, _fcntl.LOCK_EX)
-        grant = json.loads(grant_path.read_text(encoding='utf-8'))
-        if not _secrets.compare_digest(grant['token'], match.group(1)):
-            return [{'ok': False, 'error': 'Invalid session grant'}]
-        if grant['kind'] == 'selection':
-            return [{'ok': False, 'error': 'No learning during selection'}]
-        engram_socket = os.environ.get('E2E_ENGRAM_SOCKET', '')
-        if not engram_socket or engram_socket.startswith('/run/user/'):
-            # Test-only variable: refuse rather than reach any production or unset socket.
-            raise RuntimeError('E2E_ENGRAM_SOCKET must name the private stand-in socket')
-        backend = m.Backend(Path(engram_socket))
-        results = []
-        first_returned = None
-        for op in ops:
-            arg = op['arg']
-            if isinstance(arg, dict) and arg.get('id') == '$first_returned':
-                arg = dict(arg, id=first_returned)  # resolved from this session's last search
-            try:
-                result = m.operation(backend, grant, op['action'], arg)
-                if op['action'] == 'search' and result:
-                    first_returned = result[0]['id']
-                results.append({'ok': True, 'result': result})
-            except (m.MemoryError, ValueError, KeyError, TypeError) as exc:
-                results.append({'ok': False, 'error': str(exc)})
-        m.atomic(grant_path, grant)
+    parsed = learning_grant_from_instructions(instructions)
+    if parsed is None:
+        return [{'ok': False, 'error': 'no learning grant in this session'} for _ in ops]
+    script, grant, token = parsed
+    if script.resolve() != (HERE.parent / 'memory.py').resolve():
+        raise RuntimeError(f'learning instruction names a foreign memory.py: {script}')
+    engram_socket = os.environ.get('E2E_ENGRAM_SOCKET', '')
+    if not engram_socket or engram_socket.startswith('/run/user/'):
+        # Test-only variable: refuse rather than reach any production or unset socket.
+        raise RuntimeError('E2E_ENGRAM_SOCKET must name the private stand-in socket')
+    results = []
+    first_returned = None
+    for op in ops:
+        arg = op['arg']
+        if isinstance(arg, dict) and arg.get('id') == '$first_returned':
+            arg = dict(arg, id=first_returned)  # resolved from this session's last search
+        outcome = memory_cli(script, grant, token, op['action'], arg, engram_socket)
+        if op['action'] == 'search' and outcome['ok'] and outcome['result']:
+            first_returned = outcome['result'][0]['id']
+        results.append(outcome)
     return results
 
 
+def perform_step(folder: Path, pdir: Path, project: str, step: dict, title: str,
+                 marker: Path | None) -> int:
+    """The single step engine shared by both modes. Returns the session rc."""
+    from e2e_github import FakeGitHub  # imported lazily: only needed when a step touches GitHub
+    if step.get('actions') or step.get('outage_after'):
+        store = FakeGitHub(folder / 'github.json')
+        for action in step.get('actions', []):
+            store.run_gh(action['gh'], actor='agent')
+        if step.get('outage_after'):
+            store.set_outage(True)  # GitHub goes down right after this session
+    if step.get('memory'):
+        results = run_memory_ops(pdir, step['memory'])
+        log_invocation(folder, {'kind': 'memory', 'project': project, 'results': results})
+    if step.get('marker') == 'starting':
+        if marker is None:
+            print('scripted marker is not available in real-wrapper mode', file=sys.stderr)
+            return UNMODELLED_RC
+        marker.write_text(json.dumps({'status': 'starting', 'title': title}), encoding='utf-8')
+    if step.get('output'):
+        print(step['output'])
+    return int(step.get('rc', 0))
+
+
 def run_session(argv: list[str]) -> int:
+    """Scripted-wrapper mode: the controller started this file where the wrapper would run."""
     marker = Path(os.environ['AUTONOMY_PENDING_MARKER'])
     folder = e2e_dir(str(marker))
     if argv[:1] == ['--clear-unstarted-quota']:
@@ -132,13 +182,13 @@ def run_session(argv: list[str]) -> int:
         return 4
 
     rest = argv[2:]
-    agent = rest[rest.index('--agent') + 1] if '--agent' in rest else None
+    agent_name = rest[rest.index('--agent') + 1] if '--agent' in rest else None
     title = rest[rest.index('--title') + 1] if '--title' in rest else ''
     prompt = rest[-1]
     project = os.environ['AUTONOMY_PROJECT_NAME']
     phase = os.environ.get('AUTONOMY_PHASE', 'code')
     log_invocation(folder, {
-        'kind': 'session', 'project': project, 'phase': phase, 'agent': agent, 'title': title,
+        'kind': 'session', 'project': project, 'phase': phase, 'agent': agent_name, 'title': title,
         'prompt': prompt, 'argv': argv,
         'env': {k: os.environ.get(k) for k in ENV_KEYS},
         'learning_instructions': bool(os.environ.get('AUTOCONTROLLER_LEARNING_INSTRUCTIONS')),
@@ -148,23 +198,7 @@ def run_session(argv: list[str]) -> int:
     if step is None:
         print(f'UNSCRIPTED AI SESSION for project {project} phase {phase}', file=sys.stderr)
         return 97
-
-    if step.get('actions'):
-        from e2e_github import FakeGitHub  # imported lazily: only needed when acting
-        store = FakeGitHub(folder / 'github.json')
-        for action in step['actions']:
-            store.run_gh(action['gh'], actor='agent')
-    if step.get('outage_after'):
-        from e2e_github import FakeGitHub as _Store  # GitHub goes down right after this session
-        _Store(folder / 'github.json').set_outage(True)
-    if step.get('memory'):
-        results = run_memory_ops(marker.parent, step['memory'])
-        log_invocation(folder, {'kind': 'memory', 'project': project, 'results': results})
-    if step.get('marker') == 'starting':
-        marker.write_text(json.dumps({'status': 'starting', 'title': title}), encoding='utf-8')
-    if step.get('output'):
-        print(step['output'])
-    return int(step.get('rc', 0))
+    return perform_step(folder, marker.parent, project, step, title, marker)
 
 
 if __name__ == '__main__':
