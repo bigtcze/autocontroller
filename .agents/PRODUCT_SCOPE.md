@@ -85,7 +85,9 @@ is explicit; see `.agents/SECURITY.md`), bypassing protections.
   `Autocontroller-Release:`), selector result lines and the aggregate check
   name `required` are interfaces of running installations; change them only
   with migration and an authorized Issue.
-- Lifecycle and release interfaces: the drain state files `state/drain.request`
+- Lifecycle and release interfaces: the startup readiness marker `state/ready.json`
+  (bound to the controller pid and start ticks; required by update/rollback health checks),
+  and the drain state files `state/drain.request`
   and `state/drain.ready` (the same names in `lifecycle.py` and
   `autonomy-controller.py`); the config keys `update_repository` and
   `release.blocker_label`; the archive layout `autocontroller-<tag>/` with its

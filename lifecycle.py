@@ -249,11 +249,13 @@ def install_program_files(source: Path, target: Path, program: dict | None = Non
 
 
 # ---- graceful drain and service control ---------------------------------------
-# Same file names as autonomy-controller.py (DRAIN_REQUEST/DRAIN_READY); tests pin them.
+# Same file names as autonomy-controller.py (DRAIN_REQUEST/DRAIN_READY/CONTROLLER_READY); tests pin them.
 DRAIN_REQUEST = 'drain.request'
 DRAIN_READY = 'drain.ready'
+CONTROLLER_READY = 'ready.json'
 DRAIN_POLL_SECONDS = 1.0
 DEFAULT_DRAIN_TIMEOUT = 3600
+DEFAULT_READY_TIMEOUT = 180
 UNIT = 'autocontroller.service'
 
 
@@ -314,6 +316,39 @@ def drain_ready(state_dir: Path, nonce: str, *, alive=pid_alive) -> bool:
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
     return alive(pid)
+
+
+def process_start_ticks(pid: int) -> int | None:
+    """Field 22 (starttime, clock ticks since boot) of /proc/<pid>/stat. None when unreadable.
+
+    comm (field 2) is wrapped in parentheses and may contain spaces or parentheses, so fields are
+    counted from after the LAST ')'.
+    """
+    try:
+        stat = Path(f'/proc/{pid}/stat').read_text(encoding='utf-8', errors='replace')
+        fields = stat[stat.rindex(')') + 2:].split()
+        return int(fields[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def controller_ready(state_dir: Path, pid: int) -> bool:
+    """True only when ready.json names THIS pid and the start ticks of its current process.
+
+    A marker from an earlier process (other pid, or same pid reused after a restart, which changes
+    starttime) is stale. Missing, unreadable or unknown-schema markers are not ready.
+    """
+    doc = _read_json(state_dir / CONTROLLER_READY)
+    if not isinstance(doc, dict) or doc.get('schema') != 1:
+        return False
+    marker_pid = doc.get('pid')
+    started = doc.get('started')
+    if not isinstance(marker_pid, int) or isinstance(marker_pid, bool) or marker_pid <= 0 or marker_pid != pid:
+        return False
+    if not isinstance(started, int) or isinstance(started, bool):
+        return False
+    current = process_start_ticks(pid)
+    return current is not None and started == current
 
 
 def wait_drained(state_dir: Path, nonce: str, *, timeout: float, alive=pid_alive,
@@ -683,7 +718,8 @@ def refuse_downgrade(target: Path, tag: str):
                              'use `autocontroller rollback` to return to the previous release')
 
 
-def healthy(*, check, seconds: int, sleep=time.sleep, clock=time.monotonic) -> bool:
+def healthy(*, check, seconds: int, sleep=time.sleep, clock=time.monotonic, ready=None,
+            ready_timeout: float = DEFAULT_READY_TIMEOUT, reasons: list | None = None) -> bool:
     """Run `--check`, then require the SAME controller process to stay up for `seconds`.
 
     N1: every poll must read active/running with the same nonzero MainPID and the same NRestarts as
@@ -691,22 +727,43 @@ def healthy(*, check, seconds: int, sleep=time.sleep, clock=time.monotonic) -> b
     activating) fails the window. Polling is 1s so a crash is seen quickly.
     R1: any unreadable state, including the first read, is a failed check, not an exception. The caller
     then stops the new code and restores the previous release; a raise would skip abort_swap.
+    Readiness: the controller process must also publish state/ready.json for its own pid and start
+    ticks (see controller_ready). That is startup readiness only, not proof of continuous task progress.
+    It passes once readiness was observed AND `seconds` elapsed; it fails when readiness is not observed
+    within max(seconds, ready_timeout). The reason for a failure is appended to `reasons`.
     """
-    if not check():
+    def fail(reason: str) -> bool:
+        if reasons is not None:
+            reasons.append(reason)
         return False
+
+    if not check():
+        return fail('--check failed')
+    ready = ready or (lambda pid: False)
     try:
         first = unit_state()
         if not can_drain(first):
-            return False
-        deadline = clock() + seconds
-        while clock() < deadline:
+            return fail('service not running after start')
+        pid = first['MainPID']
+        start = clock()
+        window_end = start + seconds
+        bound = start + max(seconds, ready_timeout)
+        is_ready = False
+        while True:
+            now_t = clock()
+            if not is_ready and ready(pid):
+                is_ready = True
+            if is_ready and now_t >= window_end:
+                return True
+            if not is_ready and now_t >= bound:
+                return fail(f'controller pid {pid} did not publish startup readiness (state/ready.json) '
+                            f'within {max(seconds, ready_timeout):g}s')
             sleep(1.0)
             now = unit_state()
             if not can_drain(now) or now['MainPID'] != first['MainPID'] or now['NRestarts'] != first['NRestarts']:
-                return False
+                return fail('controller process changed during the health window (MainPID/NRestarts)')
     except LifecycleError:
-        return False
-    return True
+        return fail('systemctl state unreadable')
 
 
 def enabled_project_count(target: Path) -> int | None:
@@ -757,18 +814,28 @@ def run_check(target: Path) -> bool:
     return proc.returncode == 0
 
 
-def start_and_verify(target: Path, *, seconds: int, check=None, sleep=time.sleep, clock=time.monotonic) -> bool:
+def start_and_verify(target: Path, *, seconds: int, check=None, sleep=time.sleep, clock=time.monotonic,
+                     ready_timeout: float = DEFAULT_READY_TIMEOUT, reasons: list | None = None) -> bool:
     if not start_service():
+        if reasons is not None:
+            reasons.append('service did not start')
         return False
-    return healthy(check=check or (lambda: run_check(target)), seconds=seconds, sleep=sleep, clock=clock)
+    return healthy(check=check or (lambda: run_check(target)), seconds=seconds, sleep=sleep, clock=clock,
+                   ready=lambda pid: controller_ready(target / 'state', pid), ready_timeout=ready_timeout,
+                   reasons=reasons)
 
 
 def verified(target: Path, *, active: bool, health_seconds: int, check=None, sleep=time.sleep,
-             clock=time.monotonic) -> bool:
+             clock=time.monotonic, ready_timeout: float = DEFAULT_READY_TIMEOUT,
+             reasons: list | None = None) -> bool:
     """Active services must start and stay up; inactive ones are only checked, never started."""
     if active:
-        return start_and_verify(target, seconds=health_seconds, check=check, sleep=sleep, clock=clock)
-    return (check or (lambda: run_check(target)))()
+        return start_and_verify(target, seconds=health_seconds, check=check, sleep=sleep, clock=clock,
+                                ready_timeout=ready_timeout, reasons=reasons)
+    ok = (check or (lambda: run_check(target)))()
+    if not ok and reasons is not None:
+        reasons.append('--check failed')
+    return ok
 
 
 # ---- orchestration ------------------------------------------------------------------
@@ -797,6 +864,7 @@ def _stop_after_drain(target: Path, timeout: float, sleep=time.sleep, clock=time
             stop_service()
     else:
         stop_service()
+    _forget_readiness(target)
     return active
 
 
@@ -807,11 +875,17 @@ def _stop_unhealthy(target: Path):
     activating unit is stopped too. No drain: an unhealthy tree has already failed its checks.
     """
     stop_service()
+    _forget_readiness(target)
+
+
+def _forget_readiness(target: Path):
+    """Stale invalidation: a stopped controller can never be ready. Harmless if the marker is absent."""
+    (target / 'state' / CONTROLLER_READY).unlink(missing_ok=True)
 
 
 def update(target: Path, repo: str, *, gh, tag: str | None = None, yes: bool = False, environ,
            ask=input, drain_timeout: float = DEFAULT_DRAIN_TIMEOUT, health_seconds: int = 30,
-           check=None, sleep=time.sleep, clock=time.monotonic) -> str:
+           check=None, sleep=time.sleep, clock=time.monotonic, ready_timeout: float = DEFAULT_READY_TIMEOUT) -> str:
     refuse_agent(environ, 'update')
     confirm('Update AutoController from the latest release' if tag is None else f'Update AutoController to {tag}',
             yes=yes, ask=ask)
@@ -844,29 +918,34 @@ def update(target: Path, repo: str, *, gh, tag: str | None = None, yes: bool = F
             abort_swap(target)
             if active: start_service()
             raise
-        ok = verified(target, active=active, health_seconds=health_seconds, check=check, sleep=sleep, clock=clock)
+        reasons: list[str] = []
+        ok = verified(target, active=active, health_seconds=health_seconds, check=check, sleep=sleep, clock=clock,
+                      ready_timeout=ready_timeout, reasons=reasons)
         if ok:
             commit_swap(target)
             append_history(target, {'action': 'update', 'from': before, 'to': stage['tag'], 'result': 'ok'})
             _remove(staging)
             return f'updated {before or "unknown"} -> {stage["tag"]}'
+        reason = '; '.join(reasons) or 'health check failed'
         _stop_unhealthy(target)
         abort_swap(target)
         restored = verified(target, active=active, health_seconds=health_seconds, check=check, sleep=sleep,
-                            clock=clock)
+                            clock=clock, ready_timeout=ready_timeout)
         append_history(target, {'action': 'update', 'from': before, 'to': stage['tag'],
-                                'result': 'rolled_back' if restored else 'rollback_unhealthy'})
+                                'result': 'rolled_back' if restored else 'rollback_unhealthy', 'reason': reason})
         _remove(staging)
         if active:
             state = 'restored and running' if restored else 'restored but NOT healthy; inspect the service'
         else:
             state = ('restored (service was stopped and is not started; its check passes)' if restored
                      else 'restored but its check FAILS; inspect the install')
-        raise LifecycleError(f'update to {stage["tag"]} failed its health check; previous {before or "version"} {state}')
+        raise LifecycleError(f'update to {stage["tag"]} failed its health check ({reason}); '
+                             f'previous {before or "version"} {state}')
 
 
 def rollback(target: Path, *, yes: bool = False, environ, ask=input, drain_timeout: float = DEFAULT_DRAIN_TIMEOUT,
-             health_seconds: int = 30, check=None, sleep=time.sleep, clock=time.monotonic) -> str:
+             health_seconds: int = 30, check=None, sleep=time.sleep, clock=time.monotonic,
+             ready_timeout: float = DEFAULT_READY_TIMEOUT) -> str:
     refuse_agent(environ, 'rollback')
     confirm('Roll back AutoController to the previous installed release', yes=yes, ask=ask)
     previous = target / 'rollback' / 'previous'
@@ -895,17 +974,22 @@ def rollback(target: Path, *, yes: bool = False, environ, ask=input, drain_timeo
             _prune(target, prev_program, current)
             _remove(swap)
             raise
-        ok = verified(target, active=active, health_seconds=health_seconds, check=check, sleep=sleep, clock=clock)
+        reasons: list[str] = []
+        ok = verified(target, active=active, health_seconds=health_seconds, check=check, sleep=sleep, clock=clock,
+                      ready_timeout=ready_timeout, reasons=reasons)
         if not ok:
+            reason = '; '.join(reasons) or 'health check failed'
             _stop_unhealthy(target)
             install_program_files(swap, target, *snapshot_program(swap))
             _prune(target, prev_program, current)
             _remove(swap)
             restored = verified(target, active=active, health_seconds=health_seconds, check=check, sleep=sleep,
-                                clock=clock)
+                                clock=clock, ready_timeout=ready_timeout)
             append_history(target, {'action': 'rollback', 'from': before, 'to': target_tag,
-                                    'result': 'failed_restored' if restored else 'failed_unhealthy'})
-            raise LifecycleError(f'rollback to {target_tag} failed its health check; the current release was restored')
+                                    'result': 'failed_restored' if restored else 'failed_unhealthy',
+                                    'reason': reason})
+            raise LifecycleError(f'rollback to {target_tag} failed its health check ({reason}); '
+                                 'the current release was restored')
         # The previous store now holds the release we just left, so a rollback can itself be undone.
         # N4: the old store is renamed aside, not deleted first, so a crash at any point leaves a
         # recoverable state: previous, previous.old or swap always holds the release that was replaced.
@@ -951,7 +1035,8 @@ def _recovery_state(rollback: Path) -> str:
 
 
 def recover(target: Path, *, yes: bool = False, environ, ask=input, drain_timeout: float = DEFAULT_DRAIN_TIMEOUT,
-            health_seconds: int = 30, check=None, sleep=time.sleep, clock=time.monotonic) -> str:
+            health_seconds: int = 30, check=None, sleep=time.sleep, clock=time.monotonic,
+            ready_timeout: float = DEFAULT_READY_TIMEOUT) -> str:
     """S3/N4: resolve a leftover rollback by restoring, finishing or tidying it, never by guessing.
 
     `swap` holds the release a rollback replaced, copied before any program file moved. The leftover
@@ -990,12 +1075,15 @@ def recover(target: Path, *, yes: bool = False, environ, ask=input, drain_timeou
                                  + '; '.join(problems[:3]))
         # Fail closed: the tree must pass the same health rule a rollback applies. Failure stops it again,
         # keeps the leftovers for a retry, and raises so the exit code is nonzero.
-        ok = verified(target, active=active, health_seconds=health_seconds, check=check, sleep=sleep, clock=clock)
+        reasons: list[str] = []
+        ok = verified(target, active=active, health_seconds=health_seconds, check=check, sleep=sleep, clock=clock,
+                      ready_timeout=ready_timeout, reasons=reasons)
         if not ok:
+            reason = '; '.join(reasons) or 'health check failed'
             _stop_unhealthy(target)
             what = 'recovered files were restored' if state == 'restore' else 'rollback store was not finished'
             raise LifecycleError(f'{what} (rollback/swap kept) but the service is NOT running: '
-                                 'the tree failed its health check; inspect before retrying')
+                                 f'the tree failed its health check ({reason}); inspect before retrying')
         if state == 'restore':
             _remove(swap)
         else:

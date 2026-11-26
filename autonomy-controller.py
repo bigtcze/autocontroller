@@ -42,6 +42,9 @@ SHARED_QUOTA_FILE = "ai-cooldown.json"
 # Graceful drain handshake, written by the user-invoked updater (request) and the main loop (ready).
 DRAIN_REQUEST = "drain.request"
 DRAIN_READY = "drain.ready"
+# Startup readiness marker, bound to this process (pid + start ticks). Published only after Engram and
+# every enabled worker initialized; removed on shutdown. Read by lifecycle.controller_ready.
+CONTROLLER_READY = "ready.json"
 
 
 class ControllerError(Exception):
@@ -655,6 +658,26 @@ def drain_requested(state_home: Path, lock_path: Path | None = None) -> bool:
     return request is not None and not request.get("stale")
 
 
+def process_start_ticks(pid: int) -> int | None:
+    """Field 22 (starttime) of /proc/<pid>/stat; None when unreadable. Parsed after the LAST ')' (comm may contain them)."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+        return int(stat[stat.rindex(")") + 2:].split()[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def sync_controller_ready(state_home: Path, workers: list, memory_ok: bool) -> None:
+    """Publish ready.json once Engram is up and every enabled worker is initialized (zero workers: trivially so).
+
+    Startup readiness only: the marker is not unlinked on every tick, it is removed at startup and shutdown.
+    """
+    if not memory_ok or not all(w.initialized.is_set() for w in workers):
+        return
+    pid = os.getpid()
+    json_atomic(state_home / CONTROLLER_READY, {"schema": 1, "pid": pid, "started": process_start_ticks(pid), "at": time.time()})
+
+
 def sync_drain_ready(state_home: Path, workers: list, lock_path: Path | None = None) -> None:
     """Main-loop side: publish drain.ready only for a valid request while every worker is parked."""
     ready = state_home / DRAIN_READY
@@ -700,6 +723,9 @@ class ProjectWorker:
         self.bootstrap_done=self.pdir/"bootstrap-complete.json"
         # Set only while this worker is idle because of a drain request (never inside an iteration).
         self.parked=threading.Event()
+        # Set once validate() has succeeded in this process: the worker is initialized for readiness.
+        self.initialized=threading.Event()
+        self._init_attempted=False
 
     def notice(self, key: str, message: str, *, warning=True, period=3600):
         """Suppress repeated journal messages, including across service reboots."""
@@ -1864,6 +1890,14 @@ class ProjectWorker:
                     if not was_parked: self.notice("drain","drain requested; no new work",warning=False)
                     self.stop.wait(self.park_poll)
                     continue
+                # Once per process, before the persisted backoff: a backoff written by a previous process
+                # must not hold startup readiness for hours. A failure goes through the except path below.
+                if not self._init_attempted and not getattr(self,"_validated",False):
+                    self._init_attempted=True
+                    self.validate(ignore_conflicts=True)
+                    self._validated=True
+                    self.initialized.set()
+                    self.notice("validated","GitHub Project and checkout validated",warning=False)
                 remaining=self.worker_ready()
                 if remaining>0:
                     self._idle_wait(min(remaining,self.interval))
@@ -1873,6 +1907,7 @@ class ProjectWorker:
                 if not getattr(self,"_validated",False):
                     self.validate(ignore_conflicts=True)
                     self._validated=True
+                    self.initialized.set()
                     self.notice("validated","GitHub Project and checkout validated",warning=False)
                 seconds=self.one_iteration()
                 self.worker_success()
@@ -1965,6 +2000,8 @@ def main():
         LOG.warning("received signal %s; stopping workers and preserving checkpoints",signum)
         stop.set()
     signal.signal(signal.SIGINT,stop_signal);signal.signal(signal.SIGTERM,stop_signal)
+    # A marker from a previous process is never valid for this one: remove it before any startup work.
+    (state_dir/CONTROLLER_READY).unlink(missing_ok=True)
     runtime=learning.Runtime(state_dir)
     threads=[]
     running=[]
@@ -1981,6 +2018,8 @@ def main():
             threads.append(thread);thread.start()
         next_probe=time.monotonic()+30
         while not stop.is_set():
+            # Startup readiness: Engram started above; publish once every enabled worker has validated.
+            sync_controller_ready(state_dir,running,memory_ok=True)
             stop.wait(5)
             if stop.is_set(): break
             # Publish drain.ready only after every worker has parked (see ProjectWorker.run).
@@ -1995,6 +2034,8 @@ def main():
         runtime.failed.touch()
         LOG.critical("MEMORY/CONTROLLER BLOCKED; stopping all development, preserving checkpoints: %s",exc)
     finally:
+        # Invalidate readiness first: a shutting-down or failed controller must never look ready.
+        (state_dir/CONTROLLER_READY).unlink(missing_ok=True)
         stop.set()
         try: runtime.metric(False)
         except OSError: LOG.exception("Cannot write memory health metric")
