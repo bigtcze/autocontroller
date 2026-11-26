@@ -97,25 +97,16 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn('Rebuilt archive', block)
         self.assertIn('release_artifacts.py build', block)
 
-    def test_draft_is_created_then_verified_then_published(self):
-        create = self.text.index('gh release create')
-        verify = self.text.index('gh api "repos/$GH_REPO/releases/$ids"')
-        publish = self.text.index('gh release edit "$TAG" --repo "$GH_REPO" --draft=false')
-        self.assertLess(create, verify)
-        self.assertLess(verify, publish)
-        self.assertIn('--draft', self.text[create:verify])
+    def test_publish_job_delegates_to_the_python_publish_command(self):
+        block = job_block(self.text, 'publish')
+        self.assertIn('release_artifacts.py publish --repo "$GH_REPO"', block)
+        self.assertNotIn('gh api', block)
+        self.assertNotIn('--slurp', self.text)
+        self.assertNotIn('gh release create', self.text)
 
     def test_release_is_never_created_as_prerelease(self):
         self.assertNotIn('--prerelease', self.text)
-
-    def test_publish_refuses_existing_published_release_and_clears_stale_drafts(self):
-        block = job_block(self.text, 'publish')
-        self.assertIn('refusing to replace it', block)
-        self.assertIn('--method DELETE', block)
-
-    def test_asset_digests_are_compared_fail_closed(self):
-        self.assertIn('Draft assets do not match local digests; not publishing', self.text)
-        self.assertIn('.digest // ""', self.text)
+        self.assertNotIn('--prerelease', (ROOT / 'release_artifacts.py').read_text(encoding='utf-8'))
 
     def test_header_describes_the_gated_pipeline_not_absent_artifacts(self):
         header = self.text.split('name: release', 1)[0]

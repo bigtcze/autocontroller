@@ -69,6 +69,14 @@ class BlockerListingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             rp.open_release_blockers(REPO, lambda path: {'message': 'Not Found'})
 
+    # NIT: the blocker label is URL-encoded; the controller accepts spaces and ':' in it.
+    def test_label_with_spaces_is_url_encoded_in_the_query(self):
+        seen = []
+        rp.open_release_blockers(REPO, lambda path: seen.append(path) or [], 'release blocker: critical')
+        self.assertEqual(len(seen), 1)
+        self.assertIn('labels=release%20blocker%3A%20critical&', seen[0])
+        self.assertNotIn(' ', seen[0])
+
 
 class EvidenceSchemaTests(unittest.TestCase):
     def test_valid_record_has_no_errors(self):
@@ -108,6 +116,17 @@ class EvidenceSchemaTests(unittest.TestCase):
         doc = json.loads(evidence())
         del doc['live_acceptance']['opencode_omo']
         self.assertTrue(rp.validate_evidence(doc, 'v1.1.0'))
+
+    # NIT: evidence hex is lowercase only; an uppercase digest is refused, not normalised.
+    def test_uppercase_candidate_sha_is_rejected(self):
+        doc = json.loads(evidence())
+        doc['candidate_sha'] = doc['candidate_sha'].upper()
+        self.assertTrue(any('candidate_sha' in e for e in rp.validate_evidence(doc, 'v1.1.0')))
+
+    def test_uppercase_report_digest_is_rejected(self):
+        doc = json.loads(evidence())
+        doc['live_acceptance']['github']['report_sha256'] = doc['live_acceptance']['github']['report_sha256'].upper()
+        self.assertTrue(any('report_sha256' in e for e in rp.validate_evidence(doc, 'v1.1.0')))
 
 
 class QualifyReleaseTests(unittest.TestCase):

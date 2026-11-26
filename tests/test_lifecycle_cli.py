@@ -20,6 +20,7 @@ TESTS = Path(__file__).resolve().parent
 ROOT = TESTS.parent
 sys.path.insert(0, str(TESTS))
 sys.path.insert(0, str(ROOT))
+import lifecycle as lc  # noqa: E402
 import onboarding_harness as harness  # noqa: E402
 import release_artifacts as ra  # noqa: E402
 from onboarding_harness import World  # noqa: E402
@@ -88,8 +89,10 @@ class CliWorld(World):
         (self.install / 'VERSION').write_text(json.dumps({'commit': self.commits['v1.0.0'], 'tag': 'v1.0.0'}) + '\n')
         # A release install carries MANIFEST.sha256 so doctor's integrity check has something to verify.
         names = sorted(ra.EXECUTABLE_PROGRAM_FILES + ra.DATA_PROGRAM_FILES)
+        for d in ra.DATA_PROGRAM_DIRS:
+            names += sorted(p.relative_to(self.install).as_posix() for p in (self.install / d).rglob('*') if p.is_file())
         (self.install / 'MANIFEST.sha256').write_text(''.join(
-            f'{hashlib.sha256((self.install / n).read_bytes()).hexdigest()}  {n}\n' for n in names))
+            f'{hashlib.sha256((self.install / n).read_bytes()).hexdigest()}  {n}\n' for n in sorted(set(names))))
         self.write_config({'projects': []})
 
 
@@ -109,15 +112,23 @@ class LifecycleCliTest(unittest.TestCase):
     def installed_tag(self):
         return json.loads((self.world.install / 'VERSION').read_text())['tag']
 
-    def test_update_fails_closed_when_the_installed_check_cannot_pass(self):
-        # With no enabled project the installed `--check` refuses (exit 2). The update must
-        # roll back to v1.0.0, report it, and exit nonzero. Success is covered in-process.
+    def test_update_skips_check_with_zero_enabled_projects_and_succeeds(self):
+        # S7: the installed `--check` refuses with no enabled project (exit 2) by design, so the
+        # update does not run it. The update succeeds; there is nothing for the check to validate.
+        proc = self.run_cli('update', '--yes', '--health-seconds', '0')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.installed_tag(), 'v1.1.0')
+        history = json.loads((self.world.install / 'updates' / 'history.json').read_text())
+        self.assertEqual(history[-1]['result'], 'ok')
+
+    def test_update_with_unreadable_config_is_not_zero_projects_and_changes_nothing(self):
+        # An unreadable config is not "zero enabled projects": the skip must not apply. The update
+        # refuses before any change (the controller config is read first), so the install stays v1.0.0.
+        (self.world.install / 'config.json').write_text('{not json')
         proc = self.run_cli('update', '--yes', '--health-seconds', '0')
         self.assertEqual(proc.returncode, 1)
-        self.assertIn('failed its health check', proc.stderr)
+        self.assertIn('config.json', proc.stderr)
         self.assertEqual(self.installed_tag(), 'v1.0.0')
-        history = json.loads((self.world.install / 'updates' / 'history.json').read_text())
-        self.assertEqual(history[-1]['result'], 'rollback_unhealthy')
 
     def test_update_without_yes_declined_exits_nonzero_and_changes_nothing(self):
         proc = self.run_cli('update', '--health-seconds', '0', stdin='n\n')
@@ -138,8 +149,11 @@ class LifecycleCliTest(unittest.TestCase):
         self.assertIn('agent session', proc.stderr)
 
     def test_rollback_health_failure_exits_nonzero_and_keeps_current(self):
-        # A kept previous release whose installed --check refuses (exit 2, no enabled project):
-        # rollback must put the current release back, report it, and exit nonzero.
+        # A kept previous release whose installed --check fails with a real config (one enabled
+        # project, so S7's zero-project skip does not apply): rollback must restore the current
+        # release, report it, and exit nonzero.
+        self.world.write_config({'projects': [{'name': 'demo', 'enabled': True, 'repo': 'example-owner/demo',
+                                               'directory': str(self.world.install / 'demo')}]})
         (self.world.install / 'rollback').mkdir(mode=0o700)
         previous = self.world.install / 'rollback' / 'previous'
         previous.mkdir(mode=0o700)
@@ -148,6 +162,8 @@ class LifecycleCliTest(unittest.TestCase):
         for name in ra.DATA_PROGRAM_DIRS:
             shutil.copytree(self.world.install / name, previous / name)
         (previous / 'VERSION').write_text(json.dumps({'commit': self.world.commits['v1.0.0'], 'tag': 'v1.0.0'}) + '\n')
+        # The record a real snapshot writes: the set it holds, and nothing absent.
+        lc.write_program_record(previous, lc.current_program(), [])
         before = self.installed_tag()
         proc = self.run_cli('rollback', '--yes', '--health-seconds', '0')
         self.assertEqual(proc.returncode, 1)

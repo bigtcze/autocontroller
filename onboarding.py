@@ -259,7 +259,11 @@ def lifecycle_action(action, args):
     lifecycle.refuse_agent(os.environ, action)
     if action=='rollback':
         if args.tag: raise ValueError('--tag applies to update only')
-        return lifecycle.rollback(ROOT,yes=args.yes,environ=os.environ,health_seconds=args.health_seconds)
+        if args.recover:
+            return lifecycle.recover(ROOT,yes=args.yes,environ=os.environ,drain_timeout=args.drain_timeout,
+                                     health_seconds=args.health_seconds)
+        return lifecycle.rollback(ROOT,yes=args.yes,environ=os.environ,health_seconds=args.health_seconds,
+                                  drain_timeout=args.drain_timeout)
     tag=args.tag
     if tag is not None and not releases.version(tag): raise ValueError('--tag must be a stable vX.Y.Z release')
     config=c.json_read(CONFIG,c.json_read(ROOT/'config.example.json'))
@@ -267,7 +271,7 @@ def lifecycle_action(action, args):
     if not isinstance(repo,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*',repo):
         raise ValueError('update_repository must be OWNER/REPOSITORY')
     return lifecycle.update(ROOT,repo,gh=lifecycle.LiveGitHub(),tag=tag,yes=args.yes,environ=os.environ,
-                            health_seconds=args.health_seconds)
+                            health_seconds=args.health_seconds,drain_timeout=args.drain_timeout)
 
 
 def unit_and_bin_dirs():
@@ -278,14 +282,15 @@ def unit_and_bin_dirs():
 def uninstall_action(args):
     """Guard first (inside lifecycle.uninstall, before any prompt), then the operation."""
     unit_dir,bin_dir=unit_and_bin_dirs()
-    return lifecycle.uninstall(ROOT,unit_dir=unit_dir,bin_dir=bin_dir,environ=os.environ,yes=args.yes,purge=args.purge)
+    return lifecycle.uninstall(ROOT,unit_dir=unit_dir,bin_dir=bin_dir,environ=os.environ,yes=args.yes,purge=args.purge,
+                               drain_timeout=args.drain_timeout)
 
 
 def remove_action(args):
     """Guard first (inside lifecycle.remove, before any prompt), then the operation."""
     if not args.url: raise ValueError('remove needs a repository URL or OWNER/REPOSITORY')
     return lifecycle.remove(ROOT,args.url,environ=os.environ,yes=args.yes,force=args.force,
-                            delete_local_data=args.delete_local_data)
+                            delete_local_data=args.delete_local_data,drain_timeout=args.drain_timeout)
 
 
 def memory_inspect_action(args):
@@ -330,8 +335,12 @@ def main():
     parser.add_argument('--tag',help='update to this stable vX.Y.Z release instead of the latest')
     parser.add_argument('--health-seconds',type=int,default=30,help='seconds the service must stay active after update/rollback')
     parser.add_argument('--purge',action='store_true',help='uninstall: also delete config.json and state/ (requires typing "purge")')
+    parser.add_argument('--recover',action='store_true',help='rollback: resolve an interrupted rollback by restoring the release it replaced (rollback/swap)')
+    parser.add_argument('--drain-timeout',type=float,default=lifecycle.DEFAULT_DRAIN_TIMEOUT,help='update/rollback/remove/uninstall: seconds to wait for workers to drain before stopping (default 3600)')
     args=parser.parse_args()
     os.umask(0o077)
+    if args.recover and args.action!='rollback':
+        raise ValueError('--recover applies to rollback only')
     if args.action in ('update','rollback'):
         print(lifecycle_action(args.action,args)); return
     if args.action=='uninstall':

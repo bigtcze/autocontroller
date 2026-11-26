@@ -113,6 +113,23 @@ class UninstallEffectsTest(UninstallBase):
         self.uninstall(yes=True)
         self.assertEqual(self.calls, [('systemctl', 'disable'), ('daemon-reload',)])
 
+    def test_inactive_service_is_still_stopped_before_files_are_removed(self):
+        # S4: stop is always issued, so a unit that reads inactive (e.g. mid-start) is still stopped.
+        self.service.active = False
+        self.uninstall(yes=True)
+        self.assertEqual(self.service.verbs, ['stop'])
+
+    def test_stop_failure_refuses_and_leaves_program_files_in_place(self):
+        # The fake service's stop succeeds; a failing systemctl stop must refuse before any removal.
+        saved = lc.stop_service
+        lc.stop_service = lambda: (_ for _ in ()).throw(lc.LifecycleError('systemctl stop failed'))
+        self.addCleanup(setattr, lc, 'stop_service', saved)
+        self.service.active = True
+        with self.assertRaisesRegex(lc.LifecycleError, 'systemctl stop failed'):
+            self.uninstall(yes=True)
+        self.assertTrue((self.world.install / 'autonomy-controller.py').exists())
+        self.assertEqual(self.calls, [])
+
     def test_failed_disable_leaves_program_files_in_place(self):
         lc.systemctl = lambda *verb, timeout=120: (self.calls.append(verb) or 1)
         with self.assertRaisesRegex(lc.LifecycleError, 'disable failed'):

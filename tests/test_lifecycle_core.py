@@ -34,6 +34,18 @@ class AgentGuardTest(unittest.TestCase):
         with self.assertRaisesRegex(lc.LifecycleError, 'AUTONOMY_OPENCODE, AUTONOMY_PROJECT_ROOT'):
             lc.refuse_agent({'AUTONOMY_PROJECT_ROOT': 'a', 'AUTONOMY_OPENCODE': 'b'}, 'remove')
 
+    # S1: OpenCode sessions (including agent-run shells) set OPENCODE_SESSION_ID; exact name only.
+    def test_opencode_session_id_alone_refuses(self):
+        with self.assertRaisesRegex(lc.LifecycleError, 'OPENCODE_SESSION_ID'):
+            lc.refuse_agent({'OPENCODE_SESSION_ID': 'ses_1'}, 'update')
+
+    def test_opencode_session_id_refusal_tells_the_operator_to_use_a_normal_terminal(self):
+        with self.assertRaisesRegex(lc.LifecycleError, 'normal terminal, not inside an OpenCode session'):
+            lc.refuse_agent({'OPENCODE_SESSION_ID': 'ses_1'}, 'rollback')
+
+    def test_similar_opencode_names_do_not_refuse(self):
+        lc.refuse_agent({'OPENCODE_SESSION': 'x', 'OPENCODE_SESSION_IDS': 'y', 'opencode_session_id': 'z'}, 'update')
+
 
 class ConfirmTest(unittest.TestCase):
     def test_yes_skips_prompt(self):

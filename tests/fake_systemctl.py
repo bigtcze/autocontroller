@@ -63,6 +63,9 @@ def main(argv):
                     state['active'] = False
                 elif verb == 'is-active':
                     rc = 0 if state.get('active') else 3
+                    # Plain `is-active` prints the state word, as systemd does; --quiet prints nothing.
+                    if '--quiet' not in argv:
+                        sys.stdout.write(('active' if state.get('active') else 'inactive') + '\n')
         state['calls'].append({'argv': argv, 'rc': rc})
         fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix='.fake-systemctl-')
         with os.fdopen(fd, 'w', encoding='utf-8') as stream:

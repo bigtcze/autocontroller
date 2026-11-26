@@ -48,7 +48,13 @@ authorization.
   - The evidence must reference a completed, successful `vm-lifecycle.yml` run on that candidate, with all four `vm (<distro>)` jobs successful.
   - `artifacts` builds `autocontroller-<tag>.tar.gz` and `SHA256SUMS` in `debian:12`, `debian:13`, `ubuntu:24.04` and `ubuntu:26.04` containers. The four builds must be byte-identical.
   - `publish` rebuilds on the runner, must match the artifact digest, creates a draft release with both assets, checks each asset's GitHub digest against the local SHA256 values, and only then publishes. It refuses to replace an existing published release.
+  - The publish logic lives in `release_artifacts.py publish`; the workflow only calls it with `--notes-file` or `--generate-notes`. The blocker check is repeated just before publishing, so a blocker opened after qualification keeps the draft unpublished and deletes it.
 - Controller: blocks tag creation while `release-blocker` Issues are open (label from `release.blocker_label`).
+- Installed-controller lifecycle (`onboarding.py update|rollback|remove|uninstall`):
+  - Run lifecycle commands from a normal terminal. They are refused when `OPENCODE_SESSION_ID` or any `AUTONOMY_*` marker is set. This is a logical guard against an agent running them, not a sandbox.
+  - `rollback --recover` resolves an interrupted rollback. A leftover `rollback/swap` blocks `update` and `rollback`, and `doctor` reports it as a failure. Recovery restores the release the rollback replaced and verifies it against `MANIFEST.sha256` before the marker is removed.
+  - A drain request counts only while an operation holds `lifecycle.lock`. A `state/drain.request` without that lock is stale: workers ignore it and `doctor` fails with the `rm` command to remove it. Remove it by hand only after confirming no update is running.
+  - Restart risk (not tested live): onboarding enables `autocontroller.service`. A swap stops the unit first, but if the machine reboots while a swap is in progress, the enabled unit can start on a partly replaced tree. `doctor` reports a leftover `rollback/swap` or `rollback/incoming`, and `rollback --recover` restores the pre-rollback tree from `swap`. A leftover `incoming` (an interrupted update) is not restored by any command yet; it blocks further updates until a human inspects it. Nothing here prevents a boot-time start.
 - `required_assets` entries may use the `{tag}` placeholder.
 
 Still required, and still release blockers:

@@ -148,6 +148,10 @@ class World:
 
     def _commit(self, text: str) -> str:
         for name in ra.EXECUTABLE_PROGRAM_FILES:
+            if name == 'release_artifacts.py':
+                # A release must declare real lists, so the staged set can be read and validated.
+                (self.src_repo / name).write_text((ROOT / 'release_artifacts.py').read_text(encoding='utf-8'))
+                continue
             (self.src_repo / name).write_text(f'# {name} {text}\n')
         for name in ra.DATA_PROGRAM_FILES:
             (self.src_repo / name).write_text(f'{name} {text}\n')
@@ -164,7 +168,10 @@ class World:
         shutil.rmtree(seed, ignore_errors=True)
         seed.mkdir()
         for name in ra.EXECUTABLE_PROGRAM_FILES + ra.DATA_PROGRAM_FILES:
-            (seed / name).write_text(f'# {name} {tag}\n')
+            if name == 'release_artifacts.py':
+                (seed / name).write_text((ROOT / 'release_artifacts.py').read_text(encoding='utf-8'))
+            else:
+                (seed / name).write_text(f'# {name} {tag}\n')
         for name in ra.DATA_PROGRAM_DIRS:
             (seed / name).mkdir()
             (seed / name / 'marker.txt').write_text(f'{name} {tag}\n')
@@ -262,10 +269,12 @@ class UpdateTest(Base):
         self.assertEqual(self.service.verbs, [])
         self.assertFalse((self.world.install / 'updates' / 'history.json').exists())
 
-    def test_inactive_service_is_neither_stopped_nor_started(self):
+    def test_inactive_service_is_stopped_idempotently_but_never_started(self):
+        # S4: stop is always issued (idempotent), so a unit that reads inactive is still stopped.
+        # An inactive service is never started by update.
         self.service.active = False
         self.update()
-        self.assertEqual(self.service.verbs, [])
+        self.assertEqual(self.service.verbs, ['stop'])
         self.assertEqual(self.world.tag(), 'v1.1.0')
 
     def test_explicit_tag_selects_that_release(self):
@@ -444,6 +453,15 @@ class HealthAndRollbackTest(Base):
         self.service.verbs.clear()
         self.rollback()
         self.assertEqual(self.service.verbs, ['stop', 'start'])
+
+    def test_rollback_of_an_inactive_service_stops_idempotently_and_never_starts(self):
+        # S4: stop is always issued; an inactive service is not started by rollback.
+        self.update()
+        self.service.verbs.clear()
+        self.service.active = False
+        self.rollback()
+        self.assertEqual(self.service.verbs, ['stop'])
+        self.assertEqual(self.world.tag(), 'v1.0.0')
 
     def test_rollback_leaves_config_and_state_alone(self):
         self.update()

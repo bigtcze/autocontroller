@@ -1,6 +1,7 @@
 """Offline tests for the drain handshake (nonce + live pid), withdrawal and config validation."""
 from __future__ import annotations
 
+import fcntl
 import importlib.util
 import json
 import os
@@ -128,12 +129,18 @@ class ControllerDrainContractTest(unittest.TestCase):
             state = Path(tmp)
             nonce = 'a' * 32
             ctl.json_atomic(state / ctl.DRAIN_REQUEST, {'nonce': nonce, 'requested_at': 1.0})
+            # S2: the request is live only while its updater holds lifecycle.lock.
+            lock = state / 'lifecycle.lock'
+            lock.touch()
+            held = lock.open('a')
+            self.addCleanup(held.close)
+            fcntl.flock(held, fcntl.LOCK_EX)
 
             class Parked:
                 def __init__(self):
                     self.parked = type('E', (), {'is_set': lambda s: True})()
 
-            ctl.sync_drain_ready(state, [Parked()])
+            ctl.sync_drain_ready(state, [Parked()], lock)
             self.assertTrue(lc.drain_ready(state, nonce, alive=lambda pid: pid == os.getpid()))
 
 

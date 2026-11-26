@@ -312,6 +312,20 @@ def _gh_pages(path: str) -> list:
     return rows
 
 
+def _changed_paths(repo_dir: Path, a: str, b: str) -> list[str]:
+    """Every path that differs between commits a and b.
+
+    --no-renames: a rename lists both its source and its destination, so a file moved from outside
+    docs/releases into it is seen as a change outside the allowed prefix (rename detection would
+    show only the destination). -z: NUL-separated paths, so no quoting or newline can hide a name.
+    """
+    proc = subprocess.run(['git', '-C', str(repo_dir), 'diff', '--name-only', '--no-renames', '-z', a, b],
+                          capture_output=True, timeout=GIT_TIMEOUT, check=False)
+    if proc.returncode:
+        raise ArtifactError(f'git diff failed for {a}..{b}')
+    return [path for path in proc.stdout.decode('utf-8', 'replace').split('\0') if path]
+
+
 def qualify(repo: str, tag: str, sha: str, repo_dir: Path = Path('.')) -> list[str]:
     if not HEX40.fullmatch(sha or ''):
         return ['candidate sha must be a full 40-character lowercase hex SHA']
@@ -322,12 +336,6 @@ def qualify(repo: str, tag: str, sha: str, repo_dir: Path = Path('.')) -> list[s
         if proc.returncode not in (0, 1):
             raise ArtifactError(f'merge-base failed for {a}..{b}: {proc.stderr.decode("utf-8", "replace").strip()[:200]}')
         return proc.returncode == 0
-
-    def changed_paths(a: str, b: str) -> list[str]:
-        proc = git('diff', '--name-only', a, b)
-        if proc.returncode:
-            raise ArtifactError(f'git diff failed for {a}..{b}')
-        return [line for line in proc.stdout.decode('utf-8', 'replace').splitlines() if line]
 
     def read_file(commit: str, path: str) -> str | None:
         if git('cat-file', '-e', f'{commit}:{path}').returncode:
@@ -343,10 +351,111 @@ def qualify(repo: str, tag: str, sha: str, repo_dir: Path = Path('.')) -> list[s
         repo, tag, sha, previous_tag=previous_tag,
         on_main=is_ancestor(sha, 'origin/main'),
         gh_json=lambda *a: _gh_json(*a), pages=_gh_pages,
-        is_ancestor=is_ancestor, changed_paths=changed_paths, read_file=read_file)
+        is_ancestor=is_ancestor, changed_paths=lambda a, b: _changed_paths(repo_dir, a, b), read_file=read_file)
 
 
 # ---- CLI -------------------------------------------------------------------------
+
+# ---- publication (release job only) ------------------------------------------------
+# Every gh call here is a plain argv with a timeout; nothing relies on gh --jq or --slurp
+# combined. A draft is never left behind on a failed check: it is deleted, not published.
+
+def _gh(*args: str) -> str:
+    try:
+        proc = subprocess.run(['gh', *args], capture_output=True, text=True, timeout=GH_TIMEOUT, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ArtifactError(f'gh failed: {exc}') from exc
+    if proc.returncode:
+        raise ArtifactError(f'gh rc={proc.returncode}: {proc.stderr.strip()[:400]}')
+    return proc.stdout
+
+
+def _release_id(row) -> int:
+    rid = row.get('id') if isinstance(row, dict) else None
+    if not isinstance(rid, int) or isinstance(rid, bool) or rid <= 0:
+        raise ArtifactError('release listing has no valid id')
+    return rid
+
+
+def _tagged(rows: list, tag: str, *, draft: bool) -> list[dict]:
+    return [r for r in rows if isinstance(r, dict) and r.get('tag_name') == tag and bool(r.get('draft')) is draft]
+
+
+def _discard_draft(repo: str, release_id: int):
+    _gh('api', '--method', 'DELETE', f'repos/{repo}/releases/{release_id}')
+
+
+def _verify_draft(repo: str, release_id: int, expected: dict[str, str]):
+    """Exactly the two expected assets, each with a GitHub digest equal to the local SHA256."""
+    detail = _gh_json('api', f'repos/{repo}/releases/{release_id}')
+    assets = detail.get('assets') if isinstance(detail, dict) else None
+    if not isinstance(assets, list) or len(assets) != len(expected) or \
+            sorted(str(a.get('name')) for a in assets if isinstance(a, dict)) != sorted(expected):
+        raise ArtifactError(f'draft {release_id} must have exactly the two release assets')
+    for asset in assets:
+        name = asset.get('name')
+        digest = asset.get('digest')
+        if not isinstance(digest, str) or not digest:
+            raise ArtifactError(f'asset {name} has no GitHub digest')
+        if digest != f'sha256:{expected[name]}':
+            raise ArtifactError(f'asset {name} digest does not match the local SHA256')
+
+
+def _require_no_blockers(repo: str):
+    try:
+        blockers = releases.open_release_blockers(repo, _gh_pages)
+    except ValueError as exc:
+        raise ArtifactError(str(exc)) from exc
+    if blockers:
+        raise ArtifactError('open release-blocker Issues: ' + ', '.join(f'#{x.get("number")}' for x in blockers))
+
+
+def publish(repo: str, tag: str, dist_dir: str | Path, *, notes_file: str | None = None,
+            generate_notes: bool = False) -> str:
+    """Create a draft by release ID, verify it, re-check blockers, then publish it by ID.
+
+    Order: refuse an existing published release; delete stale drafts for the tag; create the
+    draft with both assets; verify exactly two assets and their digests; re-check open
+    release-blocker Issues; un-draft. Any failure after the draft exists deletes that draft.
+    """
+    if not releases.version(tag):
+        raise ArtifactError(f'tag must be stable SemVer vX.Y.Z: {tag!r}')
+    if bool(notes_file) == generate_notes:
+        raise ArtifactError('give exactly one of --notes-file or --generate-notes')
+    dist = Path(dist_dir)
+    archive = ARCHIVE_NAME.format(tag=tag)
+    expected: dict[str, str] = {}
+    for name in (archive, 'SHA256SUMS'):
+        try:
+            expected[name] = hashlib.sha256((dist / name).read_bytes()).hexdigest()
+        except OSError as exc:
+            raise ArtifactError(f'cannot read {name}: {exc}') from exc
+    listing = _gh_pages(f'repos/{repo}/releases?per_page=100')
+    if _tagged(listing, tag, draft=False):
+        raise ArtifactError(f'a published release for {tag} already exists; refusing to replace it')
+    for row in _tagged(listing, tag, draft=True):
+        _discard_draft(repo, _release_id(row))
+    notes = ['--notes-file', str(notes_file)] if notes_file else ['--generate-notes']
+    _gh('release', 'create', tag, '--repo', repo, '--verify-tag', '--draft', *notes,
+        str(dist / archive), str(dist / 'SHA256SUMS'))
+    drafts = _tagged(_gh_pages(f'repos/{repo}/releases?per_page=100'), tag, draft=True)
+    if len(drafts) != 1:
+        for row in drafts:
+            _discard_draft(repo, _release_id(row))
+        raise ArtifactError(f'expected exactly one draft for {tag}, found {len(drafts)}')
+    rid = _release_id(drafts[0])
+    try:
+        _verify_draft(repo, rid, expected)
+        _require_no_blockers(repo)
+        _gh('api', '-X', 'PATCH', f'repos/{repo}/releases/{rid}', '-F', 'draft=false')
+    except ArtifactError as exc:
+        try:
+            _discard_draft(repo, rid)
+        except ArtifactError as cleanup:
+            raise ArtifactError(f'{exc}; also could not delete draft {rid}: {cleanup}') from exc
+        raise
+    return f'published {tag} as release {rid} after verifying both assets'
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -365,8 +474,19 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument('--tag', required=True)
     q.add_argument('--sha', required=True)
     q.add_argument('--checkout', default='.')
+    p = sub.add_parser('publish')
+    p.add_argument('--repo', required=True)
+    p.add_argument('--tag', required=True)
+    p.add_argument('--dist', required=True)
+    group = p.add_mutually_exclusive_group(required=True)
+    group.add_argument('--notes-file')
+    group.add_argument('--generate-notes', action='store_true')
     args = parser.parse_args(argv)
     try:
+        if args.command == 'publish':
+            print(publish(args.repo, args.tag, args.dist, notes_file=args.notes_file,
+                          generate_notes=args.generate_notes))
+            return 0
         if args.command == 'build':
             paths = build(args.repo, args.tag, args.commit, args.out)
             print(paths['sums'].read_text(encoding='utf-8'), end='')

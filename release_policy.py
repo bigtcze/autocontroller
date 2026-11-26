@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 import re
+import urllib.parse
 from typing import Any, Callable
 
 SEMVER = re.compile(r'^v(\d+)\.(\d+)\.(\d+)$')
@@ -174,13 +175,16 @@ VM_LIFECYCLE_WORKFLOW = '.github/workflows/vm-lifecycle.yml'
 VM_JOBS = ('vm (debian-12)', 'vm (debian-13)', 'vm (ubuntu-24.04)', 'vm (ubuntu-26.04)')
 EVIDENCE_PATH = 'docs/releases/{tag}.evidence.json'
 RELEASE_DOCS_PREFIX = 'docs/releases/'
-HEX40 = re.compile(r'[0-9a-fA-F]{40}')
-HEX64 = re.compile(r'[0-9a-fA-F]{64}')
+# Lowercase only: evidence hex is compared as written, so an uppercase digest would not match its source.
+HEX40 = re.compile(r'[0-9a-f]{40}')
+HEX64 = re.compile(r'[0-9a-f]{64}')
 
 
 def open_release_blockers(repo: str, pages: Callable, label: str = RELEASE_BLOCKER_LABEL) -> list[dict]:
     """Open Issues (never PRs) carrying `label`. A non-list listing fails closed."""
-    rows = pages(f'repos/{repo}/issues?state=open&labels={label}&per_page=100')
+    # The label is URL-encoded: the controller allows spaces in blocker_label, which would otherwise
+    # produce a malformed query and an unparseable listing.
+    rows = pages(f'repos/{repo}/issues?state=open&labels={urllib.parse.quote(label, safe="")}&per_page=100')
     if not isinstance(rows, list):
         raise ValueError('Release blocker listing unavailable; refusing release')
     return [x for x in rows if isinstance(x, dict) and not x.get('pull_request')

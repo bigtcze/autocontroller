@@ -22,10 +22,11 @@ from test_lifecycle_update import World  # noqa: E402
 
 
 def write_manifest(target: Path):
-    lines = []
-    for name in sorted(ra.EXECUTABLE_PROGRAM_FILES + ra.DATA_PROGRAM_FILES):
-        digest = hashlib.sha256((target / name).read_bytes()).hexdigest()
-        lines.append(f'{digest}  {name}')
+    """Whole-tree manifest, as a release archive ships: every installed file, including program directories."""
+    names = sorted(ra.EXECUTABLE_PROGRAM_FILES + ra.DATA_PROGRAM_FILES)
+    for name in ra.DATA_PROGRAM_DIRS:
+        names += sorted(p.relative_to(target).as_posix() for p in (target / name).rglob('*') if p.is_file())
+    lines = [f'{hashlib.sha256((target / name).read_bytes()).hexdigest()}  {name}' for name in sorted(set(names))]
     (target / 'MANIFEST.sha256').write_text('\n'.join(lines) + '\n')
 
 
@@ -93,11 +94,12 @@ class IntegrityTest(unittest.TestCase):
         _, warnings = self.diagnose()
         self.assertTrue(any('CLI link is missing' in w for w in warnings))
 
-    def test_leftover_drain_request_is_warned(self):
+    def test_leftover_drain_request_without_lock_is_a_stale_failure(self):
+        # S2: no operation holds lifecycle.lock, so the request is stale (fully covered in test_drain_staleness).
         (self.target / 'state').mkdir(exist_ok=True)
         (self.target / 'state' / lc.DRAIN_REQUEST).write_text('{}')
-        _, warnings = self.diagnose()
-        self.assertTrue(any('drain.request exists' in w for w in warnings))
+        failures, _ = self.diagnose()
+        self.assertTrue(any('stale state/drain.request' in f for f in failures), failures)
 
     def test_memory_failure_marker_is_reported(self):
         (self.target / 'state' / 'memory').mkdir(parents=True)
@@ -121,6 +123,74 @@ class IntegrityTest(unittest.TestCase):
         lc.status_lines(self.target, active=True)
         after = sorted(str(p.relative_to(self.target)) for p in self.target.rglob('*'))
         self.assertEqual(before, after)
+
+
+class RealArchiveInstallTest(unittest.TestCase):
+    """B2: a real archive (whole-tree MANIFEST) installed through install_program_files must pass doctor."""
+
+    GIT_ENV = {'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@example.invalid',
+               'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@example.invalid',
+               'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_NOSYSTEM': '1',
+               'PATH': os.environ.get('PATH', '/usr/bin:/bin')}
+
+    def git(self, cwd, *args):
+        import subprocess
+        return subprocess.run(['git', *args], cwd=str(cwd), env=self.GIT_ENV, capture_output=True,
+                              text=True, check=True, timeout=120).stdout.strip()
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix='doctor-real-')
+        self.addCleanup(tmp.cleanup)
+        base = Path(tmp.name)
+        src = base / 'src'
+        src.mkdir()
+        self.git(src, 'init', '-q', '-b', 'main')
+        # Every file the repository ships, including ones the install never copies (docs, vmtest).
+        repo_files = {'README.md': 'readme\n', 'config.example.json': '{"projects": []}\n',
+                      'autocontroller.service': '[Unit]\n', 'install.sh': '#!/usr/bin/env bash\n'}
+        for name in ra.EXECUTABLE_PROGRAM_FILES:
+            repo_files.setdefault(name, f'# {name}\n')
+        for name in ra.DATA_PROGRAM_DIRS:
+            repo_files[f'{name}/marker.txt'] = f'{name}\n'
+        repo_files['docs/VALIDATION.md'] = 'docs\n'
+        repo_files['vmtest/harness.py'] = '# harness\n'
+        for rel, text in repo_files.items():
+            path = src / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        self.git(src, 'add', '-A')
+        self.git(src, 'commit', '-q', '-m', 'release')
+        commit = self.git(src, 'rev-parse', 'HEAD')
+        dist = base / 'dist'
+        ra.build(src, 'v9.9.9', commit, dist)
+        self.install = base / 'install'
+        self.install.mkdir(mode=0o700)
+        extracted = base / 'extracted'
+        ra.safe_extract(dist / ra.ARCHIVE_NAME.format(tag='v9.9.9'), extracted)
+        lc.install_program_files(extracted, self.install)
+        (self.install / 'config.json').write_text('{"projects": []}\n')
+        self.links = base / 'links'
+        (self.links / 'units').mkdir(parents=True)
+        (self.links / 'bin').mkdir()
+        (self.links / 'units' / lc.UNIT).symlink_to(self.install / 'autocontroller.service')
+        (self.links / 'bin' / 'autocontroller').symlink_to(self.install / 'onboarding.py')
+
+    def test_archive_installed_through_install_program_files_has_zero_doctor_failures(self):
+        failures, _ = lc.diagnose(self.install, unit_dir=self.links / 'units', bin_dir=self.links / 'bin')
+        self.assertEqual(failures, [])
+
+    def test_installed_tree_has_no_manifest_only_or_extra_program_entries(self):
+        self.assertEqual(lc.manifest_problems(self.install), [])
+        self.assertFalse((self.install / 'docs').exists(), 'docs are not part of the installed set')
+
+    def test_extra_file_inside_an_installed_program_directory_is_flagged(self):
+        (self.install / 'skills' / 'stray.txt').write_text('unexpected\n')
+        self.assertIn('unexpected file in installed program directory: skills/stray.txt',
+                      lc.manifest_problems(self.install))
+
+    def test_modified_file_inside_an_installed_program_directory_is_a_failure(self):
+        (self.install / 'standards' / 'marker.txt').write_text('tampered\n')
+        self.assertIn('modified or missing: standards/marker.txt', lc.manifest_problems(self.install))
 
 
 class StatusTest(unittest.TestCase):

@@ -10,7 +10,7 @@ AutoController coordinates existing OpenCode V2 and Oh My OpenCode Slim agents a
 
 Target platforms: Debian 12/13 and Ubuntu 24.04/26.04 LTS on an amd64 or arm64 VM with systemd. These are the intended support matrix, not yet a certified clean-VM test matrix. Use a normal, sudo-capable account with OpenCode V2, OMO Slim (`orchestrator`, `fixer`, `oracle`) and a working, persistent provider configuration. The controller does not install, modify or upgrade OpenCode or OMO.
 
-From a published release archive (`autocontroller-vX.Y.Z.tar.gz` and `SHA256SUMS`, built by `release.yml`; no public release has been published yet):
+From a published release archive (`autocontroller-vX.Y.Z.tar.gz` and `SHA256SUMS`, built by `release.yml`; no public release has been published yet; the publish step is `release_artifacts.py publish`, which creates a draft, verifies it, and only then publishes, and re-checks open release blockers before publishing):
 
 ```sh
 sha256sum -c SHA256SUMS
@@ -38,10 +38,10 @@ autocontroller doctor
 autocontroller memory                     # Engram health check
 autocontroller memory inspect OWNER/REPO [--query TEXT] [--shared]
 autocontroller add                        # enroll another repository
-autocontroller remove <repo> [--force] [--delete-local-data]
-autocontroller update [--tag vX.Y.Z] [--yes] [--health-seconds N]
-autocontroller rollback [--yes] [--health-seconds N]
-autocontroller uninstall [--purge]
+autocontroller remove <repo> [--force] [--delete-local-data] [--drain-timeout S]
+autocontroller update [--tag vX.Y.Z] [--yes] [--health-seconds N] [--drain-timeout S]
+autocontroller rollback [--yes] [--health-seconds N] [--drain-timeout S] [--recover]
+autocontroller uninstall [--purge] [--drain-timeout S]
 autocontroller stop
 autocontroller start
 ```
@@ -56,10 +56,15 @@ If `~/.local/bin` is not on your interactive PATH, use `~/.local/bin/autocontrol
 - Then it drains the workers (they park at a safe point; the drain timeout is 3600 seconds by default; if they do not park in time, the service is left running and nothing is replaced), stops the service, and swaps in the new program files. The config, `state/` and checkouts are not touched.
 - The service must pass `--check` and stay active for `--health-seconds` (30 by default). If it fails, the controller stops the new code, restores the previous release, and starts it again. The update exits with an error.
 - A successful update keeps exactly one previous release in `rollback/previous/`. `rollback` swaps back to it under the same drain and health checks, and that swap can itself be rolled back.
-- `remove <repo>` deletes one project's entry from `config.json` and restarts the service (or disables it when no project remains). It refuses while that project has an unfinished cycle unless `--force` is given. The checkout, GitHub state and memory are kept. `--delete-local-data` also deletes the checkout, but only when it is a clean, fully pushed managed clone directly under `~/repositories`. Memory is never deleted by `remove`.
+- `remove <repo>` deletes one project's entry from `config.json` and restarts the service (or disables it when no project remains). It refuses while that project has an unfinished cycle unless `--force` is given. The checkout, GitHub state and memory are kept. `--delete-local-data` also deletes the checkout, but only when it is a clean, fully pushed managed clone directly under `~/repositories`: every local branch must have an upstream, no local branch may hold commits that no remote has, and the checkout must have no linked worktrees. The same checks run again after the service drains, so a cycle or unpushed commit that appears during the drain refuses the removal and the service is restarted. Memory is never deleted by `remove`.
 - `uninstall` stops the service, removes the unit and CLI links, and removes the program files. It keeps `config.json`, `state/` and the checkouts. `--purge` also deletes `config.json` and `state/`, and asks you to type `purge`. Checkouts under `~/repositories` are never deleted.
 
-The controller never updates itself. Its own lifecycle commands refuse to run inside an agent session (any `AUTONOMY_*` variable or `AUTOCONTROLLER_LEARNING_INSTRUCTIONS` set). This refusal is a logical guard for the controller's own sessions, not a sandbox: it does not stop an agent that can run arbitrary shell commands as your user. Run these commands from your own shell.
+The controller never updates itself. Its own lifecycle commands refuse to run inside an agent session (any `AUTONOMY_*` variable, `AUTOCONTROLLER_LEARNING_INSTRUCTIONS`, or `OPENCODE_SESSION_ID` set). Run `update`, `rollback`, `remove` and `uninstall` from a normal terminal, not from inside an OpenCode session. This refusal is a logical guard for the controller's own sessions, not a sandbox: it does not stop an agent that can run arbitrary shell commands as your user.
+
+- `--drain-timeout SECONDS` (update, rollback, remove, uninstall) sets how long to wait for workers to park before giving up. Default 3600.
+- `rollback --recover` resolves an interrupted rollback. A leftover `rollback/swap` blocks `update` and `rollback`, and `doctor` fails until it is resolved. Recovery restores the release that the rollback replaced and checks it against `MANIFEST.sha256`; if that check fails, the service stays stopped and the swap is kept.
+- A leftover `rollback/incoming` (an interrupted update) blocks further updates and is reported by `doctor`. It is not restored by any command yet; inspect it before retrying.
+- A stale drain request (`state/drain.request` with no update holding `lifecycle.lock`) is ignored by the controller and reported by `doctor` as a failure. Confirm no update is running, then remove the file with the `rm` command `doctor` prints.
 
 `--install-only` applies to source installs only: it copies the program files from a source checkout or extracted source package without changing configuration or starting work. Stop the controller, run `bash install.sh --install-only`, then start it again. Release archives are updated with `autocontroller update`, not with `--install-only`. Existing in-flight projects are not automatically re-bootstrapped.
 

@@ -170,25 +170,7 @@ jobs:
             echo "Rebuilt archive $actual differs from artifacts $EXPECTED_SHA256" >&2
             exit 1
           fi
-      - name: Refuse published releases and remove stale drafts
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          published="$(gh api --paginate --slurp "repos/$GH_REPO/releases?per_page=100" \
-            --jq 'flatten | map(select(.tag_name == env.TAG and .draft == false)) | length')"
-          if [[ "$published" != 0 ]]; then
-            echo "A published release for $TAG already exists; refusing to replace it" >&2
-            exit 1
-          fi
-          drafts="$(gh api --paginate --slurp "repos/$GH_REPO/releases?per_page=100" \
-            --jq 'flatten | map(select(.tag_name == env.TAG and .draft == true)) | .[].id')"
-          for id in $drafts; do
-            gh api --method DELETE "repos/$GH_REPO/releases/$id"
-          done
-      - name: Create draft release with both assets
+      - name: Create verified draft, check blockers, then publish by release ID
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -196,37 +178,12 @@ jobs:
         run: |
           set -euo pipefail
           dist="$RUNNER_TEMP/publish"
+          # release_artifacts.py publish refuses an existing published release, deletes stale
+          # drafts, creates the draft, verifies its two asset digests and re-checks blockers.
           if [[ -f "docs/releases/$TAG.md" ]]; then
-            notes=(--notes-file "docs/releases/$TAG.md")
+            python3 release_artifacts.py publish --repo "$GH_REPO" --tag "$TAG" --dist "$dist" \
+              --notes-file "docs/releases/$TAG.md"
           else
-            notes=(--generate-notes)
+            python3 release_artifacts.py publish --repo "$GH_REPO" --tag "$TAG" --dist "$dist" \
+              --generate-notes
           fi
-          gh release create "$TAG" --repo "$GH_REPO" --verify-tag --draft "${notes[@]}" \
-            "$dist/autocontroller-$TAG.tar.gz" "$dist/SHA256SUMS"
-      - name: Verify draft assets against local digests, then publish
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          export LC_ALL=C
-          dist="$RUNNER_TEMP/publish"
-          ids="$(gh api --paginate --slurp "repos/$GH_REPO/releases?per_page=100" \
-            --jq 'flatten | map(select(.tag_name == env.TAG and .draft == true)) | .[].id')"
-          if [[ "$(printf '%s\n' "$ids" | sed '/^$/d' | wc -l)" != 1 ]]; then
-            echo "Expected exactly one draft release for $TAG" >&2
-            exit 1
-          fi
-          expected="$(printf '%s %s\n' \
-            "autocontroller-$TAG.tar.gz" "sha256:$(sha256sum "$dist/autocontroller-$TAG.tar.gz" | cut -d' ' -f1)" \
-            "SHA256SUMS" "sha256:$(sha256sum "$dist/SHA256SUMS" | cut -d' ' -f1)" | sort)"
-          # A missing digest renders as an empty field and fails the comparison (fail closed).
-          actual="$(gh api "repos/$GH_REPO/releases/$ids" \
-            --jq '[.assets[] | "\(.name) \(.digest // "")"] | sort | .[]')"
-          if [[ "$actual" != "$expected" ]]; then
-            echo "Draft assets do not match local digests; not publishing" >&2
-            diff <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") >&2 || true
-            exit 1
-          fi
-          gh release edit "$TAG" --repo "$GH_REPO" --draft=false

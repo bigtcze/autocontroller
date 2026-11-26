@@ -183,11 +183,12 @@ class ConfigAndServiceTest(RemoveBase):
         self.assertIn('start', self.service.verbs)
         self.assertTrue(self.service.active)
 
-    def test_inactive_service_is_not_started_when_projects_remain(self):
+    def test_inactive_service_is_stopped_idempotently_but_never_started_when_projects_remain(self):
+        # S4: stop is always issued (idempotent); an inactive service is never started by remove.
         self.write_config([self.project(), self.project(name='other-9999', repo='example-owner/other')])
         self.service.active = False
         self.remove()
-        self.assertEqual(self.service.verbs, [])
+        self.assertNotIn('start', self.service.verbs)
 
     def test_running_service_is_drained_before_config_write(self):
         seen = {}
@@ -315,6 +316,93 @@ class DeleteLocalDataTest(RemoveBase):
         self.assertEqual(self.calls, [])
         self.assertTrue(self.service.active)
         self.assertEqual(len(self.config()['projects']), 1)
+
+    # B4: a deletable checkout must hold nothing that exists only locally.
+    def test_unpushed_local_branch_refuses(self):
+        git(self.checkout, 'branch', 'feature')
+        git(self.checkout, 'checkout', '-q', 'feature')
+        (self.checkout / 'f.txt').write_text('f\n')
+        git(self.checkout, 'add', '-A')
+        git(self.checkout, 'commit', '-q', '-m', 'feature work')
+        git(self.checkout, 'checkout', '-q', 'main')
+        with self.assertRaisesRegex(lc.LifecycleError, 'local branch|commits no remote'):
+            self.remove(delete_local_data=True)
+        self.assertTrue(self.checkout.is_dir())
+        self.assertEqual(len(self.config()['projects']), 1)
+
+    def test_tracked_branch_with_unpushed_commit_refuses(self):
+        # B4: a branch WITH upstream still refuses when it holds a commit no remote has. The
+        # no-upstream check cannot catch this one, so only the branches-not-remotes check can.
+        git(self.checkout, 'checkout', '-q', '-b', 'topic')
+        (self.checkout / 't.txt').write_text('t1\n')
+        git(self.checkout, 'add', '-A')
+        git(self.checkout, 'commit', '-q', '-m', 'topic pushed')
+        git(self.checkout, 'push', '-q', '-u', 'origin', 'topic')
+        (self.checkout / 't.txt').write_text('t2\n')
+        git(self.checkout, 'commit', '-qam', 'topic local only')
+        git(self.checkout, 'checkout', '-q', 'main')
+        with self.assertRaisesRegex(lc.LifecycleError, 'commits no remote has'):
+            self.remove(delete_local_data=True)
+        self.assertTrue(self.checkout.is_dir())
+        self.assertEqual(len(self.config()['projects']), 1)
+
+    def test_local_branch_without_upstream_refuses(self):
+        git(self.checkout, 'branch', 'orphan')
+        with self.assertRaisesRegex(lc.LifecycleError, 'local branch orphan has no upstream'):
+            self.remove(delete_local_data=True)
+        self.assertTrue(self.checkout.is_dir())
+
+    def test_linked_worktree_refuses(self):
+        other = self.base / 'linked-worktree'
+        git(self.checkout, 'worktree', 'add', '-q', '--detach', str(other), 'main')
+        with self.assertRaisesRegex(lc.LifecycleError, 'linked worktrees'):
+            self.remove(delete_local_data=True)
+        self.assertTrue(self.checkout.is_dir())
+        self.assertTrue(other.is_dir())
+
+    def test_pushed_branches_only_still_deletes(self):
+        git(self.checkout, 'push', '-q', 'origin', 'main:refs/heads/shipped')
+        git(self.checkout, 'fetch', '-q', 'origin')
+        self.remove(delete_local_data=True)
+        self.assertFalse(self.checkout.exists())
+
+
+class RecheckAfterDrainTest(RemoveBase):
+    """B5: the drain runs between confirmation and the config write; a change during it must refuse."""
+
+    def test_cycle_appearing_during_drain_refuses_restarts_and_keeps_config(self):
+        def cycle_appears(seconds):
+            (self.pdir / 'cycle.json').write_text('{}')
+        self.world.on_sleep = cycle_appears
+        try:
+            with self.assertRaisesRegex(lc.LifecycleError, 'in-flight cycle while draining'):
+                self.remove()
+        finally:
+            self.world.on_sleep = None
+        self.assertEqual(self.calls, [], 'no disable or systemctl call may happen on refusal')
+        self.assertTrue(self.service.active, 'the service must be restarted when it was active')
+        self.assertEqual(len(self.config()['projects']), 1)
+
+    def test_unpushed_commit_appearing_during_drain_refuses_before_config_write(self):
+        def commit_appears(seconds):
+            if not getattr(self, '_committed', False):
+                self._committed = True
+                (self.checkout / 'late.txt').write_text('late\n')
+                git(self.checkout, 'add', '-A')
+                git(self.checkout, 'commit', '-q', '-m', 'late')
+        self.world.on_sleep = commit_appears
+        try:
+            with self.assertRaisesRegex(lc.LifecycleError, 'not pushed'):
+                self.remove(delete_local_data=True)
+        finally:
+            self.world.on_sleep = None
+        self.assertEqual(len(self.config()['projects']), 1)
+        self.assertTrue(self.checkout.is_dir())
+        self.assertTrue(self.service.active)
+
+    def test_no_recheck_change_still_removes(self):
+        self.remove()
+        self.assertEqual(self.config()['projects'], [])
 
 
 if __name__ == '__main__':

@@ -21,7 +21,7 @@ Simulated onboarding (`tests/test_onboarding_integration.py`) runs the real `onb
 
 The selector is covered for comment-only changes: an outsider comment or `updated_at` bump after a no-action decision does not start a new OMO session, while body, label and status changes do (`tests/test_agent_backlog_selection.py`, `tests/test_admission_and_authority.py`). Known limits: only the 100 most recently updated issues are read, so an Issue outside that window changes its label, state, milestone or dependencies without waking triage until the daily recheck; and the first iteration after the signature upgrade causes one deliberate re-selection per project.
 
-Reproducible release archives were checked locally, not in CI. The orchestrator built the same commit in `debian:12`, `debian:13`, `ubuntu:24.04` and `ubuntu:26.04` containers and on the host, and all five archives had identical SHA256 digests. This was a local run. No `release.yml` run has happened on GitHub.
+Reproducible release archives were checked locally, not in CI. The orchestrator built commit `83508e21521dae40a62d0113f973e9c60b007828` (built as `v0.0.1`) in `debian:12`, `debian:13`, `ubuntu:24.04` and `ubuntu:26.04` containers and on the host, and all five archives had identical SHA256 digests: `a0dcc75c96461035af8e73275c9e45f362f27375e4e9eacc782e411054ad4342`. This was a local run. No `release.yml` run has happened on GitHub.
 
 These are simulated results. They do not show that real GitHub, `gh` or OpenCode behave as the stand-ins do. Live onboarding and live selector behaviour are not performed by any automated check. Containers prove OS/Python compatibility only. They do **not** prove systemd, lingering, APT installation, reboot survival, live GitHub/OpenCode behaviour or release publication; those remain in the live acceptance below.
 
@@ -74,6 +74,7 @@ The following have been exercised only by the offline suite or the local reprodu
 
 - `release.yml` publication: qualification, the draft release, asset digest verification and publish have not run on GitHub.
 - Docker reproducibility builds in CI: the container builds have run only locally, as described above.
+- Container images are not pinned: `regression.yml` and `release.yml` use the tag names `debian:12`, `debian:13`, `ubuntu:24.04` and `ubuntu:26.04`, not digests, so a rebuilt tag can change the base image. Digest pinning is deferred and not implemented.
 - Real `update` against GitHub Releases: no published release exists, so `update` and `rollback` have only run against the simulated GitHub API and fake `systemctl`.
 - Digest presence on real release assets: GitHub's digests for uploaded assets have not been observed.
 
@@ -94,6 +95,7 @@ Release-specific qualification status and evidence are tracked in the GitHub rel
 
 ## Current known limitations
 
+- Health window (S8, deferred, not implemented): after an update or rollback the service must stay active for `--health-seconds`. That check reads process liveness only, not a heartbeat. A controller that is running but stuck still passes the window.
 - Role endpoint and GitHub APIs are documented but this onboarding implementation has not been exercised against live services. Agent quality and permissions are not sandboxed. A working API and role existence do not prove the provider can complete a task.
 - Existing issues are imported once; future issues must be real Issues that a maintainer adds to the Project. Issues are never enrolled automatically (by design). The controller never updates itself by design; `update` and `rollback` are user-invoked. `remove`, `uninstall` and `memory inspect` exist as offline-tested commands, but none has run against a live installation. OS certification is not done.
 - Installed git/gh/mise binaries are reused; Engram updates automatically per boot. OS package updates follow APT. `--install-only` preserves runtime configuration.

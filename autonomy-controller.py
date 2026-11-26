@@ -576,12 +576,47 @@ do not select another task. No controller/runtime edits.
 
 
 
-def read_drain_request(state_home: Path) -> dict | None:
-    """None: no drain requested. {"nonce": None}: unreadable request, which still drains (fail closed)."""
+LIFECYCLE_LOCK_NAME = "lifecycle.lock"
+# The lock of the install this controller runs from: update/rollback/remove hold it for the drain.
+INSTALL_ROOT_LOCK = Path(__file__).resolve().parent / LIFECYCLE_LOCK_NAME
+# How often a parked worker re-checks for the drain request to clear. Tests shorten it per worker.
+PARK_POLL_SECONDS = 5.0
+
+
+def lifecycle_lock_held(lock_path: Path) -> bool:
+    """True only while an updater/rollback/remove holds lifecycle.lock (its flock is live).
+
+    The probe takes a shared lock on a separate fd without blocking and releases it at once.
+    A missing lock file means nobody can be holding it, so the request is stale.
+    """
+    try:
+        fd = os.open(lock_path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True  # an exclusive holder is live
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
+def read_drain_request(state_home: Path, lock_path: Path | None = None) -> dict | None:
+    """None: no drain requested. {"nonce": None}: unreadable request, which still drains (fail closed).
+
+    A request is honoured only while the updater that wrote it still holds lifecycle.lock. A request
+    whose lock is not held is stale (left by a crashed or killed updater): it is reported as
+    {"nonce": None, "stale": True} and never parks the workers.
+    """
     path = state_home / DRAIN_REQUEST
     # lexists, not exists: a dangling symlink is a request we cannot read, never an absent one.
     if not os.path.lexists(path):
         return None
+    if not lifecycle_lock_held(lock_path or INSTALL_ROOT_LOCK):
+        return {"nonce": None, "requested_at": 0.0, "stale": True}
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
         nonce = doc.get("nonce") if isinstance(doc, dict) else None
@@ -592,11 +627,17 @@ def read_drain_request(state_home: Path) -> dict | None:
         return {"nonce": None, "requested_at": 0.0}
 
 
-def sync_drain_ready(state_home: Path, workers: list) -> None:
+def drain_requested(state_home: Path, lock_path: Path | None = None) -> bool:
+    """A live drain: a request whose updater still holds lifecycle.lock (unreadable still drains)."""
+    request = read_drain_request(state_home, lock_path)
+    return request is not None and not request.get("stale")
+
+
+def sync_drain_ready(state_home: Path, workers: list, lock_path: Path | None = None) -> None:
     """Main-loop side: publish drain.ready only for a valid request while every worker is parked."""
     ready = state_home / DRAIN_READY
-    request = read_drain_request(state_home)
-    if request is None or request["nonce"] is None or not all(w.parked.is_set() for w in workers):
+    request = read_drain_request(state_home, lock_path)
+    if request is None or request.get("stale") or request["nonce"] is None or not all(w.parked.is_set() for w in workers):
         ready.unlink(missing_ok=True)
         return
     json_atomic(ready, {"nonce": request["nonce"], "pid": os.getpid(), "at": time.time()})
@@ -612,6 +653,9 @@ class ProjectWorker:
         self.stop=stop
         self.quota_lock=quota_lock
         self.state_home=Path(global_cfg["state_dir"]).expanduser().resolve()
+        # The install's lifecycle.lock; tests point it at a temp lock they hold.
+        self.lock_path=INSTALL_ROOT_LOCK
+        self.park_poll=PARK_POLL_SECONDS
         self.pdir=self.state_home/"projects"/self.name
         self.pending=self.pdir/"cycle.pending"
         self.cycle_state=self.pdir/"cycle.json"
@@ -1731,7 +1775,7 @@ class ProjectWorker:
         deadline=time.monotonic()+max(1,seconds)
         while not self.stop.is_set():
             left=deadline-time.monotonic()
-            if left<=0 or read_drain_request(self.state_home) is not None: return
+            if left<=0 or drain_requested(self.state_home, self.lock_path): return
             self.stop.wait(min(5,left))
 
     def run(self):
@@ -1741,11 +1785,11 @@ class ProjectWorker:
                 # Clear first, then check: a request that appears mid-check is caught on the next pass.
                 was_parked=self.parked.is_set()
                 self.parked.clear()
-                if read_drain_request(self.state_home) is not None:
+                if drain_requested(self.state_home, self.lock_path):
                     # Drain: start no iteration. The main loop publishes drain.ready once all workers park.
                     self.parked.set()
                     if not was_parked: self.notice("drain","drain requested; no new work",warning=False)
-                    self.stop.wait(5)
+                    self.stop.wait(self.park_poll)
                     continue
                 remaining=self.worker_ready()
                 if remaining>0:
