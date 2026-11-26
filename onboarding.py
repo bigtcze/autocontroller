@@ -355,35 +355,17 @@ def find_or_create_bootstrap(repo, number, user):
 
 
 def import_issues(project):
-    """Import only issues written by trusted repository members, into Todo.
+    """Import only issues written by trusted repository members.
 
     Public repositories accept issues from anyone; an outsider's issue must never
     be auto-scheduled. Missing or unknown author_association fails closed.
-    A blank Project status is non-authorizing, so each imported trusted issue is
-    moved to Todo; a status a maintainer already set is never overridden.
-    Idempotent on resume: only blank rows of trusted issues are edited.
     """
     seen={i['number'] for i in project.items()}
     issues=c.gh_api_pages(f'repos/{project.repo}/issues?state=open&per_page=100',max_items=10000)
-    trusted=[]
     for issue in issues:
-        if issue.get('pull_request') or releases.is_renovate_identity(issue.get('user')): continue
+        if issue.get('pull_request') or issue['number'] in seen or releases.is_renovate_identity(issue.get('user')): continue
         if str(issue.get('author_association') or '').upper() not in TRUSTED_ASSOCIATIONS: continue
-        trusted.append(issue)
-        if issue['number'] in seen: continue
         run('gh','project','item-add',str(project.number),'--owner',project.owner,'--url',issue['html_url'])
-    if not trusted: return
-    # Re-read after adds: item-add may have been lost or retried, and the rows are the truth.
-    rows={i['number']:i for i in project.items()}
-    for issue in trusted:
-        row=rows.get(issue['number'])
-        if row is None: raise ValueError(f"Trusted issue #{issue['number']} is not in the Project after item-add")
-        if str(row.get('status') or '').strip(): continue
-        try:
-            project.set_status(row,'Todo')
-        except c.ControllerError as exc:
-            # Owner action, not a crash: the Project lacks the Todo lane the scheduler needs.
-            raise ValueError(f"{exc}; owner action: add a Todo Status option, then re-run onboarding") from exc
 
 
 def onboard(url=None):
@@ -426,7 +408,7 @@ def onboard(url=None):
     c.json_atomic(CONFIG,config)
     run('systemctl','--user','enable','autocontroller.service')
     run('systemctl','--user','restart','autocontroller.service')
-    print(f'\nOnboarded {repo}. Bootstrap issue: https://github.com/{repo}/issues/{bootstrap}\nProject: {project_url}\nEnable Renovate for this repository: https://github.com/apps/renovate\nUse autocontroller status and autocontroller logs to monitor startup. To give the agent new work, add a real GitHub Issue to this Project and set its Status to Todo (or To do); the controller offers only Todo and In Progress/Review Issues.')
+    print(f'\nOnboarded {repo}. Bootstrap issue: https://github.com/{repo}/issues/{bootstrap}\nBacklog: {project_url}\nEnable Renovate for this repository: https://github.com/apps/renovate\nUse autocontroller status and autocontroller logs to monitor startup. Add future real GitHub Issues to this Project; no manual Ready state is needed.')
 
 
 def lifecycle_action(action, args):

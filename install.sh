@@ -43,7 +43,7 @@ fi
 python3 -c 'import sys; assert sys.version_info >= (3,11), "Python 3.11+ is required"'
 mkdir -p "$TARGET" "$TARGET/state" "$UNIT_DIR" "$HOME/.local/bin"
 chmod 700 "$TARGET" "$TARGET/state"
-for file in autonomy-controller.py opencode-project-safe.py release_policy.py release_artifacts.py memory.py bootstrap_policy.py onboarding.py lifecycle.py followup.py install.sh; do
+for file in autonomy-controller.py opencode-project-safe.py release_policy.py release_artifacts.py memory.py bootstrap_policy.py onboarding.py lifecycle.py install.sh; do
  [[ "$SOURCE/$file" == "$TARGET/$file" ]] || install -m 700 "$SOURCE/$file" "$TARGET/$file"
 done
 for file in README.md config.example.json autocontroller.service; do

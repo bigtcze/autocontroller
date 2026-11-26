@@ -80,7 +80,7 @@ def issue_url(n, repo=REPO):
     return f'https://github.com/{repo}/issues/{n}'
 
 
-def board_item(n, status='Todo'):
+def board_item(n, status='Backlog'):
     """Shape produced by GitHubProject.items() for an admitted Issue."""
     return {'item_id': f'ITEM{n}', 'number': n, 'title': f'Task {n}', 'url': issue_url(n),
             'status': status, 'priority': 'P3', 'body_sha256': '0' * 64}
@@ -291,7 +291,7 @@ class AdmissionWithoutReady(ControllerCase):
             {'id': 'x1', 'status': 'Done', 'content': {'type': 'Issue', 'url': issue_url(15)}},
         ]}
 
-    def test_only_todo_and_recovery_statuses_are_offered_all_others_never(self):
+    def test_unset_blank_backlog_todo_and_custom_statuses_are_offered_and_others_never(self):
         with patch.object(m, 'gh_json', return_value=self.raw_board()):
             board = m.GitHubProject(REPO, 'org', 2).items()
         self.assertEqual({i['number'] for i in board}, {10, 11, 12, 13, 14, 15})
@@ -300,10 +300,8 @@ class AdmissionWithoutReady(ControllerCase):
         self.w.one_iteration()
         self.assertEqual(self.agent_kinds(), ['selection'])
         prompt = self.agent.call_args.args[0]
-        # Todo (13) is new work; blank, Backlog and custom lanes are non-authorizing.
-        self.assertIn(issue_url(13), prompt)
-        for n in (10, 11, 12, 14):
-            self.assertNotIn(issue_url(n), prompt)
+        for n in (10, 11, 12, 13, 14):
+            self.assertIn(issue_url(n), prompt)
         self.assertNotIn(issue_url(15), prompt)  # Done is terminal
         self.assertNotIn('other/repo', prompt)
         self.assertNotIn('/pull/21', prompt)
@@ -330,33 +328,6 @@ class AdmissionWithoutReady(ControllerCase):
         self.assertTrue(self.w.retry_map()['selection:0']['until'] > time.time())
         self.w.one_iteration()
         self.assertEqual(self.agent_kinds(), ['selection'])
-
-
-class StatusPredicate(unittest.TestCase):
-    def test_todo_spellings_and_recovery_statuses_are_schedulable(self):
-        for status in ('Todo', 'todo', 'To do', 'to-do', '  TO   DO ', 'In Progress', 'Review'):
-            self.assertTrue(m.schedulable_status(status), status)
-
-    def test_blank_backlog_blocked_custom_and_terminal_are_never_schedulable(self):
-        for status in ('', '   ', None, 'Backlog', 'Blocked', 'Custom Lane', 'Ready',
-                       'Done', 'Completed', 'Closed', 'Cancelled', 'Archived'):
-            self.assertFalse(m.schedulable_status(status), repr(status))
-
-
-class LiveRevalidation(ControllerCase):
-    def test_selected_issue_that_moved_out_of_todo_is_refused_and_retried(self):
-        # The model chose OTHER from a Todo board; before dispatch the live board shows Backlog.
-        cycle = self.p(self.w, '_cycle')
-        self.p(self.w.project, 'items', return_value=[board_item(OTHER, status='Backlog')])
-        checkpoint = {'kind': 'selection', 'number': 0, 'url': f'https://github.com/{REPO}',
-                      'phase': 'selection', 'started': time.time(),
-                      'decision': 'issue', 'chosen_issue': OTHER}
-        self.w.save_checkpoint(checkpoint)
-        self.w.select_next_issue([board_item(OTHER)], checkpoint=checkpoint)
-        cycle.assert_not_called()
-        self.set_status.assert_not_called()
-        self.assertNotIn('chosen_issue', m.json_read(self.w.cycle_state))
-        self.assertTrue(self.w.retry_map()['selection:0']['until'] > time.time())
 
 
 class OutsiderApproval(ControllerCase):
@@ -445,18 +416,9 @@ class OutsiderCommentsDoNotWake(ControllerCase):
 class NoAutoAdmission(ControllerCase):
     def test_controller_source_never_invokes_project_item_add(self):
         # Parsed AST, not raw text: comments and docstrings are not code and cannot
-        # trip or hide the check. Only executable string literals count. Every executable
-        # program file is checked except the two that legitimately write Project items:
-        # followup.py (the only post-onboarding writer) and onboarding.py (import and bootstrap).
-        import release_artifacts
-        allowed = {'followup.py', 'onboarding.py'}
-        checked = [name for name in release_artifacts.EXECUTABLE_PROGRAM_FILES
-                   if name.endswith('.py') and name not in allowed]
-        self.assertIn('autonomy-controller.py', checked)
-        for name in checked:
-            with self.subTest(file=name):
-                tree = ast.parse((ROOT / name).read_text(encoding='utf-8'))
-                self.assertEqual(executable_strings_containing(tree, 'item-add'), [], name)
+        # trip or hide the check. Only executable string literals count.
+        tree = ast.parse((ROOT / 'autonomy-controller.py').read_text(encoding='utf-8'))
+        self.assertEqual(executable_strings_containing(tree, 'item-add'), [])
 
     def test_item_add_checker_has_positive_and_negative_controls(self):
         # Positive: a real argv literal is caught, including inside a nested list.

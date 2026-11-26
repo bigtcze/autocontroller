@@ -618,7 +618,6 @@ If externally blocked, report exact evidence; do not retry blindly or
 bypass branch protection. Do not change the controller.
 
 {os.environ.get("AUTOCONTROLLER_LEARNING_INSTRUCTIONS", "")}
-{os.environ.get("AUTOCONTROLLER_FOLLOWUP_INSTRUCTIONS", "")}
 
 Only once the reconciliation turn is complete, emit this as the final line:
 {nonce}
