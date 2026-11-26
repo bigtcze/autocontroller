@@ -4,9 +4,12 @@
 - Never force-push shared branches, rewrite `main`, merge your own PR, use admin
   merge, disable/skip checks, or change branch protection, rulesets, Actions
   policy or repository settings to get a PR merged.
-- Never weaken quality gates: do not delete or skip tests, add
-  `continue-on-error`, path-filter required workflows, or make `required`
-  pass when a dependency failed, was cancelled or skipped.
+- Never weaken quality gates: do not skip tests, add `continue-on-error`,
+  path-filter required workflows, or make `required` pass when a dependency
+  failed, was cancelled or skipped. Removing or consolidating redundant or
+  brittle tests requires explicit owner authorization and preserved meaningful
+  behavioral/security coverage; explain the concrete reason and retained
+  coverage in the reviewed PR. Never remove a test merely to make CI pass.
 - Preserve unrelated user work: never reset, clean, stash-drop or overwrite
   uncommitted changes you did not create.
 - No secrets, tokens, personal paths, runtime config, state or logs in the

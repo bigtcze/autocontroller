@@ -33,6 +33,16 @@ Git config, removes GitHub/provider tokens, and puts failing shims for `gh`,
 
 ## Rules
 
+- Test product behavior and meaningful correctness/security invariants, not
+  incidental implementation details, documentation wording, test-double
+  internals or test scaffolding. Test infrastructure itself only where a
+  concrete failure could invalidate important evidence or isolation. Prefer
+  existing fixtures and standard tools over bespoke testing frameworks.
+- Preserve meaningful unit, regression, negative, integration and real
+  acceptance coverage. Consolidate redundant or brittle tests only under
+  the authorization described in GUARDRAILS.md; explain retained coverage
+  and run the existing required checks. Do not optimize for test count.
+
 - Deterministic, isolated fixtures; no network, paid services, real GitHub,
   OpenCode, providers, production credentials or the installed controller.
 - Bug fixes and security fixes include a regression test that fails before

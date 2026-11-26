@@ -2,6 +2,10 @@
 
 - Python ≥ 3.11, standard library only. Scripts in Bash with
   `set -euo pipefail`; must pass `bash -n`.
+- Prefer the smallest maintainable solution that meets actual requirements.
+  Reuse established tools and interfaces before adding custom mechanisms;
+  avoid speculative abstractions, parallel implementations and infrastructure
+  without a concrete need.
 - Reuse existing helpers (`command`, `gh_json`, `gh_api_pages`, `json_atomic`,
   `json_read`) instead of ad-hoc subprocess/JSON handling. Keep identity and
   policy predicates in one place (e.g. Renovate identity in
