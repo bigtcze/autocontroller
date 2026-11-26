@@ -868,6 +868,12 @@ class ProjectWorker:
         Comments (by anyone), updated_at and comment counts are never included, so
         an outsider comment cannot wake a new paid selection. Board rows carry body
         digests; Issue facts are comment-independent digests. Decide with selector_wake.
+
+        Known limitation: only the 100 most recently updated issues are read. A board
+        Issue outside that window when NO_ACTION was recorded is merged silently when
+        it reappears. Its label, state, milestone or dependency changes then wake
+        triage only at the daily review_after recheck. Board-row changes (title,
+        status, priority, body) are still caught through the board digest.
         """
         rows = sorted((i["number"],i.get("title",""),i.get("status",""),
                        i.get("priority",""),i.get("item_id",""),i.get("body_sha256","")) for i in board)

@@ -6,6 +6,9 @@ from unittest.mock import patch, Mock
 import onboarding as o
 import bootstrap_policy as b
 
+# The authenticated account onboarding runs as (the shape authorize() returns).
+VIEWER={'login':'example-owner','type':'User','id':1001}
+
 class OnboardingTests(unittest.TestCase):
     def test_preflight_checks_omo_roles_without_model_request(self):
         import json
@@ -39,17 +42,17 @@ class OnboardingTests(unittest.TestCase):
     def test_bootstrap_issue_reuse(self):
         issue={'number':7,'body':'<!-- autocontroller-bootstrap:v1 -->','state':'open','author_association':'OWNER'}
         with patch.object(o.c,'gh_api_pages',return_value=[issue]),patch.object(o,'gh') as gh:
-            self.assertEqual(o.find_or_create_bootstrap('org/demo',1),7);gh.assert_not_called()
+            self.assertEqual(o.find_or_create_bootstrap('org/demo',1,VIEWER),7);gh.assert_not_called()
     def test_closed_bootstrap_refuses(self):
         issue={'number':7,'body':'<!-- autocontroller-bootstrap:v1 -->','state':'closed','author_association':'MEMBER'}
-        with patch.object(o.c,'gh_api_pages',return_value=[issue]),self.assertRaises(ValueError):o.find_or_create_bootstrap('org/demo',1)
+        with patch.object(o.c,'gh_api_pages',return_value=[issue]),self.assertRaises(ValueError):o.find_or_create_bootstrap('org/demo',1,VIEWER)
     def test_outsider_marker_issue_is_not_adopted_as_bootstrap(self):
         # B1 regression: an outsider's copy of the marker must not be adopted (it
         # would then never be imported and onboarding would fail forever).
         outsider={'number':7,'body':'<!-- autocontroller-bootstrap:v1 -->','state':'open','author_association':'NONE'}
         created={'number':8}
         with patch.object(o.c,'gh_api_pages',return_value=[outsider]),patch.object(o,'gh',return_value=created) as gh:
-            self.assertEqual(o.find_or_create_bootstrap('org/demo',1),8)
+            self.assertEqual(o.find_or_create_bootstrap('org/demo',1,VIEWER),8)
         gh.assert_called_once()
         self.assertEqual(gh.call_args.args[0:2],('api','--method'))
     def test_outsider_marker_does_not_cause_multiple_bootstrap_refusal(self):
@@ -57,8 +60,21 @@ class OnboardingTests(unittest.TestCase):
                 {'number':9,'body':'<!-- autocontroller-bootstrap:v1 -->','state':'closed','author_association':'CONTRIBUTOR'},
                 {'number':11,'body':'<!-- autocontroller-bootstrap:v1 -->','state':'open','author_association':'OWNER'}]
         with patch.object(o.c,'gh_api_pages',return_value=issues),patch.object(o,'gh') as gh:
-            self.assertEqual(o.find_or_create_bootstrap('org/demo',1),11)
+            self.assertEqual(o.find_or_create_bootstrap('org/demo',1,VIEWER),11)
         gh.assert_not_called()
+    def test_own_marker_issue_adopted_by_account_id_when_association_untrusted(self):
+        # B-1 regression: a non-trusted authenticated account must re-find the bootstrap it created.
+        own={'number':7,'body':'<!-- autocontroller-bootstrap:v1 -->','state':'open','author_association':'CONTRIBUTOR',
+             'user':{'login':'example-owner','type':'User','id':1001}}
+        with patch.object(o.c,'gh_api_pages',return_value=[own]),patch.object(o,'gh') as gh:
+            self.assertEqual(o.find_or_create_bootstrap('org/demo',1,VIEWER),7)
+        gh.assert_not_called()
+    def test_untrusted_marker_by_other_account_not_adopted_by_id(self):
+        outsider={'number':7,'body':'<!-- autocontroller-bootstrap:v1 -->','state':'open','author_association':'CONTRIBUTOR',
+                  'user':{'login':'example-outsider','type':'User','id':2002}}
+        with patch.object(o.c,'gh_api_pages',return_value=[outsider]),patch.object(o,'gh',return_value={'number':8}) as gh:
+            self.assertEqual(o.find_or_create_bootstrap('org/demo',1,VIEWER),8)
+        gh.assert_called_once()
     def test_import_skips_pr_and_existing_and_renovate(self):
         project=Mock(repo='org/demo',number=1,owner='org');project.items.return_value=[{'number':1}]
         bot={'login':'renovate[bot]','type':'Bot','id':29139614}

@@ -261,15 +261,16 @@ class InterruptionResumeTests(OnboardingCase):
         self.w.add_issue(repo, 'Member work', association='MEMBER')
         self.w.add_issue(repo, 'Collaborator work', association='COLLABORATOR')
 
-    def phase_setup(self, name):
+    def phase_setup(self, name, viewer_association='OWNER'):
         """Return (repo, extra_setup_callable) for one interruption phase, in a fresh World."""
         world = self.new_world()
         self.w = world
         if name == 'PATCH has_issues':
             repo = world.add_repo(OWNER, 'demo', default_branch='trunk', seed=False,
-                                  has_issues=False, admin=True)
+                                  has_issues=False, admin=True, viewer_association=viewer_association)
         else:
-            repo = world.add_repo(OWNER, 'demo', default_branch='trunk', seed=False)
+            repo = world.add_repo(OWNER, 'demo', default_branch='trunk', seed=False,
+                                  viewer_association=viewer_association)
         self.seed_issues(repo)
         if name == 'auth login':
             world.set_login(False, scopes=())
@@ -320,6 +321,19 @@ class InterruptionResumeTests(OnboardingCase):
                 second = self.onboard(repo)
                 self.assertEqual(second.rc, 0, f'{name}: resume failed\n{second.stderr}')
                 self.assert_resumed_exact(repo, name)
+
+    def test_post_issue_interruption_with_contributor_viewer_resumes_to_one_bootstrap(self):
+        # B-1 regression: a non-trusted viewer's lost POST response must not cause a second
+        # bootstrap issue on resume. The marker issue is matched by the viewer's own user id.
+        repo = self.phase_setup('POST issue', viewer_association='CONTRIBUTOR')
+        first = self.onboard(repo)
+        self.assertNotEqual(first.rc, 0, first.stderr)
+        self.assertNotIn('Onboarded', first.stdout)
+        self.assertEqual(len(self.w.bootstrap_issues(repo)), 1)
+        second = self.onboard(repo)
+        self.assertEqual(second.rc, 0, second.stderr)
+        self.assert_resumed_exact(repo, 'POST issue')
+        self.assertEqual(len(self.w.bootstrap_issues(repo)), 1)
 
     def assert_resumed_exact(self, repo, name):
         entries = [p for p in self.w.read_config()['projects'] if p['repo'].lower() == repo.lower()]
@@ -372,6 +386,36 @@ class DuplicateAndLockTests(OnboardingCase):
         self.assertEqual(len(self.w.projects()), 1)
         self.assertEqual(len(self.w.bootstrap_issues(self.repo)), 1)
         self.assertEqual(len(self.entries_for(self.repo)), 1)
+
+    def test_lost_config_rerun_with_contributor_viewer_creates_no_second_bootstrap(self):
+        # B-1 regression: with a non-trusted viewer, the rerun must adopt the marker issue
+        # this account created earlier instead of posting another bootstrap issue.
+        repo = self.w.add_repo(OWNER, 'contrib', default_branch='trunk', viewer_association='CONTRIBUTOR')
+        self.assertEqual(self.onboard(repo).rc, 0)
+        self.assertEqual(len(self.w.bootstrap_issues(repo)), 1)
+        snapshot = len(self.w.gh_calls())
+        self.w.config_path().unlink()
+        rerun = self.onboard(repo)
+        self.assertEqual(rerun.rc, 0, rerun.stderr)
+        later = self.w.gh_calls()[snapshot:]
+        self.assertFalse([c for c in later if '--method' in c['argv'] and 'POST' in c['argv']])
+        self.assertEqual(len(self.w.bootstrap_issues(repo)), 1)
+        self.assertEqual(len(self.entries_for(repo)), 1)
+        self.assertEqual(self.entries_for(repo)[0]['bootstrap_issue'], self.w.bootstrap_issues(repo)[0]['number'])
+
+    def test_checkout_with_two_origin_urls_refused_without_mutation(self):
+        # Item 5: an ambiguous origin (two values) must fail closed, not be read as the first value.
+        repo = self.repo
+        self.assertEqual(self.onboard(repo).rc, 0)
+        self.w.config_path().unlink()
+        self.w.checkout_git(repo, 'config', '--add', 'remote.origin.url', 'https://example.invalid/other.git')
+        snapshot = len(self.w.mutating_gh_calls())
+        result = self.onboard(repo)
+        self.assertNotEqual(result.rc, 0)
+        self.assertIn('exactly one origin', result.stderr)
+        self.assertEqual(len(self.w.mutating_gh_calls()), snapshot)
+        self.assertFalse(self.w.config_path().exists())
+        self.assertTrue(self.w.checkout_dir(repo).is_dir())
 
     def entries_for(self, repo):
         return [p for p in self.w.read_config()['projects'] if p['repo'].lower() == repo.lower()]
@@ -470,6 +514,8 @@ class AdmissionIsolationTests(OnboardingCase):
         bootstrap_url = f'https://github.com/{repo}/issues/{bootstrap}'
         self.w.config_path().unlink()
         self.assertEqual(self.onboard(repo).rc, 0)
+        # B-1: exactly one bootstrap issue exists across the first run and the resume.
+        self.assertEqual(len(self.w.bootstrap_issues(repo)), 1)
         # Onboarding must not re-add an item already present: the bootstrap issue is
         # never explicitly added twice across the first run and the resume.
         adds = [c['argv'] for c in self.w.gh_calls()

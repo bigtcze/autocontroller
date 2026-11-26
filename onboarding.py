@@ -109,8 +109,10 @@ def create_checkout(repo, branch, directory, user):
         # Read the stored origin, not `remote get-url`: a global insteadOf rewrite
         # (mirror/proxy) would make get-url return the rewritten address and refuse
         # a checkout that onboarding itself cloned.
-        remote=c.command(['git','-C',str(directory),'config','--get','remote.origin.url']).strip()
-        if repo_url(remote).lower()!=repo.lower(): raise ValueError('Checkout origin does not match repository')
+        # Exactly one origin: `--get` would silently take the last of several values.
+        origins=[v.strip() for v in c.command(['git','-C',str(directory),'config','--get-all','remote.origin.url']).splitlines() if v.strip()]
+        if len(origins)!=1: raise ValueError('Checkout must have exactly one origin URL; refusing ambiguous origin')
+        if repo_url(origins[0]).lower()!=repo.lower(): raise ValueError('Checkout origin does not match repository')
         if c.command(['git','-C',str(directory),'status','--porcelain']).strip(): raise ValueError('Existing checkout has local work; refusing to overwrite it')
     else:
         run('git','clone','--',expected,str(directory))
@@ -174,14 +176,21 @@ def project_for(repo, owner, config):
 TRUSTED_ASSOCIATIONS={'OWNER','MEMBER','COLLABORATOR'}
 
 
-def find_or_create_bootstrap(repo, number):
+def find_or_create_bootstrap(repo, number, user):
     title='Repository bootstrap: Golden Standard v'+VERSION
     marker=f'<!-- autocontroller-bootstrap:v{VERSION} -->'
     issues=c.gh_api_pages(f'repos/{repo}/issues?state=all&per_page=100',max_items=10000)
+    viewer_id=user.get('id')
+    def own(issue):
+        # The account that onboarding authenticated as may have a non-trusted association
+        # (for example a private-org member shown as CONTRIBUTOR). Its own marker issue is
+        # matched by numeric account id, which an outsider cannot reproduce.
+        author=issue.get('user') or {}
+        return viewer_id is not None and author.get('id') is not None and str(author['id'])==str(viewer_id)
     # Marker text is attacker-controlled on a public repository. Only issues written
-    # by trusted members may be adopted as the bootstrap; outsider copies are ignored.
+    # by trusted members, or by this exact authenticated account, may be adopted.
     matches=[i for i in issues if not i.get('pull_request') and marker in (i.get('body') or '')
-             and str(i.get('author_association') or '').upper() in TRUSTED_ASSOCIATIONS]
+             and (str(i.get('author_association') or '').upper() in TRUSTED_ASSOCIATIONS or own(i))]
     if len(matches)>1 or (matches and matches[0].get('state')!='open'):
         raise ValueError('Multiple or closed bootstrap issues found; refusing to assume a previous bootstrap was verified')
     if matches: return int(matches[0]['number'])
@@ -222,7 +231,7 @@ def onboard(url=None):
     create_checkout(repo,branch,directory,user)
     owner=info['owner']['login']
     project,project_url=project_for(repo,owner,config)
-    bootstrap=find_or_create_bootstrap(repo,project.number)
+    bootstrap=find_or_create_bootstrap(repo,project.number,user)
     # Onboarding created or verified this issue itself, so it admits it explicitly
     # instead of depending on the author_association import rule. Idempotent on resume.
     if not any(i['number']==bootstrap for i in project.items()):
