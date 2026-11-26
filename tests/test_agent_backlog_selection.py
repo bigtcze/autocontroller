@@ -162,12 +162,16 @@ class AgentBacklogSelection(unittest.TestCase):
         self.assertEqual(m.json_read(w.cycle_state)['release_tag'],'v5.0.0')
 
     def test_issue_edit_wakes_triage_without_status_change(self):
+        # A real content change (label) wakes triage even when the Project card and
+        # status are untouched. A bare updated_at bump is NOT a wake (see outsider tests).
         w=self.worker
-        item=[issue(15)]
-        first=[{'number':15,'updated_at':'2026-11-25T08:00:00Z','state':'open'}]
-        second=[{'number':15,'updated_at':'2026-11-25T12:00:00Z','state':'open'}]
+        board=[dict(issue(15),body_sha256='a'*64)]
+        first=[{'number':15,'updated_at':'2026-11-25T08:00:00Z','state':'open','labels':[]}]
+        second=[{'number':15,'updated_at':'2026-11-25T12:00:00Z','state':'open','labels':[{'name':'bug'}]}]
         with patch.object(m,'gh_json',side_effect=[first,second]):
-            self.assertNotEqual(w.selector_signature(item),w.selector_signature(item))
+            before=w.selector_signature(board)
+            after=w.selector_signature(board)
+        self.assertTrue(m.selector_wake(before,after)[0])
 
     def test_project_custom_status_options_are_allowed(self):
         gp=m.GitHubProject('org/repo','org',2)
@@ -182,6 +186,123 @@ class AgentBacklogSelection(unittest.TestCase):
 
 if __name__=='__main__':
     unittest.main()
+
+def activity_row(n, *, updated, comments=0, labels=(), state='open', body_digest=None):
+    """One GitHub issues-list row. Comments and updated_at are the attacker-controllable fields."""
+    return {'number':n,'updated_at':updated,'comments':comments,'state':state,
+            'labels':[{'name':x} for x in labels],'title':f'Task {n}',
+            'body':'' if body_digest is None else 'body-'+body_digest}
+
+
+class OutsiderCommentWake(unittest.TestCase):
+    """B3: after an OMO NO_ACTION decision, only real content changes may start a new AI session."""
+
+    def setUp(self):
+        temp=tempfile.TemporaryDirectory();self.addCleanup(temp.cleanup)
+        self.worker=m.ProjectWorker({'name':'demo','repo':'org/repo',
+                    'directory':'/home/example/repositories/repo','project_owner':'org',
+                    'project_number':2},
+                    {'state_dir':temp.name,'poll_seconds':300,'wrapper':'/tmp/guard','opencode':'/tmp/opencode'},
+                    threading.Event(),threading.Lock())
+        w=self.worker
+        for name in ('ensure_unsafe_group_gone','checkout_neutral'):
+            p=patch.object(w,name,return_value=True);p.start();self.addCleanup(p.stop)
+        p=patch.object(w,'quota_until',return_value=0);p.start();self.addCleanup(p.stop)
+        p=patch.object(m,'renovate_prs',return_value=[]);p.start();self.addCleanup(p.stop)
+        p=patch.object(w,'check_maintenance',return_value=None);p.start();self.addCleanup(p.stop)
+
+    def board(self,body='a'*64,status='Backlog'):
+        return [dict(issue(10,status=status),body_sha256=body)]
+
+    def run_with_activity(self,rows,board):
+        with patch.object(m,'gh_json',return_value=rows):
+            return self.worker.one_iteration()
+
+    def test_outsider_comment_after_no_action_does_not_start_ai(self):
+        w=self.worker
+        base=[activity_row(10,updated='2026-11-25T08:00:00Z')]
+        with patch.object(w,'run_wrapper',return_value=(0,'AUTOCONTROLLER_NO_ACTION')) as run, \
+             patch.object(w.project,'items',return_value=self.board()):
+            self.run_with_activity(base,None)
+            self.assertEqual(run.call_count,1)
+            # Outsider comment: updated_at and comments bump; no content change.
+            self.run_with_activity([activity_row(10,updated='2026-11-26T09:00:00Z',comments=7)],None)
+        self.assertEqual(run.call_count,1)
+
+    def test_legacy_string_snapshot_wakes_once_then_outsider_comments_do_not(self):
+        # A legacy plain-string skip file compares by equality with the new dict
+        # snapshot, so the first iteration after upgrade is one deliberate
+        # re-selection. The snapshot is then stored as a dict and outsider
+        # comments no longer wake anything.
+        w=self.worker
+        m.json_atomic(w.selector_skip,{'signature':'legacy-string','review_after':time.time()+86400})
+        with patch.object(w,'run_wrapper',return_value=(0,'AUTOCONTROLLER_NO_ACTION')) as run, \
+             patch.object(w.project,'items',return_value=self.board()):
+            self.run_with_activity([activity_row(10,updated='2026-11-26T08:00:00Z')],None)
+            self.assertEqual(run.call_count,1)
+            self.run_with_activity([activity_row(10,updated='2026-11-26T09:00:00Z',comments=3)],None)
+        self.assertEqual(run.call_count,1)
+        self.assertIsInstance(m.json_read(w.selector_skip)['signature'],dict)
+
+    def test_body_edit_wakes_after_no_action(self):
+        w=self.worker
+        with patch.object(w,'run_wrapper',return_value=(0,'AUTOCONTROLLER_NO_ACTION')) as run:
+            with patch.object(w.project,'items',return_value=self.board(body='a'*64)):
+                self.run_with_activity([activity_row(10,updated='2026-11-25T08:00:00Z')],None)
+            with patch.object(w.project,'items',return_value=self.board(body='b'*64)):
+                self.run_with_activity([activity_row(10,updated='2026-11-25T08:00:00Z')],None)
+        self.assertEqual(run.call_count,2)
+
+    def test_label_change_wakes_after_no_action(self):
+        w=self.worker
+        with patch.object(w,'run_wrapper',return_value=(0,'AUTOCONTROLLER_NO_ACTION')) as run, \
+             patch.object(w.project,'items',return_value=self.board()):
+            self.run_with_activity([activity_row(10,updated='2026-11-25T08:00:00Z')],None)
+            self.run_with_activity([activity_row(10,updated='2026-11-25T08:00:00Z',labels=('bug',))],None)
+        self.assertEqual(run.call_count,2)
+
+    def test_status_change_wakes_after_no_action(self):
+        w=self.worker
+        with patch.object(w,'run_wrapper',return_value=(0,'AUTOCONTROLLER_NO_ACTION')) as run:
+            with patch.object(w.project,'items',return_value=self.board(status='Backlog')):
+                self.run_with_activity([activity_row(10,updated='2026-11-25T08:00:00Z')],None)
+            with patch.object(w.project,'items',return_value=self.board(status='Todo')):
+                self.run_with_activity([activity_row(10,updated='2026-11-25T08:00:00Z')],None)
+        self.assertEqual(run.call_count,2)
+
+    def test_newly_active_issue_in_window_does_not_wake_and_is_merged(self):
+        # An outsider comment can pull an admitted issue into the 100-item window
+        # that was previously absent. That alone must not wake a paid session.
+        w=self.worker
+        board=[dict(issue(10),body_sha256='a'*64),dict(issue(11),body_sha256='c'*64)]
+        with patch.object(w,'run_wrapper',return_value=(0,'AUTOCONTROLLER_NO_ACTION')) as run, \
+             patch.object(w.project,'items',return_value=board):
+            self.run_with_activity([activity_row(10,updated='2026-11-25T08:00:00Z')],None)
+            self.run_with_activity([activity_row(10,updated='2026-11-25T08:00:00Z'),
+                                    activity_row(11,updated='2026-11-26T09:00:00Z',comments=4)],None)
+        self.assertEqual(run.call_count,1)
+        stored=m.json_read(w.selector_skip)['signature']
+        self.assertIn('11',stored['issues'])
+
+    def test_released_board_membership_change_still_wakes(self):
+        w=self.worker
+        with patch.object(w,'run_wrapper',return_value=(0,'AUTOCONTROLLER_NO_ACTION')) as run:
+            with patch.object(w.project,'items',return_value=self.board()):
+                self.run_with_activity([activity_row(10,updated='2026-11-25T08:00:00Z')],None)
+            with patch.object(w.project,'items',return_value=self.board()+[dict(issue(12),body_sha256='e'*64)]):
+                self.run_with_activity([activity_row(10,updated='2026-11-25T08:00:00Z')],None)
+        self.assertEqual(run.call_count,2)
+
+    def test_selector_wake_pure_decider(self):
+        stored={'board':'b1','issues':{'10':'x'}}
+        self.assertEqual(m.selector_wake(stored,{'board':'b1','issues':{'10':'x'}})[0],False)
+        self.assertEqual(m.selector_wake(stored,{'board':'b2','issues':{'10':'x'}})[0],True)
+        self.assertEqual(m.selector_wake(stored,{'board':'b1','issues':{'10':'y'}})[0],True)
+        self.assertEqual(m.selector_wake(stored,{'board':'b1','issues':{'10':'x','11':'z'}})[0],False)
+        self.assertEqual(m.selector_wake('old','old'),(False,'old'))
+        self.assertEqual(m.selector_wake('old','new')[0],True)
+        self.assertEqual(m.selector_wake('old',{'board':'b','issues':{}})[0],True)
+
 
 class SelectionReconcile(unittest.TestCase):
     def setUp(self):

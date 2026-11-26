@@ -114,7 +114,9 @@ def normalize_project_item(obj: dict, repo: str) -> dict | None:
     return {"item_id":obj.get("id"), "number":int(match.group(3)),
             "title":str(content.get("title") or obj.get("title") or ""),
             "url":url, "status":status,
-            "priority":str(obj.get("priority") or obj.get("Priority") or "")}
+            "priority":str(obj.get("priority") or obj.get("Priority") or ""),
+            # Digest only: lets the selector detect body edits without carrying text.
+            "body_sha256":hashlib.sha256(str(content.get("body") or "").encode("utf-8")).hexdigest()}
 
 
 def is_renovate(pr: dict, repo: str) -> bool:
@@ -183,6 +185,45 @@ safely actionable, return AUTOCONTROLLER_NO_ACTION and briefly explain why.
 The controller will separately run your normal OMO fixer/oracle workflow for
 the selected Issue; it will handle GitHub CI, merge and green main verification.
 """
+
+
+def sha256_json(value) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def issue_content_digest(issue: dict) -> str:
+    """Comment-independent Issue facts. Comments, updated_at and comment counts are
+    deliberately absent: any commenter, including an outsider, can change them."""
+    def names(values, key):
+        return sorted(str(v.get(key) or "") if isinstance(v, dict) else str(v) for v in (values or []))
+    milestone = issue.get("milestone")
+    return sha256_json({
+        "state": str(issue.get("state") or "").lower(),
+        "labels": names(issue.get("labels"), "name"),
+        "milestone": str(milestone.get("title") or "") if isinstance(milestone, dict) else "",
+        "assignees": names(issue.get("assignees"), "login"),
+        "dependencies": issue.get("issue_dependencies_summary") or None,
+        "sub_issues": issue.get("sub_issues_summary") or None,
+    })
+
+
+def selector_wake(stored, current) -> tuple[bool, Any]:
+    """Pure decision: should a new OMO selection run, and which snapshot to keep?
+
+    A change to the Project board or to a comment-independent fact of an Issue
+    already known wakes triage. An Issue that merely newly entered the recent
+    activity window (an outsider comment can pull one in) does not wake; it is
+    merged into the stored snapshot so later real changes are detected. Legacy
+    plain-string signatures (old skip files) compare by equality.
+    """
+    if not isinstance(stored, dict) or not isinstance(current, dict):
+        return stored != current, current
+    if stored.get("board") != current.get("board"):
+        return True, current
+    known = stored.get("issues") or {}
+    now = current.get("issues") or {}
+    changed = any(number in known and known[number] != value for number, value in now.items())
+    return changed, {"board": current.get("board"), "issues": {**known, **now}}
 
 
 class GitHubProject:
@@ -821,24 +862,28 @@ class ProjectWorker:
         self.prune_logs()
         return rc,tail
 
-    def selector_signature(self, board: list[dict]) -> str:
-        """Watch the Project and recent issue changes using only GitHub, no AI.
+    def selector_signature(self, board: list[dict]) -> dict:
+        """Snapshot of the Project board and admitted Issues, using only GitHub, no AI.
 
-        Updating a blocker/issue body (even without moving its Project card)
-        changes repository issue activity and wakes triage. A daily recheck
-        handles exceptional external dependency changes without hot polling.
+        Comments (by anyone), updated_at and comment counts are never included, so
+        an outsider comment cannot wake a new paid selection. Board rows carry body
+        digests; Issue facts are comment-independent digests. Decide with selector_wake.
+
+        Known limitation: only the 100 most recently updated issues are read. A board
+        Issue outside that window when NO_ACTION was recorded is merged silently when
+        it reappears. Its label, state, milestone or dependency changes then wake
+        triage only at the daily review_after recheck. Board-row changes (title,
+        status, priority, body) are still caught through the board digest.
         """
         rows = sorted((i["number"],i.get("title",""),i.get("status",""),
-                       i.get("priority",""),i.get("item_id","")) for i in board)
+                       i.get("priority",""),i.get("item_id",""),i.get("body_sha256","")) for i in board)
         activity = gh_json("api", f"repos/{self.repo}/issues?state=all&per_page=100&sort=updated&direction=desc")
         if not isinstance(activity,list):
             raise ControllerError("GitHub issue activity response is not a list")
         ids={i["number"] for i in board}
-        recent=sorted((int(i["number"]),str(i.get("updated_at") or ""),
-                       str(i.get("state") or "")) for i in activity
-                      if isinstance(i,dict) and i.get("number") in ids and "pull_request" not in i)
-        payload=json.dumps({"board":rows,"recent":recent},sort_keys=True,ensure_ascii=False)
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        issues={str(int(i["number"])):issue_content_digest(i) for i in activity
+                if isinstance(i,dict) and i.get("number") in ids and "pull_request" not in i}
+        return {"board":sha256_json(rows),"issues":issues}
 
     def select_next_issue(self, board: list[dict], *, checkpoint: dict | None = None):
         """One OMO triage session, with durable recovery before any model call.
@@ -1631,7 +1676,10 @@ class ProjectWorker:
             idle=json_read(self.selector_skip,{}) or {}
             if idle and float(idle.get("review_after",0))>time.time():
                 signature=self.selector_signature(eligible)
-                if idle.get("signature")==signature:
+                changed,merged=selector_wake(idle.get("signature"),signature)
+                if not changed:
+                    if merged != idle.get("signature"):
+                        json_atomic(self.selector_skip,{**idle,"signature":merged})
                     self.notice("triage-idle","backlog unchanged after OMO no-action decision; polling GitHub only",warning=False)
                     return self.interval
             self.select_next_issue(eligible)

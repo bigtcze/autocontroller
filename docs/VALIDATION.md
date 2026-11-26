@@ -10,7 +10,13 @@ The `required` check (`.github/workflows/required.yml` → `regression.yml`) run
 - The full offline regression suite (`scripts/offline-tests.sh`) as an unprivileged user in clean `debian:12`, `debian:13`, `ubuntu:24.04` and `ubuntu:26.04` containers with the distribution `python3`, plus `mise run ci` on the GitHub runner.
 - Repository contract checks: bootstrap contract files, workflow safety (no `pull_request_target`, no secrets, pinned actions, aggregate gate), no personal paths or tokens.
 
-The suite simulates GitHub, OpenCode and Engram: scheduling, checkpoints and recovery, CI/merge gates, Renovate identity and fork rejection, onboarding import authorization, release policy, safe-wrapper recovery against a fake OpenCode API, and Engram runtime staging with fake binaries. Containers prove OS/Python compatibility only. They do **not** prove systemd, lingering, APT installation, reboot survival, live GitHub/OpenCode behaviour or release publication; those remain in the live acceptance below.
+The suite simulates GitHub, OpenCode and Engram: scheduling, checkpoints and recovery, CI/merge gates, Renovate identity and fork rejection, onboarding import authorization, release policy, safe-wrapper recovery against a fake OpenCode API, and Engram runtime staging with fake binaries.
+
+Simulated onboarding (`tests/test_onboarding_integration.py`) runs the real `onboarding.py` in a disposable install root, temporary HOME and bare remotes, against fake `gh`, `opencode` and `systemctl` stand-ins. It covers the happy paths, merge-mode and permission refusals, the OAuth handoff, a fault-injected interruption at each of 16 phases with exact-state resume, duplicate prevention, the lock, preserved config and admission isolation. The simulated GitHub contract, its fault model and its unverified assumptions are listed in [ONBOARDING_TESTING.md](ONBOARDING_TESTING.md).
+
+The selector is covered for comment-only changes: an outsider comment or `updated_at` bump after a no-action decision does not start a new OMO session, while body, label and status changes do (`tests/test_agent_backlog_selection.py`, `tests/test_admission_and_authority.py`). Known limits: only the 100 most recently updated issues are read, so an Issue outside that window changes its label, state, milestone or dependencies without waking triage until the daily recheck; and the first iteration after the signature upgrade causes one deliberate re-selection per project.
+
+These are simulated results. They do not show that real GitHub, `gh` or OpenCode behave as the stand-ins do. Live onboarding and live selector behaviour are not performed by any automated check. Containers prove OS/Python compatibility only. They do **not** prove systemd, lingering, APT installation, reboot survival, live GitHub/OpenCode behaviour or release publication; those remain in the live acceptance below.
 
 ## Scheduled and manual VM lifecycle suite
 
