@@ -101,7 +101,7 @@ def _remove(path: Path):
 # An update installs exactly what the verified release declares; a rollback restores exactly
 # the set its snapshot held (names a newer release added are removed, dropped ones restored).
 PROTECTED_NAMES = frozenset({'config.json', 'state', 'updates', 'rollback', 'VERSION', 'MANIFEST.sha256',
-                             LIFECYCLE_LOCK, ONBOARDING_LOCK})
+                             'PROGRAM.json', 'SNAPSHOT.json', LIFECYCLE_LOCK, ONBOARDING_LOCK})
 
 
 def current_program() -> dict:
@@ -114,8 +114,11 @@ def program_names(program: dict) -> list[str]:
 
 
 def _safe_program_name(value) -> str:
-    """A plain relative path: no absolute, backslash, empty or traversal part, and not a protected name."""
-    if not isinstance(value, str) or not value or '\\' in value or value.startswith('/'):
+    """A plain single path component: no absolute, backslash, empty or traversal part, no '/', not a protected name.
+
+    N6: a program name is one entry directly in the tree, never a nested path, so '/' is refused outright.
+    """
+    if not isinstance(value, str) or not value or '\\' in value or '/' in value or value.startswith('/'):
         raise LifecycleError(f'release declares an unsafe program name: {value!r}')
     if any(part in ('', '.', '..') for part in value.split('/')):
         raise LifecycleError(f'release declares an unsafe program name: {value!r}')
@@ -124,38 +127,78 @@ def _safe_program_name(value) -> str:
     return value
 
 
-def program_set(tree: Path, *, present: bool = True) -> dict:
-    """Read and validate the program lists declared by tree/release_artifacts.py.
+def _program_from_release_json(doc, origin: str) -> dict:
+    """Validate a release's PROGRAM.json document (schema 1, three lists) into a program set."""
+    if not isinstance(doc, dict) or doc.get('schema') != 1 or set(doc) != {'schema', 'executable', 'data', 'dirs'}:
+        raise LifecycleError(f'{origin} PROGRAM.json is not schema 1 with exactly executable/data/dirs')
+    for kind in ('executable', 'data', 'dirs'):
+        if not isinstance(doc[kind], list):
+            raise LifecycleError(f'{origin} PROGRAM.json {kind} is not a list')
+    return {kind: tuple(_safe_program_name(n) for n in doc[kind]) for kind in ('executable', 'data', 'dirs')}
 
-    The module is loaded under a unique name and never enters sys.modules. Callers must only
-    pass trees that already passed manifest verification or are the installed tree.
-    Every name must be unique, plain, and present in the tree (files as regular files,
-    directories as real directories). Anything else refuses before any change is made.
-    """
-    path = tree / 'release_artifacts.py'
-    try:
-        spec = importlib.util.spec_from_file_location(f'program_set_{secrets.token_hex(8)}', path)
-        if spec is None or spec.loader is None:
-            raise LifecycleError(f'{path.name} is not a python module')
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-    except LifecycleError:
-        raise
-    except Exception as exc:  # the declaring module is input until verified: any failure refuses
-        raise LifecycleError(f'cannot read program lists from {path.name}: {type(exc).__name__}') from exc
-    lists = {}
-    for kind, key in (('executable', 'EXECUTABLE_PROGRAM_FILES'), ('data', 'DATA_PROGRAM_FILES'),
-                      ('dirs', 'DATA_PROGRAM_DIRS')):
-        value = getattr(module, key, None)
-        if not isinstance(value, (list, tuple)):
-            raise LifecycleError(f'{path.name} does not declare {key} as a list')
-        lists[kind] = value
-    program = {kind: tuple(_safe_program_name(n) for n in value) for kind, value in lists.items()}
+
+def _program_from_lists(lists: dict) -> dict:
+    """Validate the three program lists parsed from a source file (never from an imported module)."""
+    return {kind: tuple(_safe_program_name(n) for n in lists[key]) for key, kind in ra.PROGRAM_KINDS.items()}
+
+
+def _check_program(program: dict, origin: str) -> dict:
     names = program_names(program)
     if len(set(names)) != len(names):
-        raise LifecycleError('release program lists repeat a name')
+        raise LifecycleError(f'{origin} program lists repeat a name')
     if 'release_artifacts.py' not in program['executable']:
-        raise LifecycleError('release program lists must include release_artifacts.py')
+        raise LifecycleError(f'{origin} program lists must include release_artifacts.py')
+    return program
+
+
+def staged_program(tree: Path) -> dict:
+    """N6: the program set of a STAGED (incoming) release: its PROGRAM.json is required and must be valid.
+
+    Read with json from the verified tree. No code is imported or executed. Refuses if missing or invalid.
+    """
+    path = tree / 'PROGRAM.json'
+    if path.is_symlink() or not path.is_file():
+        raise LifecycleError('release has no PROGRAM.json; refusing it')
+    try:
+        doc = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise LifecycleError(f'release PROGRAM.json is unreadable: {type(exc).__name__}') from exc
+    return _check_program(_program_from_release_json(doc, 'release'), 'release')
+
+
+def installed_program(tree: Path) -> dict:
+    """N6 hybrid rule for the INSTALLED tree (the code already running as this user).
+
+    Use PROGRAM.json if present. Otherwise parse the installed release_artifacts.py with ast (literal lists
+    only; nothing is imported or executed). If neither gives a valid set, refuse.
+    """
+    path = tree / 'PROGRAM.json'
+    if path.exists() or path.is_symlink():
+        if path.is_symlink() or not path.is_file():
+            raise LifecycleError('installed PROGRAM.json is not a regular file; refusing')
+        try:
+            doc = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            raise LifecycleError(f'installed PROGRAM.json is unreadable: {type(exc).__name__}') from exc
+        return _check_program(_program_from_release_json(doc, 'installed'), 'installed')
+    source = tree / 'release_artifacts.py'
+    if source.is_symlink() or not source.is_file():
+        raise LifecycleError('installed tree has no PROGRAM.json and no release_artifacts.py; refusing')
+    try:
+        lists = ra.program_lists_from_source(source.read_bytes(), source.name)
+    except (OSError, ValueError) as exc:
+        raise LifecycleError(f'cannot read program lists from the installed {source.name}: {exc}') from exc
+    return _check_program(_program_from_lists(lists), 'installed')
+
+
+def program_set(tree: Path, *, present: bool = True) -> dict:
+    """The program set a tree declares, plus the presence checks for an incoming release.
+
+    Staged trees (present=True) must carry a valid PROGRAM.json; the installed rule above applies otherwise.
+    Every name must be unique, plain, and present in the tree (files as regular files, directories as
+    real directories). Anything else refuses before any change is made.
+    """
+    program = staged_program(tree) if present else installed_program(tree)
     if present:
         for name in program['executable'] + program['data']:
             if (tree / name).is_symlink() or not (tree / name).is_file():
@@ -186,6 +229,7 @@ def install_program_files(source: Path, target: Path, program: dict | None = Non
             _remove(target / name)
         else:
             _copy(source / name, target / name, 0o600)
+    # Generated files (VERSION, MANIFEST.sha256, PROGRAM.json) follow the source byte-for-byte.
     for name in ra.GENERATED_FILES:
         if (source / name).is_file():
             _copy(source / name, target / name, 0o600)
@@ -309,26 +353,57 @@ def systemctl(*verb: str, timeout: int = 120) -> int:
         raise LifecycleError(f'systemctl {" ".join(verb)} failed: {exc}') from exc
 
 
-# S4: a unit that is starting, reloading or deactivating is still a live controller, so every
-# state except a clean inactive/failed one counts as running and must be stopped.
-RUNNING_STATES = frozenset({'active', 'activating', 'reloading', 'deactivating'})
+# N1: the unit is read with `show`, not `is-active`. `activating` is also systemd's auto-restart wait
+# after a crash (Restart=on-failure), so a state word alone cannot say the controller is up. Each
+# decision uses the full property set, parsed once per call. Unreadable output raises; it never
+# reads as healthy or as stopped.
+SHOW_PROPERTIES = ('ActiveState', 'SubState', 'MainPID', 'NRestarts')
+UNIT_ACTIVE_STATES = frozenset({'active', 'activating', 'reloading', 'deactivating', 'inactive', 'failed',
+                                'maintenance', 'refreshing'})
+
+
+def unit_state() -> dict:
+    """Parse `systemctl --user show` for the unit. Raises LifecycleError on any unreadable or unknown value."""
+    argv = ['systemctl', '--user', 'show', UNIT, *(f'-p{p}' for p in SHOW_PROPERTIES)]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=120, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise LifecycleError(f'systemctl show failed: {exc}') from exc
+    if proc.returncode != 0:
+        raise LifecycleError(f'systemctl show exited {proc.returncode}; the unit state is unknown')
+    values: dict[str, str] = {}
+    for line in proc.stdout.splitlines():
+        key, sep, value = line.partition('=')
+        if not sep or key not in SHOW_PROPERTIES or key in values:
+            raise LifecycleError('systemctl show returned an unexpected line; the unit state is unknown')
+        values[key] = value
+    if set(values) != set(SHOW_PROPERTIES):
+        raise LifecycleError('systemctl show did not return every expected property; the unit state is unknown')
+    if values['ActiveState'] not in UNIT_ACTIVE_STATES or not values['SubState']:
+        raise LifecycleError(f'unknown unit ActiveState {values["ActiveState"]!r}; the unit state is unknown')
+    try:
+        pid, restarts = int(values['MainPID']), int(values['NRestarts'])
+    except ValueError as exc:
+        raise LifecycleError('systemctl show returned a non-numeric MainPID or NRestarts') from exc
+    if pid < 0 or restarts < 0:
+        raise LifecycleError('systemctl show returned a negative MainPID or NRestarts')
+    return {'ActiveState': values['ActiveState'], 'SubState': values['SubState'], 'MainPID': pid,
+            'NRestarts': restarts}
+
+
+def needs_stop(state: dict) -> bool:
+    """Anything but a clean inactive/failed unit must be stopped, including activating (auto-restart wait)."""
+    return state['ActiveState'] not in ('inactive', 'failed')
+
+
+def can_drain(state: dict) -> bool:
+    """Drain only a unit that is really running a controller process. Otherwise stop it without waiting."""
+    return state['ActiveState'] == 'active' and state['SubState'] == 'running' and state['MainPID'] > 0
 
 
 def service_active() -> bool:
-    """True when systemd reports any running state. An unreadable state counts as running (fail closed)."""
-    try:
-        proc = subprocess.run(['systemctl', '--user', 'is-active', UNIT], capture_output=True, text=True,
-                              timeout=120, check=False)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise LifecycleError(f'systemctl is-active failed: {exc}') from exc
-    state = proc.stdout.strip()
-    if state in RUNNING_STATES:
-        return True
-    if state in ('inactive', 'failed'):
-        return False
-    # Anything else (empty output, an unknown word) is not proof of a stopped unit: treat it as running
-    # so the caller drains and stops it rather than swapping files under a live controller.
-    return True
+    """Whether the unit must be stopped. Unreadable state raises, so callers never guess."""
+    return needs_stop(unit_state())
 
 
 def stop_service():
@@ -422,9 +497,8 @@ def verify_extracted(src: Path, tag: str, commit: str):
             raise LifecycleError(f'extracted tree contains a link: {path.name}')
         if path.is_file():
             files[path.relative_to(src).as_posix()] = path.read_bytes()
-    missing = sorted((set(ra.EXECUTABLE_PROGRAM_FILES) | set(ra.DATA_PROGRAM_FILES)) - set(files))
-    if missing:
-        raise LifecycleError(f'release is missing program files: {", ".join(missing)}')
+    # N3: presence of the program files is checked by program_set against the release's OWN list
+    # (update reads it after this). This code's list is not the release's list, so no check here.
     _artifact(ra.verify_manifest, files)
     if _read_json(src / 'VERSION') != {'commit': commit, 'tag': tag}:
         raise LifecycleError('extracted VERSION does not match the tag commit')
@@ -455,7 +529,7 @@ def fresh_staging(target: Path) -> Path:
 
 # ---- snapshot (rollback store) and history ----------------------------------------
 
-PROGRAM_RECORD = 'PROGRAM.json'
+SNAPSHOT_RECORD = 'SNAPSHOT.json'
 
 
 def snapshot(target: Path, dest: Path, program: dict | None = None):
@@ -463,8 +537,9 @@ def snapshot(target: Path, dest: Path, program: dict | None = None):
 
     `program` is the set the install was built from (default: this code's own). Files the set
     names but the install lacks are recorded as absent, so a rollback can restore that absence
-    instead of refusing. PROGRAM.json records the set and the absent names; it is the only
-    authority a rollback uses to decide what to restore and what to remove.
+    instead of refusing. SNAPSHOT.json records the set and the absent names; it is the only
+    authority a rollback uses to decide what to restore and what to remove. The release's own
+    PROGRAM.json (generated, MANIFEST-covered) is copied unchanged, like VERSION and MANIFEST.sha256.
     """
     program = program or current_program()
     dest.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -481,6 +556,7 @@ def snapshot(target: Path, dest: Path, program: dict | None = None):
             shutil.copytree(src, tmp / name, symlinks=False)
         else:
             _copy(src, tmp / name, 0o700 if name in program['executable'] else 0o600)
+    # The release's own generated files (VERSION, MANIFEST.sha256, PROGRAM.json) are kept unchanged.
     for name in ra.GENERATED_FILES:
         if (target / name).is_file():
             _copy(target / name, tmp / name, 0o600)
@@ -490,26 +566,26 @@ def snapshot(target: Path, dest: Path, program: dict | None = None):
 
 
 def write_program_record(snap: Path, program: dict, absent) -> None:
-    """The one writer of PROGRAM.json: the set a snapshot holds and the names it recorded as absent."""
-    _write_json(snap / PROGRAM_RECORD, {'absent': sorted(absent), 'program': {k: list(v) for k, v in program.items()}})
+    """The one writer of SNAPSHOT.json: the set a snapshot holds and the names it recorded as absent."""
+    _write_json(snap / SNAPSHOT_RECORD, {'absent': sorted(absent), 'program': {k: list(v) for k, v in program.items()}})
 
 
 def snapshot_program(snap: Path) -> tuple[dict, list[str]]:
-    """Read the program set and absent names recorded in a snapshot's PROGRAM.json.
+    """Read the program set and absent names recorded in a snapshot's SNAPSHOT.json.
 
     The recorded set is the authority; the snapshot's own release_artifacts.py is not re-imported.
     Unreadable, malformed or unsafe records refuse before anything is restored.
     """
-    doc = _read_json(snap / PROGRAM_RECORD)
+    doc = _read_json(snap / SNAPSHOT_RECORD)
     if not isinstance(doc, dict) or not isinstance(doc.get('program'), dict) or not isinstance(doc.get('absent'), list):
-        raise LifecycleError(f'{snap.name} has no readable {PROGRAM_RECORD}; refusing to restore it')
+        raise LifecycleError(f'{snap.name} has no readable {SNAPSHOT_RECORD}; refusing to restore it')
     raw = doc['program']
     if set(raw) != {'executable', 'data', 'dirs'} or not all(isinstance(raw[k], list) for k in raw):
-        raise LifecycleError(f'{snap.name} {PROGRAM_RECORD} has a malformed program set')
+        raise LifecycleError(f'{snap.name} {SNAPSHOT_RECORD} has a malformed program set')
     program = {k: tuple(_safe_program_name(n) for n in raw[k]) for k in ('executable', 'data', 'dirs')}
     names = program_names(program)
     if len(set(names)) != len(names):
-        raise LifecycleError(f'{snap.name} {PROGRAM_RECORD} repeats a program name')
+        raise LifecycleError(f'{snap.name} {SNAPSHOT_RECORD} repeats a program name')
     absent = [_safe_program_name(n) for n in doc['absent']]
     if not set(absent) <= set(names):
         raise LifecycleError(f'{snap.name} records an absent name outside its program set')
@@ -576,7 +652,12 @@ def abort_swap(target: Path):
 
 
 def installed_version(target: Path) -> str | None:
-    doc = _read_json(target / 'VERSION')
+    return installed_version_at(target)
+
+
+def installed_version_at(tree: Path) -> str | None:
+    """The tag recorded in a tree's VERSION file (installed, snapshot or previous store)."""
+    doc = _read_json(tree / 'VERSION')
     return doc.get('tag') if isinstance(doc, dict) else None
 
 
@@ -603,18 +684,25 @@ def refuse_downgrade(target: Path, tag: str):
 
 
 def healthy(*, check, seconds: int, sleep=time.sleep, clock=time.monotonic) -> bool:
-    """Run `--check` on the installed controller, then require the service to stay active for `seconds`.
+    """Run `--check`, then require the SAME controller process to stay up for `seconds`.
 
-    Any failure returns False; the caller rolls back. Polling is 1s so a crash is seen quickly.
+    N1: every poll must read active/running with the same nonzero MainPID and the same NRestarts as
+    the first poll after start. An auto-restart (a new PID, a higher counter, or a state flip to
+    activating) fails the window. Any unreadable state raises, which the caller treats as failure.
+    Polling is 1s so a crash is seen quickly.
     """
     if not check():
         return False
+    first = unit_state()
+    if not can_drain(first):
+        return False
     deadline = clock() + seconds
     while clock() < deadline:
-        if not service_active():
-            return False
         sleep(1.0)
-    return service_active()
+        now = unit_state()
+        if not can_drain(now) or now['MainPID'] != first['MainPID'] or now['NRestarts'] != first['NRestarts']:
+            return False
+    return True
 
 
 def enabled_project_count(target: Path) -> int | None:
@@ -625,15 +713,37 @@ def enabled_project_count(target: Path) -> int | None:
     return sum(1 for p in doc['projects'] if isinstance(p, dict) and p.get('enabled', True))
 
 
+def _py_compile_installed(target: Path) -> bool:
+    """Compile every installed executable .py file (the installed set). Any failure, or an unreadable set, is False."""
+    try:
+        program = _installed_program(target)
+    except LifecycleError:
+        return False
+    for name in program['executable']:
+        if not name.endswith('.py'):
+            continue
+        path = target / name
+        if path.is_symlink() or not path.is_file():
+            return False
+        try:
+            proc = subprocess.run([sys.executable, '-m', 'py_compile', str(path)],
+                                  capture_output=True, timeout=120, check=False, cwd=str(target))
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        if proc.returncode != 0:
+            return False
+    return True
+
+
 def run_check(target: Path) -> bool:
     """`autonomy-controller.py --check` of the installed copy, against that install's own config.
 
     S7: with zero enabled projects the controller's --check refuses by design (there is nothing to
-    check), so it is skipped and reported as passing. An unreadable config still runs the check,
-    which then fails closed.
+    check). The minimal check then is `py_compile` of each installed executable .py file, run with
+    the installed set. An unreadable config still runs the full check, which fails closed.
     """
     if enabled_project_count(target) == 0:
-        return True
+        return _py_compile_installed(target)
     try:
         proc = subprocess.run([sys.executable, str(target / 'autonomy-controller.py'), '--check',
                                '--config', str(target / 'config.json')],
@@ -674,8 +784,11 @@ def _stop_after_drain(target: Path, timeout: float, sleep=time.sleep, clock=time
     S4: `stop` is always issued, even when the unit reads as inactive. A unit that is starting or
     reloading can read as not running yet still hold files open, so the stop is never skipped.
     """
-    active = service_active()
-    if active:
+    state = unit_state()
+    active = needs_stop(state)
+    if can_drain(state):
+        # N1: only a really running controller is drained. activating (auto-restart wait) or a unit
+        # with no MainPID has no workers to park, so waiting for them would only stall for the timeout.
         with drain(target / 'state', timeout=timeout, sleep=sleep, clock=clock):
             stop_service()
     else:
@@ -684,9 +797,12 @@ def _stop_after_drain(target: Path, timeout: float, sleep=time.sleep, clock=time
 
 
 def _stop_unhealthy(target: Path):
-    """A failed start may leave the NEW code running. Stop it before old files are restored."""
-    if service_active():
-        stop_service()
+    """A failed start may leave the NEW code running. Stop it before old files are restored.
+
+    N1: stop is always issued (idempotent), never gated on a state read, so an auto-restarting or
+    activating unit is stopped too. No drain: an unhealthy tree has already failed its checks.
+    """
+    stop_service()
 
 
 def update(target: Path, repo: str, *, gh, tag: str | None = None, yes: bool = False, environ,
@@ -787,51 +903,106 @@ def rollback(target: Path, *, yes: bool = False, environ, ask=input, drain_timeo
                                     'result': 'failed_restored' if restored else 'failed_unhealthy'})
             raise LifecycleError(f'rollback to {target_tag} failed its health check; the current release was restored')
         # The previous store now holds the release we just left, so a rollback can itself be undone.
-        _remove(previous)
+        # N4: the old store is renamed aside, not deleted first, so a crash at any point leaves a
+        # recoverable state: previous, previous.old or swap always holds the release that was replaced.
+        aside = previous.with_name('previous.old')
+        _remove(aside)
+        os.replace(previous, aside)
         os.replace(swap, previous)
+        _remove(aside)
         append_history(target, {'action': 'rollback', 'from': before, 'to': target_tag, 'result': 'ok'})
         return f'rolled back {before or "unknown"} -> {target_tag or "unknown"}'
 
 
+def _present(path: Path) -> bool:
+    return path.exists() or path.is_symlink()
+
+
+def _recovery_state(rollback: Path) -> str:
+    """Which leftover a rollback crash left (N4). Each shape maps to exactly one action.
+
+    restore: swap with previous still in place and no previous.old. The crash came before the store
+             commit, so the install may already hold the previous release. The replaced tree in swap
+             is restored and swap removed; previous (the kept store) is not touched.
+    finish:  swap with previous missing, or with previous.old beside it. The rollback passed its health
+             check and was inside the commit, so the install already is the previous release. Only the
+             store moves: swap becomes previous and previous.old is removed.
+    tidy:    previous.old with no swap. The commit completed; only the aside copy is left.
+
+    swap, previous and previous.old together cannot come from this code and are refused.
+    """
+    swap = _present(rollback / 'swap')
+    prev = _present(rollback / 'previous')
+    aside = _present(rollback / 'previous.old')
+    if swap and prev and aside:
+        raise LifecycleError('rollback store is inconsistent (swap, previous and previous.old all present); '
+                             'inspect rollback/ before recovering')
+    if swap and (aside or not prev):
+        return 'finish'
+    if swap:
+        return 'restore'
+    if aside:
+        return 'tidy'
+    raise LifecycleError('no rollback/swap to recover')
+
+
 def recover(target: Path, *, yes: bool = False, environ, ask=input, drain_timeout: float = DEFAULT_DRAIN_TIMEOUT,
             health_seconds: int = 30, check=None, sleep=time.sleep, clock=time.monotonic) -> str:
-    """S3: resolve a leftover rollback/swap by restoring the coherent pre-rollback tree.
+    """S3/N4: resolve a leftover rollback by restoring, finishing or tidying it, never by guessing.
 
-    `swap` holds the release a rollback replaced, copied before any file moved. Restoring it puts the
-    install back exactly as it was before the interrupted rollback, then the MANIFEST is verified and
-    the marker is removed. A leftover `incoming` is an interrupted update and is restored by abort_swap.
-    Nothing is restored unless `swap` reads back as a complete, verified program set.
+    `swap` holds the release a rollback replaced, copied before any program file moved. The leftover
+    shape decides the action (see _recovery_state). A leftover `incoming` is not handled here: it is an
+    interrupted update, and it blocks further updates until a human inspects it. abort_swap restores
+    `incoming` only inside the update process that created it.
     """
     refuse_agent(environ, 'rollback --recover')
-    confirm('Recover the interrupted rollback by restoring the release it replaced', yes=yes, ask=ask)
-    swap = target / 'rollback' / 'swap'
+    confirm('Recover the interrupted rollback', yes=yes, ask=ask)
+    rollback = target / 'rollback'
+    swap = rollback / 'swap'
+    store = rollback / 'previous'
+    aside = rollback / 'previous.old'
     with operation(target):
-        if not (swap.exists() or swap.is_symlink()):
-            raise LifecycleError('no rollback/swap to recover')
+        state = _recovery_state(rollback)
+        if state == 'tidy':
+            # Changes no program file, so the service is not stopped.
+            version = installed_version(target)
+            _remove(aside)
+            append_history(target, {'action': 'rollback', 'from': version, 'to': version, 'result': 'recovered'})
+            return 'removed the leftover previous.old; the rollback had already completed'
         # Every read that can refuse happens before the service is stopped.
-        program, absent = snapshot_program(swap)
-        attempted = _installed_program(target)
+        swapped_from = installed_version_at(swap)
+        if state == 'restore':
+            program, absent = snapshot_program(swap)
+            attempted = _installed_program(target)
         active = _stop_after_drain(target, drain_timeout, sleep, clock)
-        # A failure here leaves swap in place, so a retry restores the same tree again.
-        install_program_files(swap, target, program, absent)
-        _prune(target, attempted, program)
+        if state == 'restore':
+            # A failure here keeps swap, so a retry restores the same tree again.
+            install_program_files(swap, target, program, absent)
+            _prune(target, attempted, program)
         problems = manifest_problems(target)
         if problems:
-            # The service is left stopped on purpose: a tree that fails MANIFEST must not run.
-            raise LifecycleError('recovered tree fails MANIFEST verification (service left stopped); '
-                                 'rollback/swap kept: ' + '; '.join(problems[:3]))
-        # Fail closed: the restored tree must pass the same health rule a rollback applies (--check,
-        # and the stay-active window when the service was running). Failure stops it again, keeps swap
-        # for a retry, and raises so the exit code is nonzero.
+            # Left stopped on purpose: a tree that fails MANIFEST must not run. swap and aside are kept.
+            raise LifecycleError('tree fails MANIFEST verification (service left stopped); rollback store kept: '
+                                 + '; '.join(problems[:3]))
+        # Fail closed: the tree must pass the same health rule a rollback applies. Failure stops it again,
+        # keeps the leftovers for a retry, and raises so the exit code is nonzero.
         ok = verified(target, active=active, health_seconds=health_seconds, check=check, sleep=sleep, clock=clock)
         if not ok:
             _stop_unhealthy(target)
-            raise LifecycleError('recovered files were restored (rollback/swap kept) but the service is NOT '
-                                 'running: the restored tree failed its health check; inspect before retrying')
-        _remove(swap)
-        append_history(target, {'action': 'rollback', 'from': installed_version(target), 'to': None,
+            what = 'recovered files were restored' if state == 'restore' else 'rollback store was not finished'
+            raise LifecycleError(f'{what} (rollback/swap kept) but the service is NOT running: '
+                                 'the tree failed its health check; inspect before retrying')
+        if state == 'restore':
+            _remove(swap)
+        else:
+            _remove(store)
+            os.replace(swap, store)
+            _remove(aside)
+        # `from` is the version the interrupted operation started from (read from swap, before it moved);
+        # `to` is the version now installed.
+        append_history(target, {'action': 'rollback', 'from': swapped_from, 'to': installed_version(target),
                                 'result': 'recovered'})
-    return 'recovered the pre-rollback tree; service left ' + ('running' if active else 'stopped')
+    return 'recovered the interrupted rollback; service left ' + ('running' if active else 'stopped')
 
 
 def check_history(target: Path):
@@ -984,6 +1155,8 @@ def _installed_names(target: Path, listed: dict[str, str]) -> set[str]:
     names = set(ra.EXECUTABLE_PROGRAM_FILES + ra.DATA_PROGRAM_FILES)
     names |= {n for n in listed if n.split('/', 1)[0] in ra.DATA_PROGRAM_DIRS}
     names |= _dir_files(target)
+    # Generated release files (VERSION, PROGRAM.json) are installed too: a listed one must still match.
+    names |= {n for n in listed if n in ra.GENERATED_FILES}
     return names
 
 
@@ -1187,7 +1360,9 @@ def remove(target: Path, repo_arg: str, *, environ, yes: bool = False, force: bo
         # B5: the drain may have taken minutes. A cycle or an unpushed commit that appeared after
         # confirmation must refuse now, before any config write, and the service comes back.
         try:
-            if not force and in_flight(target / 'state', name):
+            # --force keeps a cycle's files, but never lets --delete-local-data remove the checkout under one:
+            # the post-drain re-check therefore runs whenever local data would be deleted, even with --force.
+            if (not force or delete_local_data) and in_flight(target / 'state', name):
                 raise LifecycleError(f'{repo} started an in-flight cycle while draining; nothing was changed')
             if delete_local_data:
                 check_deletable(directory, repo, root)

@@ -115,8 +115,8 @@ class RecoverTest(Base):
 
     def test_recover_refuses_an_unreadable_swap_before_stopping_anything(self):
         swap = self.interrupt_rollback()
-        (swap / lc.PROGRAM_RECORD).unlink()
-        with self.assertRaisesRegex(lc.LifecycleError, 'no readable PROGRAM.json'):
+        (swap / lc.SNAPSHOT_RECORD).unlink()
+        with self.assertRaisesRegex(lc.LifecycleError, 'no readable SNAPSHOT.json'):
             self.recover()
         self.assertEqual(self.service.verbs, [])
         self.assertEqual(self.world.tag(), 'v1.0.0')

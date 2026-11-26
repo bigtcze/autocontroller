@@ -322,6 +322,17 @@ def doctor_action():
     if failures: raise lifecycle.LifecycleError(f'doctor found {len(failures)} failure(s)')
 
 
+def _positive_seconds(text: str) -> float:
+    """argparse type for timeouts: a finite number greater than zero. NaN and inf would never end a wait."""
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f'not a number of seconds: {text!r}')
+    if not (value == value and value not in (float('inf'), float('-inf'))) or value <= 0:
+        raise argparse.ArgumentTypeError(f'must be finite and greater than 0: {text!r}')
+    return value
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action',nargs='?',default='add',choices=['add','status','logs','doctor','memory','start','stop','update','rollback','uninstall','remove'])
@@ -333,10 +344,10 @@ def main():
     parser.add_argument('--delete-local-data',action='store_true',help='remove: also delete the clean, fully pushed checkout and its state/projects entry')
     parser.add_argument('--yes',action='store_true',help='skip the confirmation prompt (update/rollback/uninstall)')
     parser.add_argument('--tag',help='update to this stable vX.Y.Z release instead of the latest')
-    parser.add_argument('--health-seconds',type=int,default=30,help='seconds the service must stay active after update/rollback')
+    parser.add_argument('--health-seconds',type=_positive_seconds,default=30,help='seconds the service must stay active after update/rollback (finite, > 0)')
     parser.add_argument('--purge',action='store_true',help='uninstall: also delete config.json and state/ (requires typing "purge")')
     parser.add_argument('--recover',action='store_true',help='rollback: resolve an interrupted rollback by restoring the release it replaced (rollback/swap)')
-    parser.add_argument('--drain-timeout',type=float,default=lifecycle.DEFAULT_DRAIN_TIMEOUT,help='update/rollback/remove/uninstall: seconds to wait for workers to drain before stopping (default 3600)')
+    parser.add_argument('--drain-timeout',type=_positive_seconds,default=lifecycle.DEFAULT_DRAIN_TIMEOUT,help='update/rollback/remove/uninstall: seconds to wait for workers to drain before stopping (default 3600; finite, > 0)')
     args=parser.parse_args()
     os.umask(0o077)
     if args.recover and args.action!='rollback':

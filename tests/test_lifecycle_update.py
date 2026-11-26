@@ -53,6 +53,9 @@ class FakeService:
         self.active = True
         self.verbs: list[str] = []
         self.fail_start_for: set[str] = set()
+        self.pid = 1000  # N1: each start gets a new PID, as systemd does
+        self.restarts = 0
+        self.show_override = None
 
     def installed_tag(self):
         try:
@@ -61,7 +64,17 @@ class FakeService:
             return None
 
     def is_active(self) -> bool:
-        return self.active
+        return lc.needs_stop(self.unit_state())
+
+    def unit_state(self) -> dict:
+        # N1: the `show` shape. A test can override the reported state (auto-restart, PID change,
+        # garbage) through self.show_override; otherwise it follows `active`, with a PID only while running.
+        self.show_reads = getattr(self, 'show_reads', 0) + 1
+        if self.show_override is not None:
+            return self.show_override(self)
+        if self.active:
+            return {'ActiveState': 'active', 'SubState': 'running', 'MainPID': self.pid, 'NRestarts': self.restarts}
+        return {'ActiveState': 'inactive', 'SubState': 'dead', 'MainPID': 0, 'NRestarts': self.restarts}
 
     def stop(self):
         self.verbs.append('stop')
@@ -72,6 +85,7 @@ class FakeService:
         if self.installed_tag() in self.fail_start_for:
             return False
         self.active = True
+        self.pid += 1
         return True
 
 
@@ -163,19 +177,18 @@ class World:
         return git(self.src_repo, 'rev-parse', 'HEAD')
 
     def install_version(self, tag: str, commit: str):
-        """Lay down an installed program set plus VERSION, as install.sh would."""
+        """Install a REAL release archive, as install.sh does: build, verify, extract, then install the set.
+
+        Generated files (VERSION, MANIFEST.sha256, PROGRAM.json) come from the archive, so the installed
+        tree is what a real install holds and doctor's manifest check applies to it.
+        """
+        dist = self.dist / tag
+        dist.mkdir(parents=True, exist_ok=True)
+        ra.build(self.src_repo, tag, commit, dist)
+        ra.verify(dist, tag, commit)
         seed = self.install / '.seed'
         shutil.rmtree(seed, ignore_errors=True)
-        seed.mkdir()
-        for name in ra.EXECUTABLE_PROGRAM_FILES + ra.DATA_PROGRAM_FILES:
-            if name == 'release_artifacts.py':
-                (seed / name).write_text((ROOT / 'release_artifacts.py').read_text(encoding='utf-8'))
-            else:
-                (seed / name).write_text(f'# {name} {tag}\n')
-        for name in ra.DATA_PROGRAM_DIRS:
-            (seed / name).mkdir()
-            (seed / name / 'marker.txt').write_text(f'{name} {tag}\n')
-        (seed / 'VERSION').write_text(json.dumps({'commit': commit, 'tag': tag}, sort_keys=True) + '\n')
+        ra.safe_extract(dist / ra.ARCHIVE_NAME.format(tag=tag), seed)
         lc.install_program_files(seed, self.install)
         shutil.rmtree(seed)
         (self.install / 'config.json').write_text('{"projects": []}\n')
@@ -214,9 +227,10 @@ class Base(unittest.TestCase):
         self.world = World()
         self.addCleanup(self.world.cleanup)
         self.service = self.world.service
-        saved = {n: getattr(lc, n) for n in ('service_active', 'stop_service', 'start_service')}
+        saved = {n: getattr(lc, n) for n in ('service_active', 'unit_state', 'stop_service', 'start_service')}
         self.addCleanup(lambda: [setattr(lc, n, v) for n, v in saved.items()])
         lc.service_active = self.service.is_active
+        lc.unit_state = self.service.unit_state  # N1: no fixture may reach the real systemctl show
         lc.stop_service = self.service.stop
         lc.start_service = self.service.start
 
@@ -242,7 +256,7 @@ class UpdateTest(Base):
     def test_update_keeps_previous_release_in_rollback_store(self):
         self.update()
         previous = self.world.install / 'rollback' / 'previous'
-        self.assertEqual((previous / 'autonomy-controller.py').read_text(), '# autonomy-controller.py v1.0.0\n')
+        self.assertEqual((previous / 'autonomy-controller.py').read_text(), '# autonomy-controller.py one\n')
         self.assertEqual(json.loads((previous / 'VERSION').read_text())['tag'], 'v1.0.0')
         self.assertFalse((self.world.install / 'rollback' / 'incoming').exists())
 
@@ -386,7 +400,7 @@ class HealthAndRollbackTest(Base):
         with self.assertRaisesRegex(lc.LifecycleError, 'restored and running'):
             self.update()
         self.assertEqual(self.world.tag(), 'v1.0.0')
-        self.assertEqual(self.world.text('autonomy-controller.py'), '# autonomy-controller.py v1.0.0\n')
+        self.assertEqual(self.world.text('autonomy-controller.py'), '# autonomy-controller.py one\n')
         self.assertFalse((self.world.install / 'rollback' / 'incoming').exists())
         self.assertTrue(self.service.active)
         self.assertEqual(self.history()[-1]['result'], 'rolled_back')
@@ -413,6 +427,68 @@ class HealthAndRollbackTest(Base):
                 self.service.active = False
         self.world.on_sleep = crash_after_start
         with self.assertRaisesRegex(lc.LifecycleError, 'failed its health check'):
+            self.update()
+        self.assertEqual(self.world.tag(), 'v1.0.0')
+
+    def test_auto_restart_during_the_health_window_rolls_back(self):
+        # N1: a crash-looping controller goes activating/auto-restart, then comes back with a new PID
+        # and NRestarts+1. The first poll saw the old process, so the window is unhealthy and rolls back.
+        # One crash, then the old tree is restarted healthy: the crash is a single scripted event.
+        def crash_once(seconds):
+            if 'start' in self.service.verbs and not getattr(self, 'crashed', False):
+                self.crashed = True
+                self.service.show_override = lambda s: {'ActiveState': 'activating',
+                                                        'SubState': 'auto-restart', 'MainPID': 0,
+                                                        'NRestarts': 1}
+
+        self.world.on_sleep = crash_once
+        original_stop = lc.stop_service
+
+        def stop_and_clear():
+            original_stop()
+            self.service.show_override = None  # the rollback's stop ends the scripted crash
+        lc.stop_service = stop_and_clear
+        self.addCleanup(setattr, lc, 'stop_service', original_stop)
+        with self.assertRaisesRegex(lc.LifecycleError, 'failed its health check'):
+            self.update()
+        self.assertEqual(self.world.tag(), 'v1.0.0')
+        self.assertEqual(self.history()[-1]['result'], 'rolled_back')
+
+    def test_main_pid_change_during_the_window_rolls_back(self):
+        def new_pid(seconds):
+            if 'start' in self.service.verbs and self.service.pid == 1001 and not getattr(self, 'moved', False):
+                self.moved = True
+                self.service.show_override = lambda s: {'ActiveState': 'active', 'SubState': 'running',
+                                                        'MainPID': 9999, 'NRestarts': 0}
+        self.world.on_sleep = new_pid
+        with self.assertRaisesRegex(lc.LifecycleError, 'failed its health check'):
+            self.update()
+        self.assertEqual(self.world.tag(), 'v1.0.0')
+
+    def test_update_with_unit_activating_skips_drain_and_stops(self):
+        # N1 problem 2: an auto-restart wait has no workers to drain. It must stop at once, not wait the
+        # drain timeout, and no drain request may be written for it.
+        self.service.show_override = lambda s: {'ActiveState': 'activating', 'SubState': 'auto-restart',
+                                                'MainPID': 0, 'NRestarts': 3}
+        drain_requests = []
+        real_drain = lc.drain
+
+        def spy(state_dir, **kw):
+            drain_requests.append(state_dir)
+            return real_drain(state_dir, **kw)
+        lc.drain = spy
+        self.addCleanup(setattr, lc, 'drain', real_drain)
+        self.service.verbs.clear()
+        with self.assertRaisesRegex(lc.LifecycleError, 'NOT healthy|restored|failed its health check|stop'):
+            self.update(drain_timeout=3600)
+        self.assertEqual(drain_requests, [], 'an activating unit must not enter the drain path')
+        self.assertIn('stop', self.service.verbs)
+        self.assertEqual(self.world.tag(), 'v1.0.0')
+
+    def test_unreadable_show_output_during_update_fails_closed(self):
+        # Unreadable state raises, it is never read as healthy or as stopped. Nothing is left half-swapped.
+        self.service.show_override = lambda s: (_ for _ in ()).throw(lc.LifecycleError('unit state is unknown'))
+        with self.assertRaisesRegex(lc.LifecycleError, 'unit state is unknown'):
             self.update()
         self.assertEqual(self.world.tag(), 'v1.0.0')
 

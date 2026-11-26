@@ -150,6 +150,8 @@ class RealArchiveInstallTest(unittest.TestCase):
                       'autocontroller.service': '[Unit]\n', 'install.sh': '#!/usr/bin/env bash\n'}
         for name in ra.EXECUTABLE_PROGRAM_FILES:
             repo_files.setdefault(name, f'# {name}\n')
+        # N6: a release must declare its program lists as literals; build reads them from this file.
+        repo_files['release_artifacts.py'] = (ROOT / 'release_artifacts.py').read_text(encoding='utf-8')
         for name in ra.DATA_PROGRAM_DIRS:
             repo_files[f'{name}/marker.txt'] = f'{name}\n'
         repo_files['docs/VALIDATION.md'] = 'docs\n'
@@ -178,6 +180,28 @@ class RealArchiveInstallTest(unittest.TestCase):
     def test_archive_installed_through_install_program_files_has_zero_doctor_failures(self):
         failures, _ = lc.diagnose(self.install, unit_dir=self.links / 'units', bin_dir=self.links / 'bin')
         self.assertEqual(failures, [])
+
+    def test_installed_program_json_is_part_of_the_real_install(self):
+        # N6: the release's PROGRAM.json is installed and listed in MANIFEST.sha256, so doctor checks it.
+        self.assertTrue((self.install / 'PROGRAM.json').is_file())
+        self.assertIn('  PROGRAM.json\n', (self.install / 'MANIFEST.sha256').read_text())
+
+    def test_tampered_installed_program_json_is_reported_by_doctor(self):
+        (self.install / 'PROGRAM.json').write_text(
+            '{"data":[],"dirs":[],"executable":[],"schema":1}\n', encoding='utf-8')
+        failures, _ = lc.diagnose(self.install, unit_dir=self.links / 'units', bin_dir=self.links / 'bin')
+        self.assertIn('modified or missing: PROGRAM.json', failures)
+
+    def test_tampered_installed_version_is_reported_by_doctor(self):
+        # The generated VERSION is manifest-covered like PROGRAM.json; before this fix only program files were checked.
+        (self.install / 'VERSION').write_text('{"commit":"0","tag":"v9.9.9"}\n', encoding='utf-8')
+        failures, _ = lc.diagnose(self.install, unit_dir=self.links / 'units', bin_dir=self.links / 'bin')
+        self.assertIn('modified or missing: VERSION', failures)
+
+    def test_deleted_installed_program_json_is_reported_by_doctor(self):
+        (self.install / 'PROGRAM.json').unlink()
+        failures, _ = lc.diagnose(self.install, unit_dir=self.links / 'units', bin_dir=self.links / 'bin')
+        self.assertIn('modified or missing: PROGRAM.json', failures)
 
     def test_installed_tree_has_no_manifest_only_or_extra_program_entries(self):
         self.assertEqual(lc.manifest_problems(self.install), [])

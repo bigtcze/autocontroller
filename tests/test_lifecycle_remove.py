@@ -46,9 +46,11 @@ class RemoveBase(unittest.TestCase):
         self.make_checkout()
         self.calls: list[tuple] = []
         self.service = FakeService(self.world.install)
-        saved = {n: getattr(lc, n) for n in ('systemctl', 'service_active', 'stop_service', 'start_service')}
+        saved = {n: getattr(lc, n) for n in ('systemctl', 'service_active', 'unit_state', 'stop_service',
+                                             'start_service')}
         self.addCleanup(lambda: [setattr(lc, n, v) for n, v in saved.items()])
         lc.service_active = self.service.is_active
+        lc.unit_state = self.service.unit_state  # N1: no fixture may reach the real systemctl show
         lc.stop_service = self.service.stop
         lc.start_service = self.service.start
         lc.systemctl = self.fake_systemctl
@@ -402,6 +404,33 @@ class RecheckAfterDrainTest(RemoveBase):
 
     def test_no_recheck_change_still_removes(self):
         self.remove()
+        self.assertEqual(self.config()['projects'], [])
+
+    def test_force_delete_local_data_refuses_a_cycle_that_starts_during_the_drain(self):
+        # NIT: --force keeps cycle files, but --delete-local-data must still refuse a cycle that appears
+        # while draining. Before the fix the post-drain re-check was skipped under --force.
+        def cycle_appears(seconds):
+            (self.pdir / 'cycle.json').write_text('{}')
+        self.world.on_sleep = cycle_appears
+        try:
+            with self.assertRaisesRegex(lc.LifecycleError, 'in-flight cycle while draining'):
+                self.remove(force=True, delete_local_data=True)
+        finally:
+            self.world.on_sleep = None
+        self.assertEqual(len(self.config()['projects']), 1, 'config must not be written')
+        self.assertTrue(self.checkout.is_dir(), 'the checkout must not be deleted')
+        self.assertTrue(self.service.active, 'the service must be restarted when it was active')
+        self.assertTrue((self.pdir / 'cycle.json').exists(), 'cycle files are kept')
+
+    def test_force_without_local_data_still_removes_under_a_cycle_that_starts_during_the_drain(self):
+        # The post-drain refusal is scoped to --delete-local-data; plain --force keeps its documented behaviour.
+        def cycle_appears(seconds):
+            (self.pdir / 'cycle.json').write_text('{}')
+        self.world.on_sleep = cycle_appears
+        try:
+            self.remove(force=True)
+        finally:
+            self.world.on_sleep = None
         self.assertEqual(self.config()['projects'], [])
 
 

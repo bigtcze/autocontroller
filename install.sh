@@ -51,7 +51,7 @@ for file in README.md config.example.json autocontroller.service; do
 done
 # Release archives carry VERSION and MANIFEST.sha256; source checkouts do not. A source
 # install must never keep a stale release version from an earlier archive install.
-for file in VERSION MANIFEST.sha256; do
+for file in VERSION MANIFEST.sha256 PROGRAM.json; do
  if [[ -f "$SOURCE/$file" ]]; then
   [[ "$SOURCE/$file" == "$TARGET/$file" ]] || install -m 600 "$SOURCE/$file" "$TARGET/$file"
  else

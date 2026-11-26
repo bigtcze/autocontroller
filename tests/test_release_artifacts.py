@@ -4,6 +4,7 @@ Temporary git repositories only; no network, no GitHub, no production paths.
 """
 import gzip
 import hashlib
+import json
 import io
 import re
 import subprocess
@@ -54,6 +55,9 @@ class ArchiveFixture(unittest.TestCase):
         (self.repo / 'bin').mkdir()
         (self.repo / 'bin' / 'run.sh').write_text('#!/bin/sh\n', encoding='utf-8')
         (self.repo / 'bin' / 'run.sh').chmod(0o755)
+        # N6: build derives PROGRAM.json from the committed release_artifacts.py, so the fixture commits the real one.
+        (self.repo / 'release_artifacts.py').write_text((ROOT / 'release_artifacts.py').read_text(encoding='utf-8'),
+                                                       encoding='utf-8')
         git(self.repo, 'add', '-A')
         git(self.repo, 'commit', '-q', '-m', 'one')
         self.commit = git(self.repo, 'rev-parse', 'HEAD')
@@ -297,9 +301,73 @@ class InstallListTests(unittest.TestCase):
 
     def test_install_sh_copies_release_metadata_and_removes_stale_copies(self):
         text = (ROOT / 'install.sh').read_text(encoding='utf-8')
-        self.assertIn('for file in VERSION MANIFEST.sha256; do', text)
+        # N6: PROGRAM.json travels with VERSION and MANIFEST.sha256 (copied when present, removed when not).
+        self.assertIn('for file in VERSION MANIFEST.sha256 PROGRAM.json; do', text)
         self.assertIn('rm -f "$TARGET/$file"', text)
         self.assertIn('release_artifacts.py', ra.EXECUTABLE_PROGRAM_FILES)
+
+
+class ProgramJsonTests(ArchiveFixture):
+    """N6: PROGRAM.json is built from the committed lists, is in MANIFEST, and is parsed without execution."""
+
+    def test_build_writes_program_json_from_the_committed_lists(self):
+        files = ra.verify(self.build()['archive'].parent, TAG, self.commit)
+        doc = json.loads(files['PROGRAM.json'])
+        self.assertEqual(doc, {
+            'schema': 1,
+            'executable': list(ra.EXECUTABLE_PROGRAM_FILES),
+            'data': list(ra.DATA_PROGRAM_FILES),
+            'dirs': list(ra.DATA_PROGRAM_DIRS),
+        })
+        self.assertEqual(files['PROGRAM.json'], ra.program_json(ra.program_lists_from_source(
+            (ROOT / 'release_artifacts.py').read_bytes())))
+
+    def test_program_json_is_covered_by_manifest_and_tampering_fails_verify(self):
+        dist = self.build()['archive']
+        files = ra.verify(dist.parent, TAG, self.commit)
+        self.assertIn(b'  PROGRAM.json\n', files['MANIFEST.sha256'])
+
+        def tamper(members):
+            _set_member_data(members, 'PROGRAM.json', b'{"schema":1,"executable":[],"data":[],"dirs":[]}\n')
+        bad_dir = self.rewrite_archive('bad-program', tamper)
+        with self.assertRaisesRegex(ra.ArtifactError, 'MANIFEST.sha256 mismatch for PROGRAM.json'):
+            ra.verify(bad_dir, TAG, self.commit)
+
+    def test_build_takes_lists_from_the_building_commit_not_from_the_running_code(self):
+        # The commit declares a DIFFERENT set; PROGRAM.json must reflect the commit, not this checkout.
+        text = (ROOT / 'release_artifacts.py').read_text(encoding='utf-8')
+        text = text.replace("DATA_PROGRAM_FILES = ('README.md', 'config.example.json', 'autocontroller.service')",
+                            "DATA_PROGRAM_FILES = ('config.example.json', 'autocontroller.service')")
+        self.assertNotEqual(text, (ROOT / 'release_artifacts.py').read_text(encoding='utf-8'))
+        (self.repo / 'release_artifacts.py').write_text(text, encoding='utf-8')
+        git(self.repo, 'add', '-A')
+        git(self.repo, 'commit', '-q', '-m', 'declare a different set')
+        commit = git(self.repo, 'rev-parse', 'HEAD')
+        dist = ra.build(self.repo, TAG, commit, self.root / 'd-other')['archive']
+        files = ra.verify(dist.parent, TAG, commit)
+        self.assertNotIn('README.md', json.loads(files['PROGRAM.json'])['data'])
+
+    def test_non_literal_list_is_refused_at_build(self):
+        for body in ("EXECUTABLE_PROGRAM_FILES = tuple(['a.py'])\n",
+                     "EXECUTABLE_PROGRAM_FILES = ('a.py', name)\n",
+                     "EXECUTABLE_PROGRAM_FILES = ('a.py',) + ('b.py',)\n"):
+            with self.subTest(body=body):
+                with self.assertRaisesRegex(ValueError, 'literal|non-string'):
+                    ra.program_lists_from_source(body + "DATA_PROGRAM_FILES = ()\nDATA_PROGRAM_DIRS = ()\n")
+
+    def test_duplicate_assignment_is_refused(self):
+        with self.assertRaisesRegex(ValueError, 'more than once'):
+            ra.program_lists_from_source("DATA_PROGRAM_DIRS = ()\nDATA_PROGRAM_DIRS = ()\n"
+                                         "EXECUTABLE_PROGRAM_FILES = ()\nDATA_PROGRAM_FILES = ()\n")
+
+    def test_parser_never_executes_the_source(self):
+        # A module-level side effect must not run: only the literal lists are read.
+        marker = self.root / 'executed.txt'
+        body = (f"open({str(marker)!r}, 'w').write('x')\n"
+                "EXECUTABLE_PROGRAM_FILES = ('a.py',)\nDATA_PROGRAM_FILES = ()\nDATA_PROGRAM_DIRS = ()\n")
+        ra.program_lists_from_source(body)
+        self.assertFalse(marker.exists(), 'the installed source must be parsed, never executed')
+
 
 
 if __name__ == '__main__':

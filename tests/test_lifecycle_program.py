@@ -77,6 +77,24 @@ class ProgramSetTest(Base):
         self.assertEqual((self.world.install / dropped).read_text(), before,
                          'the dropped file must come back exactly on rollback')
 
+    def test_release_that_drops_readme_and_declares_so_installs(self):
+        # N3: verify_extracted used to refuse any release missing a file in THIS code's list, even when
+        # the release's own list no longer declares it. The release's list is the only authority now.
+        src = self.world.src_repo
+        (src / 'README.md').unlink()
+        self.publish_v110_with(data=tuple(n for n in ra.DATA_PROGRAM_FILES if n != 'README.md'))
+        self.update_to_latest()
+        self.assertEqual(self.world.tag(), 'v1.2.0')
+        self.assertFalse((self.world.install / 'README.md').exists(),
+                         'a file the release no longer declares must be removed by the update')
+
+    def test_release_that_declares_a_file_it_lacks_is_still_refused(self):
+        # The present check moved to program_set, not removed: a declared file missing from the tree refuses.
+        self.publish_v110_with(data=ra.DATA_PROGRAM_FILES + ('missing.txt',))
+        with self.assertRaisesRegex(lc.LifecycleError, 'missing program file'):
+            self.update_to_latest()
+        self.assertEqual(self.service.verbs, [])
+
     def test_snapshot_records_a_missing_program_file_as_absent_and_rollback_restores_absence(self):
         dest = self.world.install / 'rollback' / 'probe'
         (self.world.install / 'standards' / 'marker.txt').unlink()
@@ -108,16 +126,45 @@ class ProgramSetTest(Base):
             self.update_to_latest()
         self.assertEqual(self.service.verbs, [])
 
-    def test_release_without_release_artifacts_declaration_is_refused(self):
+    def test_update_then_rollback_restores_the_release_program_json_byte_identical(self):
+        # The snapshot carries the release's own PROGRAM.json unchanged, so a rolled-back install keeps the
+        # file its MANIFEST.sha256 lists. Before this fix the snapshot record overwrote it.
+        # v1.2.0 declares a different set, so the installed PROGRAM.json really changes on update.
+        original = (self.world.install / 'PROGRAM.json').read_bytes()
+        self.publish_v110_with(data=('README.md', 'config.example.json'))
+        self.update_to_latest()
+        updated = (self.world.install / 'PROGRAM.json').read_bytes()
+        self.assertNotEqual(updated, original, 'the update must install the new release PROGRAM.json')
+        self.rollback()
+        self.assertEqual(self.world.tag(), 'v1.0.0')
+        self.assertEqual((self.world.install / 'PROGRAM.json').read_bytes(), original)
+        self.assertEqual(lc.manifest_problems(self.world.install), [])
+
+    def test_rolled_back_install_keeps_program_json_and_reads_the_same_set_from_it(self):
+        # After rollback the restored PROGRAM.json is present and gives the installed set. (The ast fallback
+        # would give the same lists here, so this checks presence and content, not which reader ran.)
+        self.update()
+        self.rollback()
+        self.assertTrue((self.world.install / 'PROGRAM.json').is_file())
+        self.assertEqual(lc.installed_program(self.world.install)['executable'], ra.EXECUTABLE_PROGRAM_FILES)
+
+    def test_snapshot_store_holds_the_release_program_json_and_a_snapshot_record(self):
+        original = (self.world.install / 'PROGRAM.json').read_bytes()
+        self.update()
+        previous = self.world.install / 'rollback' / 'previous'
+        self.assertEqual((previous / 'PROGRAM.json').read_bytes(), original, 'the snapshot keeps the release file as-is')
+        self.assertEqual(set(json.loads((previous / 'SNAPSHOT.json').read_text())), {'absent', 'program'})
+
+    def test_release_without_literal_lists_is_refused_at_build_so_no_release_exists(self):
+        # N6: PROGRAM.json is built from the committed lists, so a commit whose release_artifacts.py does
+        # not declare them as literals cannot be packaged at all. Nothing reaches update.
         src = self.world.src_repo
         (src / 'release_artifacts.py').write_text('# no lists\n')
         git(src, 'add', '-A')
         git(src, 'commit', '-q', '-m', 'no lists')
         commit = git(src, 'rev-parse', 'HEAD')
-        self.world.commits['v1.2.0'] = commit
-        self.world.gh.publish('v1.2.0', commit)
-        with self.assertRaisesRegex(lc.LifecycleError, 'does not declare'):
-            self.update_to_latest()
+        with self.assertRaisesRegex(ra.ArtifactError, 'does not declare'):
+            ra.build(src, 'v1.2.0', commit, self.world.dist)
         self.assertEqual(self.service.verbs, [])
 
 

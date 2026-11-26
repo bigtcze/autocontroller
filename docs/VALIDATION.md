@@ -95,7 +95,7 @@ Release-specific qualification status and evidence are tracked in the GitHub rel
 
 ## Current known limitations
 
-- Health window (S8, deferred, not implemented): after an update or rollback the service must stay active for `--health-seconds`. That check reads process liveness only, not a heartbeat. A controller that is running but stuck still passes the window.
+- Health window (S8, deferred, not implemented): after an update or rollback the service must stay active for `--health-seconds`. The window reads `systemctl show` once per second and requires `ActiveState=active`, `SubState=running`, a nonzero `MainPID` and the same `MainPID` and `NRestarts` as the first poll. An auto-restart, a PID change or an `activating` state fails it; unreadable output fails closed. That is process liveness only, not a heartbeat: a controller that is running but stuck still passes the window.
 - Role endpoint and GitHub APIs are documented but this onboarding implementation has not been exercised against live services. Agent quality and permissions are not sandboxed. A working API and role existence do not prove the provider can complete a task.
 - Existing issues are imported once; future issues must be real Issues that a maintainer adds to the Project. Issues are never enrolled automatically (by design). The controller never updates itself by design; `update` and `rollback` are user-invoked. `remove`, `uninstall` and `memory inspect` exist as offline-tested commands, but none has run against a live installation. OS certification is not done.
 - Installed git/gh/mise binaries are reused; Engram updates automatically per boot. OS package updates follow APT. `--install-only` preserves runtime configuration.

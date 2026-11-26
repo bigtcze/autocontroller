@@ -97,6 +97,14 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn('Rebuilt archive', block)
         self.assertIn('release_artifacts.py build', block)
 
+    def test_publish_job_scopes_are_exactly_contents_write_and_issues_read(self):
+        # N2: the blocker re-check reads Issues, so publish needs issues: read; nothing broader.
+        block = job_block(self.text, 'publish')
+        scopes = re.search(r'(?m)^    permissions:\n((?:      \S.*\n)+)', block)
+        self.assertIsNotNone(scopes, 'publish job has no permissions block')
+        self.assertEqual(sorted(l.strip() for l in scopes.group(1).splitlines()),
+                         ['contents: write', 'issues: read'])
+
     def test_publish_job_delegates_to_the_python_publish_command(self):
         block = job_block(self.text, 'publish')
         self.assertIn('release_artifacts.py publish --repo "$GH_REPO"', block)

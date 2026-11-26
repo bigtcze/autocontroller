@@ -65,6 +65,12 @@ if argv[:1] == ['api'] and '--paginate' in argv and '--slurp' in argv and '--jq'
         rows = [i for i in state['issues'] if i['state'] == 'open']
     else:
         rows = state['releases']
+        if state.get('list_lag', 0) > 0 and state.get('created_draft'):
+            # N5: the listing lags the create: after a draft exists, the drafts are hidden for the next N
+            # listings. The pre-create listing is not affected, so the lag applies only to the re-read.
+            state['list_lag'] -= 1
+            save()
+            rows = [r for r in rows if r.get('draft') is not True]
     print(json.dumps([rows]))
 elif argv[:1] == ['api'] and '--paginate' in argv and '--slurp' in argv:
     fail('gh: --slurp not supported with --jq', 1)
@@ -78,15 +84,29 @@ elif argv[:1] == ['release'] and argv[1:2] == ['create']:
         name = os.path.basename(path)
         digest = state['digests'].get(name)
         assets.append({'name': name, 'digest': digest})
-    state['releases'].append({'id': rid, 'tag_name': argv[2], 'draft': True, 'assets': assets})
+    release = {'id': rid, 'tag_name': argv[2], 'draft': True, 'assets': assets}
+    state['created_draft'] = True
+    pending = state.pop('pending_patch_failure', None)
+    if pending == 'fail':
+        release['patch_fail'] = True
+    elif pending == 'land':
+        release['patch_land_then_fail'] = True
+    state['releases'].append(release)
     save()
 elif argv[:1] == ['api'] and '-X' in argv and 'PATCH' in argv:
     path = [a for a in argv if a.startswith('repos/')][0]
     rid = int(path.rsplit('/', 1)[1])
     hook('before_patch')
     release = release_by_id(rid)
+    release['undraft_attempted'] = True
+    save()
     if release.get('patch_fail'):
         fail('patch failed', 1)
+    if release.get('patch_land_then_fail'):
+        # N5: GitHub applied the undraft, but the response was lost: the caller sees a failure.
+        release['draft'] = False
+        save()
+        fail('patch response lost after GitHub applied it', 1)
     release['draft'] = False
     save()
 elif argv[:1] == ['api'] and '--method' in argv and 'DELETE' in argv:
@@ -96,6 +116,9 @@ elif argv[:1] == ['api'] and '--method' in argv and 'DELETE' in argv:
 elif argv[:1] == ['api'] and '--method' not in argv:
     rid = int([a for a in argv if a.startswith('repos/')][0].rsplit('/', 1)[1])
     hook('before_detail')
+    if state.get('refetch_fail') and any(r['id'] == rid and r.get('undraft_attempted') for r in state['releases']):
+        # N5: the single-release re-read AFTER a failed undraft fails. Verification reads are not affected.
+        fail('HTTP 503 on re-read', 1)
     print(json.dumps(release_by_id(rid)))
 else:
     fail('unmodelled gh call: ' + ' '.join(argv), 2)
@@ -255,6 +278,59 @@ class PublishRefusalTests(PublishFixture):
         self.assertFalse(any('PATCH' in a for a in self.calls()),
                          'blocker re-check must happen before un-drafting')
         self.assertEqual(self.load()['releases'], [], 'the draft must be deleted when a blocker is open')
+
+    def test_failed_undraft_on_a_still_draft_release_deletes_it(self):
+        # N5: the PATCH failed and the release is still a draft: it is ours to delete.
+        self._arm_patch_failure(land=False)
+        proc = self.publish_cli()
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn('patch failed', proc.stderr)
+        self.assertEqual(self.load()['releases'], [], 'a still-draft release must be deleted')
+
+    def test_undraft_that_landed_before_the_response_failed_is_never_deleted(self):
+        # N5: GitHub made the release public, then the response was lost. Deleting it would destroy a
+        # published release, so the code re-reads it, sees draft=false, and reports it instead.
+        self._arm_patch_failure(land=True)
+        proc = self.publish_cli()
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn('ALREADY PUBLIC', proc.stderr)
+        remaining = self.load()['releases']
+        self.assertEqual(len(remaining), 1, 'the public release must not be deleted')
+        self.assertFalse(remaining[0]['draft'])
+        self.assertFalse(any(a[:1] == ['api'] and 'DELETE' in a for a in self.calls()),
+                         'no DELETE may be issued for a release that is public')
+
+    def test_unreadable_state_after_a_failed_undraft_does_not_delete_blind(self):
+        # N5: when the re-read fails the state is unknown. The code reports it and does not delete.
+        self._arm_patch_failure(land=False)
+        self.state['refetch_fail'] = True
+        self.save()
+        proc = self.publish_cli()
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn('could not confirm the state', proc.stderr)
+        self.assertFalse(any(a[:1] == ['api'] and 'DELETE' in a for a in self.calls()),
+                         'an unknown state must not be deleted blind')
+
+    def test_drafts_listing_that_lags_the_create_is_retried_and_publishes(self):
+        # N5: the first listing after `gh release create` misses the new draft; a retry sees it.
+        self.state['list_lag'] = 1
+        self.save()
+        proc = self.publish_cli()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse(self.load()['releases'][0]['draft'])
+
+    def test_drafts_listing_still_empty_after_retries_refuses_without_deleting(self):
+        self.state['list_lag'] = 99
+        self.save()
+        proc = self.publish_cli()
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn('expected exactly one draft', proc.stderr)
+        self.assertFalse(any('PATCH' in a for a in self.calls()))
+
+    def _arm_patch_failure(self, *, land: bool):
+        """Arm the fake so the first undraft PATCH on the created draft fails (optionally after landing)."""
+        self.state['pending_patch_failure'] = 'land' if land else 'fail'
+        self.save()
 
     def test_failed_listing_refuses_before_any_creation(self):
         self.state['listing_error'] = True

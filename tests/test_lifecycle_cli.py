@@ -49,10 +49,13 @@ class CliWorld(World):
         self.commits = {}
         # Both releases are REAL copies of the checkout's program set, differing only by a
         # marker line. Stub files would leave the installed CLI unable to run its own commands.
+        # JSON files get no marker: appending text makes config.example.json invalid JSON.
         for tag, text in (('v1.0.0', 'one'), ('v1.1.0', 'two')):
             for name in ra.EXECUTABLE_PROGRAM_FILES + ra.DATA_PROGRAM_FILES:
                 body = (ROOT / name).read_bytes()
-                (self.src / name).write_bytes(body + f'\n# release marker {text}\n'.encode())
+                if not name.endswith('.json'):
+                    body += f'\n# release marker {text}\n'.encode()
+                (self.src / name).write_bytes(body)
             for name in ra.DATA_PROGRAM_DIRS:
                 if (self.src / name).exists():
                     shutil.rmtree(self.src / name)
@@ -86,13 +89,12 @@ class CliWorld(World):
         The installed copy must run the real onboarding.py/lifecycle.py, or the CLI would be
         exercising a stub. Only the generated VERSION marker is new.
         """
-        (self.install / 'VERSION').write_text(json.dumps({'commit': self.commits['v1.0.0'], 'tag': 'v1.0.0'}) + '\n')
-        # A release install carries MANIFEST.sha256 so doctor's integrity check has something to verify.
-        names = sorted(ra.EXECUTABLE_PROGRAM_FILES + ra.DATA_PROGRAM_FILES)
-        for d in ra.DATA_PROGRAM_DIRS:
-            names += sorted(p.relative_to(self.install).as_posix() for p in (self.install / d).rglob('*') if p.is_file())
-        (self.install / 'MANIFEST.sha256').write_text(''.join(
-            f'{hashlib.sha256((self.install / n).read_bytes()).hexdigest()}  {n}\n' for n in sorted(set(names))))
+        # A real release install: the v1.0.0 archive is extracted and installed through install_program_files,
+        # so VERSION, MANIFEST.sha256 and PROGRAM.json are the archive's own files and doctor checks all of them.
+        extracted = self.root / 'seed-v1.0.0'
+        shutil.rmtree(extracted, ignore_errors=True)
+        ra.safe_extract(self.asset_dir / 'v1.0.0' / ra.ARCHIVE_NAME.format(tag='v1.0.0'), extracted)
+        lc.install_program_files(extracted, self.install)
         self.write_config({'projects': []})
 
 
@@ -115,7 +117,7 @@ class LifecycleCliTest(unittest.TestCase):
     def test_update_skips_check_with_zero_enabled_projects_and_succeeds(self):
         # S7: the installed `--check` refuses with no enabled project (exit 2) by design, so the
         # update does not run it. The update succeeds; there is nothing for the check to validate.
-        proc = self.run_cli('update', '--yes', '--health-seconds', '0')
+        proc = self.run_cli('update', '--yes', '--health-seconds', '0.5')
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(self.installed_tag(), 'v1.1.0')
         history = json.loads((self.world.install / 'updates' / 'history.json').read_text())
@@ -125,13 +127,13 @@ class LifecycleCliTest(unittest.TestCase):
         # An unreadable config is not "zero enabled projects": the skip must not apply. The update
         # refuses before any change (the controller config is read first), so the install stays v1.0.0.
         (self.world.install / 'config.json').write_text('{not json')
-        proc = self.run_cli('update', '--yes', '--health-seconds', '0')
+        proc = self.run_cli('update', '--yes', '--health-seconds', '0.5')
         self.assertEqual(proc.returncode, 1)
         self.assertIn('config.json', proc.stderr)
         self.assertEqual(self.installed_tag(), 'v1.0.0')
 
     def test_update_without_yes_declined_exits_nonzero_and_changes_nothing(self):
-        proc = self.run_cli('update', '--health-seconds', '0', stdin='n\n')
+        proc = self.run_cli('update', '--health-seconds', '0.5', stdin='n\n')
         self.assertEqual(proc.returncode, 1)
         self.assertIn('cancelled', proc.stderr)
         self.assertEqual(self.installed_tag(), 'v1.0.0')
@@ -162,10 +164,11 @@ class LifecycleCliTest(unittest.TestCase):
         for name in ra.DATA_PROGRAM_DIRS:
             shutil.copytree(self.world.install / name, previous / name)
         (previous / 'VERSION').write_text(json.dumps({'commit': self.world.commits['v1.0.0'], 'tag': 'v1.0.0'}) + '\n')
-        # The record a real snapshot writes: the set it holds, and nothing absent.
+        # What a real snapshot holds: the release's own PROGRAM.json (copied unchanged) and the SNAPSHOT.json record.
+        shutil.copy2(self.world.install / 'PROGRAM.json', previous / 'PROGRAM.json')
         lc.write_program_record(previous, lc.current_program(), [])
         before = self.installed_tag()
-        proc = self.run_cli('rollback', '--yes', '--health-seconds', '0')
+        proc = self.run_cli('rollback', '--yes', '--health-seconds', '0.5')
         self.assertEqual(proc.returncode, 1)
         self.assertIn('current release was restored', proc.stderr)
         self.assertEqual(self.installed_tag(), before)
@@ -186,7 +189,7 @@ class LifecycleCliTest(unittest.TestCase):
         self.assertIn('applies to update only', proc.stderr)
 
     def test_update_uses_no_token_and_reaches_only_fake_gh(self):
-        self.run_cli('update', '--yes', '--health-seconds', '0', env={'GH_TOKEN': 'secret'})
+        self.run_cli('update', '--yes', '--health-seconds', '0.5', env={'GH_TOKEN': 'secret'})
         self.assertEqual(self.world.refused_calls()[0]['env'], ['GH_TOKEN'])
 
     def test_uninstall_agent_session_refuses_before_any_prompt(self):

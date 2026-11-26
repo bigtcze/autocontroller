@@ -10,6 +10,7 @@ timeout. Pure decision logic lives in release_policy.py.
 from __future__ import annotations
 
 import argparse
+import ast
 import gzip
 import hashlib
 import io
@@ -20,6 +21,7 @@ import re
 import subprocess
 import sys
 import tarfile
+import time
 
 import release_policy as releases
 
@@ -30,10 +32,16 @@ EXECUTABLE_PROGRAM_FILES = ('autonomy-controller.py', 'opencode-project-safe.py'
 DATA_PROGRAM_FILES = ('README.md', 'config.example.json', 'autocontroller.service')
 DATA_PROGRAM_DIRS = ('skills', 'standards', 'tests')
 PROGRAM_FILES = {'0700': EXECUTABLE_PROGRAM_FILES, '0600': DATA_PROGRAM_FILES, 'dirs': DATA_PROGRAM_DIRS}
-GENERATED_FILES = ('VERSION', 'MANIFEST.sha256')
+GENERATED_FILES = ('VERSION', 'MANIFEST.sha256', 'PROGRAM.json')
+PROGRAM_LISTS = ('EXECUTABLE_PROGRAM_FILES', 'DATA_PROGRAM_FILES', 'DATA_PROGRAM_DIRS')
+PROGRAM_KINDS = {'EXECUTABLE_PROGRAM_FILES': 'executable', 'DATA_PROGRAM_FILES': 'data',
+                 'DATA_PROGRAM_DIRS': 'dirs'}
 ARCHIVE_NAME = 'autocontroller-{tag}.tar.gz'
 GIT_TIMEOUT = 120
 GH_TIMEOUT = 240
+# N5: the drafts listing can lag a successful `gh release create`; it is re-read this many times.
+CREATE_LIST_ATTEMPTS = 3
+CREATE_LIST_PAUSE_SECONDS = 2.0
 MAX_MEMBERS = 5000
 MAX_TOTAL_BYTES = 256 * 1024 * 1024
 HEX40 = re.compile(r'[0-9a-f]{40}')
@@ -98,6 +106,75 @@ def _manifest_text(files: dict[str, bytes]) -> bytes:
     return ''.join(lines).encode('utf-8')
 
 
+def program_lists_from_source(text: bytes | str, origin: str = 'release_artifacts.py') -> dict[str, tuple[str, ...]]:
+    """The three program lists declared by a release_artifacts.py source, read WITHOUT executing it.
+
+    Only top-level assignments whose value is a literal tuple or list of string literals count. Anything
+    else (a call, a name, a concatenation, a missing list, a duplicate) raises ValueError. Used for the
+    committed source at build time and for the installed file at install time, so one parser decides.
+    """
+    try:
+        tree = ast.parse(text if isinstance(text, str) else text.decode('utf-8'), filename=origin)
+    except (SyntaxError, UnicodeDecodeError) as exc:
+        raise ValueError(f'{origin} does not parse: {type(exc).__name__}') from exc
+    found: dict[str, tuple[str, ...]] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+            continue
+        name = node.targets[0].id
+        if name not in PROGRAM_LISTS:
+            continue
+        if name in found:
+            raise ValueError(f'{origin} assigns {name} more than once')
+        if not isinstance(node.value, (ast.Tuple, ast.List)):
+            raise ValueError(f'{origin} {name} is not a literal tuple or list')
+        values = []
+        for element in node.value.elts:
+            if not (isinstance(element, ast.Constant) and isinstance(element.value, str)):
+                raise ValueError(f'{origin} {name} contains a non-string literal')
+            values.append(element.value)
+        found[name] = tuple(values)
+    missing = [name for name in PROGRAM_LISTS if name not in found]
+    if missing:
+        raise ValueError(f'{origin} does not declare {", ".join(missing)} as literals')
+    return found
+
+
+def program_json(lists: dict[str, tuple[str, ...]]) -> bytes:
+    """Canonical PROGRAM.json bytes: sorted keys, the schema number, and the three lists by kind."""
+    doc = {
+        'schema': 1,
+        'executable': list(lists['EXECUTABLE_PROGRAM_FILES']),
+        'data': list(lists['DATA_PROGRAM_FILES']),
+        'dirs': list(lists['DATA_PROGRAM_DIRS']),
+    }
+    return json.dumps(doc, sort_keys=True, separators=(',', ':')).encode('utf-8') + b'\n'
+
+
+def _committed_program_lists(repo: Path, commit: str) -> dict[str, tuple[str, ...]]:
+    """The lists the building commit's own release_artifacts.py declares.
+
+    Fallback: a commit that has no release_artifacts.py at all is only accepted when the repo IS this
+    checkout, and then the module constants are used. Any other commit without the file is refused.
+    """
+    names = {name for _, _, name in tree_entries(repo, commit)}
+    if 'release_artifacts.py' not in names:
+        if Path(repo).resolve() == Path(__file__).resolve().parent and commit == _git_head(repo):
+            return {'EXECUTABLE_PROGRAM_FILES': EXECUTABLE_PROGRAM_FILES,
+                    'DATA_PROGRAM_FILES': DATA_PROGRAM_FILES,
+                    'DATA_PROGRAM_DIRS': DATA_PROGRAM_DIRS}
+        raise ArtifactError(f'{commit} has no release_artifacts.py; cannot build PROGRAM.json')
+    blob = [obj for mode, obj, name in tree_entries(repo, commit) if name == 'release_artifacts.py'][0]
+    try:
+        return program_lists_from_source(_git(repo, 'cat-file', 'blob', blob), f'{commit}:release_artifacts.py')
+    except ValueError as exc:
+        raise ArtifactError(str(exc)) from exc
+
+
+def _git_head(repo: Path) -> str:
+    return _git(repo, 'rev-parse', 'HEAD', timeout=30).decode('ascii').strip()
+
+
 def release_files(repo: Path, tag: str, commit: str) -> dict[str, tuple[int, bytes]]:
     """Every archive member (relative path -> (mode, bytes)) for one tag at one commit, including generated files."""
     _check_tag_commit(tag, commit)
@@ -110,6 +187,9 @@ def release_files(repo: Path, tag: str, commit: str) -> dict[str, tuple[int, byt
         files[name] = (0o755 if mode == '100755' else 0o644, _git(repo, 'cat-file', 'blob', obj))
     version = json.dumps({'commit': commit, 'tag': tag}, sort_keys=True).encode('utf-8') + b'\n'
     files['VERSION'] = (0o644, version)
+    # N6: the program set comes from the building commit's own committed lists, so a tree's PROGRAM.json
+    # can never disagree with the release_artifacts.py it ships beside.
+    files['PROGRAM.json'] = (0o644, program_json(_committed_program_lists(repo, commit)))
     manifest_source = {name: data for name, (_, data) in files.items()}
     files['MANIFEST.sha256'] = (0o644, _manifest_text(manifest_source))
     return files
@@ -358,7 +438,8 @@ def qualify(repo: str, tag: str, sha: str, repo_dir: Path = Path('.')) -> list[s
 
 # ---- publication (release job only) ------------------------------------------------
 # Every gh call here is a plain argv with a timeout; nothing relies on gh --jq or --slurp
-# combined. A draft is never left behind on a failed check: it is deleted, not published.
+# combined. A draft that fails a check is deleted while it is still a draft. A release GitHub already made
+# public is never deleted by this code; the failure is reported with its id.
 
 def _gh(*args: str) -> str:
     try:
@@ -383,6 +464,27 @@ def _tagged(rows: list, tag: str, *, draft: bool) -> list[dict]:
 
 def _discard_draft(repo: str, release_id: int):
     _gh('api', '--method', 'DELETE', f'repos/{repo}/releases/{release_id}')
+
+
+def _is_still_draft(repo: str, release_id: int) -> bool:
+    """Re-read one release by ID. Raises if the state cannot be read: callers then do not delete."""
+    detail = _gh_json('api', f'repos/{repo}/releases/{release_id}')
+    if not isinstance(detail, dict) or not isinstance(detail.get('draft'), bool):
+        raise ArtifactError(f'release {release_id} state is not readable')
+    return detail['draft']
+
+
+def _created_drafts(repo: str, tag: str) -> list[dict]:
+    """Drafts for the tag after `gh release create`. The listing can lag the create, so it is retried
+    a few times before the count is judged; a missing draft after the retries is reported, not guessed."""
+    rows: list[dict] = []
+    for attempt in range(CREATE_LIST_ATTEMPTS):
+        rows = _tagged(_gh_pages(f'repos/{repo}/releases?per_page=100'), tag, draft=True)
+        if rows:
+            return rows
+        if attempt + 1 < CREATE_LIST_ATTEMPTS:
+            time.sleep(CREATE_LIST_PAUSE_SECONDS)
+    return rows
 
 
 def _verify_draft(repo: str, release_id: int, expected: dict[str, str]):
@@ -416,7 +518,8 @@ def publish(repo: str, tag: str, dist_dir: str | Path, *, notes_file: str | None
 
     Order: refuse an existing published release; delete stale drafts for the tag; create the
     draft with both assets; verify exactly two assets and their digests; re-check open
-    release-blocker Issues; un-draft. Any failure after the draft exists deletes that draft.
+    release-blocker Issues; un-draft. A failure after the draft exists deletes that draft only while
+    it is still a draft; a release that is already public is reported and never deleted here.
     """
     if not releases.version(tag):
         raise ArtifactError(f'tag must be stable SemVer vX.Y.Z: {tag!r}')
@@ -438,7 +541,7 @@ def publish(repo: str, tag: str, dist_dir: str | Path, *, notes_file: str | None
     notes = ['--notes-file', str(notes_file)] if notes_file else ['--generate-notes']
     _gh('release', 'create', tag, '--repo', repo, '--verify-tag', '--draft', *notes,
         str(dist / archive), str(dist / 'SHA256SUMS'))
-    drafts = _tagged(_gh_pages(f'repos/{repo}/releases?per_page=100'), tag, draft=True)
+    drafts = _created_drafts(repo, tag)
     if len(drafts) != 1:
         for row in drafts:
             _discard_draft(repo, _release_id(row))
@@ -449,10 +552,22 @@ def publish(repo: str, tag: str, dist_dir: str | Path, *, notes_file: str | None
         _require_no_blockers(repo)
         _gh('api', '-X', 'PATCH', f'repos/{repo}/releases/{rid}', '-F', 'draft=false')
     except ArtifactError as exc:
+        # N5: delete only a release that is still a draft. If the undraft PATCH reached GitHub and then
+        # failed locally, the release is already public and must not be deleted here; it is reported.
+        try:
+            still_draft = _is_still_draft(repo, rid)
+        except ArtifactError as cleanup:
+            # Unknown state: a release that may already be public is never deleted blind. It is reported.
+            raise ArtifactError(f'{exc}; could not confirm the state of release {rid} ({cleanup}); '
+                                'inspect it: delete it only if it is still a draft') from exc
+        if not still_draft:
+            raise ArtifactError(f'{exc}; release {rid} is ALREADY PUBLIC (undraft reached GitHub); '
+                                'inspect it before doing anything else') from exc
         try:
             _discard_draft(repo, rid)
         except ArtifactError as cleanup:
-            raise ArtifactError(f'{exc}; also could not delete draft {rid}: {cleanup}') from exc
+            raise ArtifactError(f'{exc}; also could not delete draft {rid}: {cleanup}; '
+                                f'delete it manually with `gh api -X DELETE repos/{repo}/releases/{rid}`') from exc
         raise
     return f'published {tag} as release {rid} after verifying both assets'
 

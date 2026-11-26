@@ -71,6 +71,20 @@ class DrainTimeoutFlagTest(unittest.TestCase):
         self.assertEqual(name, 'uninstall')
         self.assertEqual(kwargs['drain_timeout'], 5.0)
 
+    def test_non_finite_or_non_positive_timeouts_are_refused_by_argparse(self):
+        # NIT: nan/inf/0/negative never reach lifecycle; argparse exits with a usage error (code 2).
+        for flag in ('--drain-timeout', '--health-seconds'):
+            for bad in ('nan', 'inf', '-inf', '0', '-5', 'x', '1e400'):
+                with self.subTest(flag=flag, value=bad):
+                    with mock.patch('sys.stderr'):
+                        with self.assertRaises(SystemExit) as ctx:
+                            self.run_main('update', '--yes', flag, bad)
+                    self.assertEqual(ctx.exception.code, 2)
+
+    def test_health_seconds_must_be_positive_and_is_forwarded(self):
+        name, kwargs = self.run_main('update', '--yes', '--health-seconds', '0.5')
+        self.assertEqual(kwargs['health_seconds'], 0.5)
+
     def test_default_is_the_lifecycle_default(self):
         name, kwargs = self.run_main('update', '--yes')
         self.assertEqual(kwargs['drain_timeout'], lc.DEFAULT_DRAIN_TIMEOUT)

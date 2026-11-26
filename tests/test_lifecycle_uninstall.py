@@ -30,10 +30,12 @@ class UninstallBase(unittest.TestCase):
         self.bin_dir = bases / 'bin'
         self.unit_dir.mkdir()
         self.bin_dir.mkdir()
-        saved = {n: getattr(lc, n) for n in ('systemctl', '_daemon_reload', 'service_active', 'stop_service')}
+        saved = {n: getattr(lc, n) for n in ('systemctl', '_daemon_reload', 'service_active', 'unit_state',
+                                             'stop_service')}
         self.addCleanup(lambda: [setattr(lc, n, v) for n, v in saved.items()])
         self.service = FakeService(self.world.install)
         lc.service_active = self.service.is_active
+        lc.unit_state = self.service.unit_state  # N1: no fixture may reach the real systemctl show
         lc.stop_service = self.service.stop
         lc.systemctl = lambda *verb, timeout=120: (self.calls.append(('systemctl',) + verb) or 0)
         lc._daemon_reload = lambda: self.calls.append(('daemon-reload',))
