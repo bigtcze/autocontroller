@@ -20,7 +20,13 @@ mkdir -p -- "$TMP/home" "$TMP/shims"
 chmod 700 -- "$TMP" "$TMP/home"
 : > "$TMP/gitconfig"
 
-# Hermetic environment: no inherited identity, credentials or user git config.
+# Hermetic environment: no inherited identity, credentials, user git config, or
+# controller/OpenCode/Engram state. The suite is often run from a shell that is itself
+# inside a controller-managed OpenCode session, so the ambient AUTOCONTROLLER_*,
+# AUTONOMY_*, OPENCODE_*, OPENCODE and ENGRAM_* variables are removed too. Otherwise
+# ProjectWorker.env() (which copies os.environ) would pass them into the fake agent
+# (for example AUTOCONTROLLER_LEARNING_INSTRUCTIONS would give a selection session a
+# learning grant). The E2E tests also remove these prefixes per test (see E2EBase).
 export HOME="$TMP/home"
 export GIT_CONFIG_GLOBAL="$TMP/gitconfig"
 export GIT_CONFIG_NOSYSTEM=1
@@ -30,6 +36,7 @@ unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN
 while IFS= read -r name; do
   case "$name" in
     *_API_KEY) unset "$name" ;;
+    AUTOCONTROLLER_*|AUTONOMY_*|OPENCODE_*|OPENCODE|ENGRAM_*) unset "$name" ;;
   esac
 done < <(compgen -e)
 

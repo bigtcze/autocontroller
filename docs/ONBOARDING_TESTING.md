@@ -162,9 +162,14 @@ checked against live GitHub. A live run must confirm or correct each one.
 
 ## 7. Live sandbox onboarding path: DESIGN ONLY
 
-**Status: designed, not implemented, not executed.** Implementation and execution
-are owned by Issue #4. Nothing described in this section exists in the
-repository. No live GitHub, OpenCode or systemd call has been made for it.
+**Status: live onboarding is NOT implemented and NOT executed.** `scripts/live-smoke.py`
+has an implemented, opt-in live smoke body for one disposable sandbox repository
+(one private repo, one Issue, at most one OpenCode session, teardown). It is
+exercised only offline through fake `gh`/`git`/`opencode` shims. It has NEVER been
+executed against GitHub or OpenCode, and it does not perform onboarding (no
+`onboarding.py`, systemd or installed-controller path). Nothing in this section
+describes an onboarding run that has happened. See [E2E_TESTING.md](E2E_TESTING.md)
+for invocation, scope and the cost bound.
 
 Purpose: confirm the assumptions in section 6 against real GitHub without
 touching production repositories or the owner's account.
@@ -188,8 +193,11 @@ Design constraints:
   name beyond a documented placeholder, or config is committed. Credentials stay in
   the operator's keyring or the VM.
 - **Bounded spend.** A hard cap on runtime, on the number of created repositories
-  and Projects, and on AI calls. The live path must make no OMO or model session.
-  The cap is enforced before any paid action.
+  and Projects, and on AI calls. This constraint applies to the planned live
+  onboarding path only: that path must make no OMO or model session. It does NOT
+  apply to `scripts/live-smoke.py`, which by design makes exactly one OpenCode
+  session (`--max-ai-sessions 1`) against one disposable repository. The cap is
+  enforced before any paid action.
 - **Cleanup.** A teardown step deletes or archives every resource it created, keyed by
   a run identifier recorded before creation. Teardown runs even after a failure.
   The result is reported with exact counts.

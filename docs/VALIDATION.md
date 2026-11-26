@@ -9,6 +9,8 @@ The `required` check (`.github/workflows/required.yml` → `regression.yml`) run
 - Syntax: byte-compilation of all Python files, `bash -n` of shell scripts, JSON validation.
 - The full offline regression suite (`scripts/offline-tests.sh`) as an unprivileged user in clean `debian:12`, `debian:13`, `ubuntu:24.04` and `ubuntu:26.04` containers with the distribution `python3`, plus `mise run ci` on the GitHub runner.
 - Repository contract checks: bootstrap contract files, workflow safety (no `pull_request_target`, no secrets, pinned actions, aggregate gate), no personal paths or tokens.
+- Offline E2E acceptance (`tests/test_e2e_controller.py`, 39 tests): scenarios 1–8 against the real controller, with GitHub, OMO agent and Engram service doubles. The scenario→test mapping and every stand-in limit are in [E2E_TESTING.md](E2E_TESTING.md). Nothing in this suite is verified against a live service.
+- Live-smoke guard and body tests (`tests/test_live_smoke_guards.py`, 37 tests; `tests/test_live_smoke_run.py`, 24 tests). They exercise `scripts/live-smoke.py` only through fake `gh`/`git`/`opencode` shims. The live smoke itself is never run by automation.
 
 The suite simulates GitHub, OpenCode and Engram: scheduling, checkpoints and recovery, CI/merge gates, Renovate identity and fork rejection, onboarding import authorization, release policy, safe-wrapper recovery against a fake OpenCode API, and Engram runtime staging with fake binaries.
 
@@ -64,6 +66,8 @@ These are local runs. The scheduled workflow has not run on GitHub.
 ## Live acceptance (not yet performed)
 
 Release-specific qualification status and evidence are tracked in the GitHub release Issues; the requirements are in `.agents/RELEASE_QUALITY.md`.
+
+- **Live smoke (implemented, NEVER executed):** `scripts/live-smoke.py` is an opt-in, bounded check for one disposable sandbox repository (see the automated-coverage section for its tests). The agent that wrote it did not run it against GitHub or OpenCode, and no workflow references it. The owner must run it once in a disposable sandbox before anyone treats it as verified. Invocation, flow, scope and cost bound are in [E2E_TESTING.md](E2E_TESTING.md#live-smoke).
 
 - Fresh VM per supported distribution: install with no Git, gh, mise or Engram; complete GitHub device authorization and repository URL prompt; detach SSH; confirm continued service and reboot survival.
 - Exercise an initialized and an empty test repository, personal and organization ownership, non-main default branch, existing protection and multiple merge methods. Confirm one isolated Project per repo. Interrupt each onboarding phase and retry without duplicate Project/issue or overwriting local work. Verify scope, no PAT prompt, safe config permissions, stable identities and no accidental merge before consent.
