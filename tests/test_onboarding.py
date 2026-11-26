@@ -224,18 +224,78 @@ class ProtectionStateTests(unittest.TestCase):
     def test_over_limit_rules_collection_refuses_truncated_selection(self):
         pages=[[{'type':'other'}]*1001]
         with patch.object(o,'gh',return_value={'protected':False}), patch.object(o.c,'gh_json',return_value=pages):
-            with self.assertRaises(o.c.ControllerError):
+            with self.assertRaises(ValueError) as caught:
                 o.protection_state('org/demo','main','required',False)
+        self.assertIn('Owner action',str(caught.exception))
+        self.assertIsInstance(caught.exception.__cause__,o.c.ControllerError)
 
     def test_non_list_page_refuses(self):
         with patch.object(o,'gh',return_value={'protected':False}), patch.object(o.c,'gh_json',return_value=[{'type':'x'}]):
-            with self.assertRaises(o.c.ControllerError):
+            with self.assertRaises(ValueError) as caught:
                 o.protection_state('org/demo','main','required',False)
+        self.assertIn('Owner action',str(caught.exception))
+
+    def test_classic_enforced_is_not_blocked_by_broken_rules_response(self):
+        # Item 5: classic enforcement is decided first, so an unrelated ambiguous rules response cannot block it.
+        with patch.object(o,'gh',return_value=CLASSIC_EVERYONE), patch.object(o.c,'gh_api_pages',side_effect=AssertionError('rules must not be read')):
+            self.assertEqual(o.protection_state('org/demo','main','required',False),'enforced')
+        broken=[{'parameters':{}}]
+        with patch.object(o,'gh',return_value=CLASSIC_EVERYONE), patch.object(o.c,'gh_api_pages',return_value=broken):
+            self.assertEqual(o.protection_state('org/demo','main','required',False),'enforced')
+
+    def test_ambiguous_rules_without_classic_still_refuse(self):
+        with self.assertRaises(ValueError):
+            self.state({'protected':False},rules=[{'parameters':{}}])
+
+    def test_rules_controller_error_becomes_owner_action_value_error(self):
+        with patch.object(o,'gh',return_value={'protected':False}), patch.object(o.c,'gh_api_pages',side_effect=o.c.ControllerError('rc=1: API error')):
+            with self.assertRaises(ValueError) as caught:
+                o.protection_state('org/demo','main','required',False)
+        self.assertIn('Owner action',str(caught.exception))
+        self.assertIn('not changed',str(caught.exception))
+        self.assertIsInstance(caught.exception.__cause__,o.c.ControllerError)
 
     def test_branch_summary_read_is_read_only(self):
         _, g = self.state(CLASSIC_EVERYONE)
         self.assertEqual([c.args[0] for c in g.call_args_list], ['api'])
         self.assertTrue(all('--method' not in c.args for c in g.call_args_list))
+
+
+class ResumeWarningTests(unittest.TestCase):
+    """Read-only warning for an enrolled repository on the resume path. Never prompts or writes."""
+
+    ENTRY={'repo':'org/demo','base_branch':'trunk','required_check':'required'}
+
+    def warn(self, gh_side_effect, pages=()):
+        import io
+        from contextlib import redirect_stderr
+        err=io.StringIO()
+        with patch.object(o,'gh',side_effect=gh_side_effect), patch.object(o.c,'gh_api_pages',return_value=list(pages)), \
+             patch.object(o.subprocess,'run') as run, redirect_stderr(err):
+            o.warn_if_not_enforced(self.ENTRY)
+        run.assert_not_called()
+        return err.getvalue()
+
+    @staticmethod
+    def responder(summary, admin=True):
+        def gh(*args):
+            if args[1]=='repos/org/demo': return {'permissions':{'admin':admin}}
+            if args[1].startswith('repos/org/demo/branches/trunk'): return summary
+            raise AssertionError(args)
+        return gh
+
+    def test_enforced_prints_no_warning(self):
+        self.assertEqual(self.warn(self.responder(CLASSIC_EVERYONE)),'')
+
+    def test_protection_removed_prints_warning(self):
+        text=self.warn(self.responder({'protected':False}))
+        self.assertIn('no longer requires status check',text)
+        self.assertIn('will not add protection',text)
+
+    def test_read_error_prints_warning_and_does_not_raise(self):
+        def gh(*args):
+            raise o.c.ControllerError('rc=1: boom')
+        self.assertIn('could not verify',self.warn(gh))
 
 
 class NoProtectionMutationSourceTests(unittest.TestCase):
@@ -267,12 +327,14 @@ class EnsureRequiredCheckTests(unittest.TestCase):
             if '/rulesets?' in path: return list(owned)
             return list(rules)
         proc=Mock(returncode=post_rc,stderr='plan does not support rulesets')
+        # The consent path is an interactive terminal path; clear any agent markers the test host sets.
+        clean={k:v for k,v in o.os.environ.items() if k not in o.lifecycle.agent_markers(o.os.environ)}
         with patch.object(o,'gh',side_effect=gh), patch.object(o.c,'gh_api_pages',side_effect=pages), \
-             patch.object(o.subprocess,'run',return_value=proc) as run:
+             patch.object(o.subprocess,'run',return_value=proc) as run, patch.dict(o.os.environ,clean,clear=True):
             try:
                 o.ensure_required_check('org/demo','main','required',{'admin':admin},ask=ask)
                 error=None
-            except ValueError as exc:
+            except (ValueError,o.lifecycle.LifecycleError) as exc:
                 error=exc
         return error, run
 
@@ -309,14 +371,15 @@ class EnsureRequiredCheckTests(unittest.TestCase):
                 error,run=self.run_ensure(admin=True,ask=ask,summaries=[self.UNPROTECTED])
                 self.assertIsNotNone(error)
                 self.assertIn('owner declined',str(error))
-                self.assertIn('Nothing was changed',str(error))
+                self.assertIn('Branch protection and rulesets were not changed',str(error))
                 run.assert_not_called()
 
     def test_post_failure_surfaces_stderr_and_owner_action(self):
         error,run=self.run_ensure(admin=True,ask=Mock(return_value='y'),summaries=[self.UNPROTECTED],post_rc=1)
         self.assertIsNotNone(error)
         self.assertIn('plan does not support rulesets',str(error))
-        self.assertIn('Owner action',str(error))
+        self.assertIn('owner action',str(error))
+        self.assertIn('lost response',str(error))
 
     def test_owned_same_named_ruleset_not_enforcing_refuses_without_post(self):
         owned=[{'id':9,'name':'AutoController required check','enforcement':'disabled'}]
@@ -332,6 +395,49 @@ class EnsureRequiredCheckTests(unittest.TestCase):
         self.assertIsNotNone(error)
         self.assertIn('does not show',str(error))
         self.assertEqual(len([c for c in run.call_args_list if '--method' in c.args[0]]),1)
+
+    def test_post_timeout_becomes_owner_action_with_lost_response_hint(self):
+        ask=Mock(return_value='y')
+        summaries=[self.UNPROTECTED]
+        def gh(*args):
+            return summaries[0]
+        with patch.object(o,'gh',side_effect=gh), patch.object(o.c,'gh_api_pages',return_value=[]), \
+             patch.dict(o.os.environ,{},clear=True), \
+             patch.object(o.subprocess,'run',side_effect=o.subprocess.TimeoutExpired(['gh'],120)):
+            with self.assertRaises(ValueError) as caught:
+                o.ensure_required_check('org/demo','main','required',{'admin':True},ask=ask)
+        self.assertIn('lost response',str(caught.exception))
+        self.assertIn('owner action',str(caught.exception))
+
+    def test_owned_ruleset_listing_error_becomes_owner_action_value_error(self):
+        ask=Mock(return_value='y')
+        def gh(*args):
+            return self.UNPROTECTED
+        def pages(path,max_items=1000):
+            if '/rulesets?' in path: raise o.c.ControllerError('rc=1: listing failed')
+            return []
+        with patch.object(o,'gh',side_effect=gh), patch.object(o.c,'gh_api_pages',side_effect=pages), patch.object(o.subprocess,'run') as run, \
+             patch.dict(o.os.environ,{},clear=True):
+            with self.assertRaises(ValueError) as caught:
+                o.ensure_required_check('org/demo','main','required',{'admin':True},ask=ask)
+        self.assertIn('Owner action',str(caught.exception))
+        self.assertIn('not changed',str(caught.exception))
+        ask.assert_not_called()
+        run.assert_not_called()
+
+    def test_agent_session_refused_before_consent_prompt_and_post(self):
+        # Item 1: an OpenCode session may read protection but must never reach the consent prompt or a POST.
+        ask=Mock(return_value='y')
+        def gh(*args):
+            return self.UNPROTECTED
+        with patch.object(o,'gh',side_effect=gh), patch.object(o.c,'gh_api_pages',return_value=[]), \
+             patch.object(o.subprocess,'run') as run, \
+             patch.dict(o.os.environ,{'OPENCODE_SESSION_ID':'ses_test'}):
+            with self.assertRaises(o.lifecycle.LifecycleError) as caught:
+                o.ensure_required_check('org/demo','main','required',{'admin':True},ask=ask)
+        self.assertIn('adding a protection ruleset',str(caught.exception))
+        ask.assert_not_called()
+        run.assert_not_called()
 
     def test_already_enforced_is_read_only(self):
         error,run=self.run_ensure(admin=True,ask=Mock(),summaries=[CLASSIC_EVERYONE])

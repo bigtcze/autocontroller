@@ -54,8 +54,8 @@ A fault is `{"match": [tokens], "mode": "before" | "after", "rc": N, "once": boo
   root's `config.json` are not created. The harness fails fast if a subprocess
   exceeds its timeout (120 s per call).
 
-Every subprocess has a timeout. The whole integration module (48 tests) runs in about 70 s
-on the development host.
+Every subprocess has a timeout. The integration module (`tests/test_onboarding_integration.py`, 53 tests) runs in about 100 s
+on the development host. The unit module (`tests/test_onboarding.py`, 53 tests) runs in under a second.
 
 ## 3. Fault-injection phase matrix
 
@@ -89,7 +89,7 @@ successful unit action.
 
 Other recovery and duplicate tests:
 
-- A second successful run is a no-op: no mutating GitHub call and an identical config file.
+- A second successful run is a no-op: no mutating GitHub call and an identical config file. Its protection check is read-only and prints a stderr warning only if the required check is no longer enforced.
 - Lost local config, with remote Project and bootstrap intact: the rerun creates no Project, no item-add and no issue.
 - A held `onboarding.lock` refuses the run before any call.
 - Existing config entries and settings are preserved, and the config mode stays `0600`.
@@ -108,7 +108,7 @@ Other recovery and duplicate tests:
 | Existing state | Config preserved; `insteadOf` resume accepted; uncommitted and ahead checkouts refused. |
 | Admission and isolation | Only open, trusted, non-Renovate Issues are imported; foreign-repo items refuse before linking; a Project assigned to another configured repo is refused; a closed same-title Project is refused; no side effects outside the world. |
 | Config shape | The entry onboarding writes equals the shared fixture `tests/onboarded_fixture.py` (drift guard). |
-| Required-check gate | Classic `everyone` with `required` passes with zero POST; no protection with admin and consent adds exactly one ruleset, then configures; decline or EOF changes nothing; no protection without admin fails closed with an owner action; a same-named disabled ruleset is refused and not modified; a bypassable ruleset (`always`, `pull_requests_only`, `exempt`) does not count; classic `non_admins` is missing for admins and added after consent; existing stronger classic rules and other rulesets stay byte-identical; ambiguous summaries and truncated or malformed rules responses refuse; a rules API error refuses; a lost ruleset POST resumes to one ruleset. A static test confirms `onboarding.py` has one ruleset POST and no PUT/PATCH/DELETE on protection or rulesets. |
+| Required-check gate | Classic `everyone` with `required` passes with zero POST; no protection with admin and consent adds exactly one ruleset, then configures; decline or EOF changes nothing; no protection without admin fails closed with an owner action; a same-named disabled ruleset is refused and not modified; a bypassable ruleset (`always`, `pull_requests_only`, `exempt`) does not count; classic `non_admins` is missing for admins and added after consent; existing stronger classic rules and other rulesets stay byte-identical; ambiguous summaries and truncated or malformed rules responses refuse; a rules API error refuses; a lost ruleset POST resumes to one ruleset; a same-name ruleset is refused before any POST, and the fake returns 422 for a duplicate name; `~ALL` with an `exclude` is matched as GitHub documents it. An OpenCode session (`OPENCODE_SESSION_ID`) is refused before the consent prompt and any POST, and protection is still read first. Resume on an enrolled repository is read-only: an enforced branch prints nothing, and a removed requirement prints a stderr warning with zero mutating calls and an unchanged config. A static test confirms `onboarding.py` has one ruleset POST and no PUT/PATCH/DELETE on protection or rulesets. A POST timeout and a `ControllerError` from the rules read both become owner-action errors. Classic enforcement is decided before rulesets, so a classic-enforced branch is not blocked by an ambiguous rules response; without classic enforcement an ambiguous rules response still refuses. |
 
 Controller-side admission and authority tests (`tests/test_admission_and_authority.py`)
 use the same fixture as the bootstrap config. They cover failed bootstrap PR or
@@ -159,6 +159,9 @@ checked against live GitHub. A live run must confirm or correct each one.
 20. `GET repos/O/R/rules/branches/B` lists only active rulesets, each `required_status_checks` rule carrying `ruleset_id`, and paginates as a list of pages. `GET repos/O/R/rulesets/ID` returns `enforcement` and `current_user_can_bypass` (`always`, `pull_requests_only`, `exempt`, `never`). The fake also treats `current_user_can_bypass` as present for every ruleset; live GitHub may omit it, which onboarding refuses.
 21. `POST repos/O/R/rulesets` with `--input -` and the body onboarding sends (`target: branch`, `bypass_actors: []`, `integration_id: 15368`, GitHub Actions) is accepted for a repository admin and rejected with a readable message on plans without rulesets. The fake returns 403 for non-admins and assigns ids incrementally.
 22. `GET repos/O/R/rulesets?includes_parents=false` lists the repository's own rulesets with `name` and `enforcement`, used to detect an owner-disabled ruleset named `AutoController required check`.
+23. Ref matching for `conditions.ref_name` follows GitHub's documented semantics: `include` and `exclude` patterns are evaluated against the branch; `~ALL` matches every branch; `~DEFAULT_BRANCH` matches only the default branch. The fake implements exactly these three forms. Other patterns (for example `refs/heads/feature/*`) never match in the fake, so a live ruleset using them could be classified differently.
+24. A POST whose `name` already exists in the repository's rulesets is rejected with HTTP 422. The fake returns 422 for this case; live GitHub's exact status and message are assumed, not checked. Onboarding refuses before the POST when a same-named ruleset exists, so this path is a defence, not the main path.
+25. Agent-session detection reuses the controller's `lifecycle.refuse_agent` markers (`OPENCODE_SESSION_ID` and `AUTONOMY_*`); the gate refuses before consent, so an agent cannot consent to a ruleset write.
 
 **Security note.** Once a maintainer admits an outsider-authored Issue to the Project (for example by adding it manually), that author's later title, body and label edits can wake a new selection. Admission is the trust decision; the selector does not re-check the author.
 

@@ -181,8 +181,14 @@ RULESET_NAME='AutoController required check'
 GITHUB_ACTIONS_INTEGRATION_ID=15368
 
 
-def _unverified(branch):
-    return ValueError(f"Default branch '{branch}' protection could not be verified unambiguously. Owner action: check branch protection and rulesets for '{branch}' in GitHub so status check 'required' is required, then rerun onboarding. Nothing was changed.")
+def _detail(exc):
+    return ' '.join(str(exc).split())[:200]
+
+
+def _unverified(branch, check, detail=''):
+    # Onboarding may already have patched has_issues or pushed a seed commit, so never claim nothing changed.
+    extra=f' ({detail})' if detail else ''
+    return ValueError(f"Default branch '{branch}' protection could not be verified unambiguously for status check '{check}'{extra}. Owner action: check branch protection and rulesets for '{branch}' in GitHub so status check '{check}' is required, then rerun onboarding. Branch protection and rulesets were not changed.")
 
 
 def _classic_enforces(summary, branch, check, admin):
@@ -190,15 +196,15 @@ def _classic_enforces(summary, branch, check, admin):
         return False
     protection=summary.get('protection')
     rsc=protection.get('required_status_checks') if isinstance(protection,dict) else None
-    if not isinstance(rsc,dict): raise _unverified(branch)
+    if not isinstance(rsc,dict): raise _unverified(branch,check)
     contexts=rsc.get('contexts',[]); checks=rsc.get('checks',[]); level=rsc.get('enforcement_level')
-    if not isinstance(contexts,list) or not isinstance(checks,list) or not isinstance(level,str): raise _unverified(branch)
+    if not isinstance(contexts,list) or not isinstance(checks,list) or not isinstance(level,str): raise _unverified(branch,check)
     names=set()
     for name in contexts:
-        if not isinstance(name,str): raise _unverified(branch)
+        if not isinstance(name,str): raise _unverified(branch,check)
         names.add(name)
     for entry in checks:
-        if not isinstance(entry,dict) or not isinstance(entry.get('context'),str): raise _unverified(branch)
+        if not isinstance(entry,dict) or not isinstance(entry.get('context'),str): raise _unverified(branch,check)
         names.add(entry['context'])
     if check not in names: return False
     # Classic 'non_admins' exempts admins, so it cannot be relied on for an admin account.
@@ -207,36 +213,46 @@ def _classic_enforces(summary, branch, check, admin):
 
 def _rulesets_enforce(repo, branch, check, enc):
     enforcing=False
-    for rule in c.gh_api_pages(f'repos/{repo}/rules/branches/{enc}?per_page=100',max_items=1000):
-        if not isinstance(rule,dict) or not isinstance(rule.get('type'),str): raise _unverified(branch)
+    try:
+        rules=c.gh_api_pages(f'repos/{repo}/rules/branches/{enc}?per_page=100',max_items=1000)
+    except c.ControllerError as exc:
+        raise _unverified(branch,check,_detail(exc)) from exc
+    for rule in rules:
+        if not isinstance(rule,dict) or not isinstance(rule.get('type'),str): raise _unverified(branch,check)
         if rule['type']!='required_status_checks': continue
         # Rule objects carry the ruleset they came from (GitHub's rules/branches response shape).
         rid=rule.get('ruleset_id')
-        if not isinstance(rid,int) or isinstance(rid,bool): raise _unverified(branch)
+        if not isinstance(rid,int) or isinstance(rid,bool): raise _unverified(branch,check)
         params=rule.get('parameters')
         rows=params.get('required_status_checks') if isinstance(params,dict) else None
-        if not isinstance(rows,list): raise _unverified(branch)
+        if not isinstance(rows,list): raise _unverified(branch,check)
         names=[]
         for entry in rows:
-            if not isinstance(entry,dict) or not isinstance(entry.get('context'),str): raise _unverified(branch)
+            if not isinstance(entry,dict) or not isinstance(entry.get('context'),str): raise _unverified(branch,check)
             names.append(entry['context'])
         if check not in names: continue
         rs=gh('api',f'repos/{repo}/rulesets/{rid}')
         bypass=rs.get('current_user_can_bypass') if isinstance(rs,dict) else None
-        if not isinstance(bypass,str): raise _unverified(branch)
+        if not isinstance(bypass,str): raise _unverified(branch,check)
         # 'always', 'pull_requests_only' and 'exempt' let this account skip the check.
         if rs.get('enforcement')=='active' and bypass=='never': enforcing=True
     return enforcing
 
 
 def protection_state(repo, branch, check, admin):
-    """Read-only: 'enforced' when classic protection or an active ruleset requires `check` for this account."""
+    """Read-only: 'enforced' when classic protection or an active ruleset requires `check` for this account.
+
+    Classic enforcement is decided first: a branch it already enforces is not blocked by an unrelated
+    ambiguous rules response. Without classic enforcement, rulesets must read unambiguously.
+    """
     enc=quote(branch,safe='')
-    summary=gh('api',f'repos/{repo}/branches/{enc}')
-    if not isinstance(summary,dict) or not isinstance(summary.get('protected'),bool): raise _unverified(branch)
-    classic=_classic_enforces(summary,branch,check,admin)
-    rulesets=_rulesets_enforce(repo,branch,check,enc)
-    return 'enforced' if classic or rulesets else 'missing'
+    try:
+        summary=gh('api',f'repos/{repo}/branches/{enc}')
+    except c.ControllerError as exc:
+        raise _unverified(branch,check,_detail(exc)) from exc
+    if not isinstance(summary,dict) or not isinstance(summary.get('protected'),bool): raise _unverified(branch,check)
+    if _classic_enforces(summary,branch,check,admin): return 'enforced'
+    return 'enforced' if _rulesets_enforce(repo,branch,check,enc) else 'missing'
 
 
 def add_required_check_ruleset(repo, branch, check):
@@ -246,11 +262,34 @@ def add_required_check_ruleset(repo, branch, check):
           'rules':[{'type':'required_status_checks','parameters':{'strict_required_status_checks_policy':False,
                     'do_not_enforce_on_create':False,
                     'required_status_checks':[{'context':check,'integration_id':GITHUB_ACTIONS_INTEGRATION_ID}]}}]}
-    proc=subprocess.run(['gh','api','--method','POST',f'repos/{repo}/rulesets','--input','-'],
-                        input=json.dumps(body),text=True,capture_output=True,timeout=120)
+    # c.command is not reused: it has no stdin support, and the JSON body must go through --input -.
+    try:
+        proc=subprocess.run(['gh','api','--method','POST',f'repos/{repo}/rulesets','--input','-'],
+                            input=json.dumps(body),text=True,capture_output=True,timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError(f"Adding ruleset '{RULESET_NAME}' on '{branch}' did not complete ({_detail(exc)}). If ruleset '{RULESET_NAME}' now exists in GitHub (a lost response), rerun onboarding. Otherwise owner action: enable rulesets for this repository or require status check '{check}' manually, then rerun onboarding. Branch protection and rulesets were not changed by this attempt.") from exc
     if proc.returncode:
         detail=(proc.stderr or '').strip()[:400]
-        raise ValueError(f"GitHub refused to add ruleset '{RULESET_NAME}' on '{branch}' ({detail}). Owner action: enable rulesets for this repository (plan or visibility may not allow them), or require status check '{check}' manually, then rerun onboarding.")
+        raise ValueError(f"GitHub refused to add ruleset '{RULESET_NAME}' on '{branch}' ({detail}). If ruleset '{RULESET_NAME}' now exists in GitHub (a lost response), rerun onboarding. Otherwise owner action: enable rulesets for this repository (plan or visibility may not allow them), or require status check '{check}' manually, then rerun onboarding.")
+
+
+def warn_if_not_enforced(entry):
+    """Read-only check for an already enrolled repository on resume. Never prompts and never writes.
+
+    Warns on stderr and returns, so the resume path keeps its behaviour and exit code. Enrolled repositories
+    are otherwise not re-verified; this only reports what onboarding can see right now.
+    """
+    repo=entry['repo']; check=entry.get('required_check',REQUIRED_CHECK)
+    try:
+        branch=entry.get('base_branch') or 'main'
+        info=gh('api',f'repos/{repo}')
+        admin=bool((info.get('permissions') or {}).get('admin'))
+        state=protection_state(repo,branch,check,admin)
+    except (ValueError,c.ControllerError,lifecycle.LifecycleError) as exc:
+        print(f"WARNING: could not verify that '{repo}' still requires status check '{check}': {_detail(exc)}. Rerunning onboarding will not add protection to an enrolled repository; check branch protection in GitHub.",file=sys.stderr)
+        return
+    if state!='enforced':
+        print(f"WARNING: default branch '{branch}' of '{repo}' no longer requires status check '{check}' for this account. Rerunning onboarding will not add protection to an enrolled repository; require the check in GitHub (branch protection or a ruleset). The controller does not re-check protection continuously.",file=sys.stderr)
 
 
 def ensure_required_check(repo, branch, check, permissions, ask=input):
@@ -260,10 +299,16 @@ def ensure_required_check(repo, branch, check, permissions, ask=input):
         print(f"Default branch '{branch}' enforces required check '{check}'.")
         return
     if not admin:
-        raise ValueError(f"Default branch '{branch}' does not enforce status check '{check}' for this account. Owner action: ask a repository admin to require it (branch protection that includes admins, or an active ruleset without bypass for this account), then rerun onboarding. Nothing was changed.")
+        raise ValueError(f"Default branch '{branch}' does not enforce status check '{check}' for this account. Owner action: ask a repository admin to require it (branch protection that includes admins, or an active ruleset without bypass for this account), then rerun onboarding. Branch protection and rulesets were not changed.")
     # A same-named ruleset that is not enforcing was disabled or changed by the owner; never edit it.
-    owned=[r for r in c.gh_api_pages(f'repos/{repo}/rulesets?includes_parents=false&per_page=100') if isinstance(r,dict) and r.get('name')==RULESET_NAME]
-    if owned: raise ValueError(f"Ruleset '{RULESET_NAME}' exists but does not enforce '{check}' on '{branch}'. Onboarding will not modify it. Owner action: re-enable it with no bypass for this account, or delete it, then rerun onboarding.")
+    try:
+        listed=c.gh_api_pages(f'repos/{repo}/rulesets?includes_parents=false&per_page=100')
+    except c.ControllerError as exc:
+        raise _unverified(branch,check,_detail(exc)) from exc
+    owned=[r for r in listed if isinstance(r,dict) and r.get('name')==RULESET_NAME]
+    if owned: raise ValueError(f"Ruleset '{RULESET_NAME}' exists but does not enforce '{check}' on '{branch}'. Onboarding will not modify it. Owner action: re-enable it with no bypass for this account, or delete it, then rerun onboarding. Branch protection and rulesets were not changed.")
+    # Agent guard: an OpenCode session may read protection (above) but must never consent to a write.
+    lifecycle.refuse_agent(os.environ,'adding a protection ruleset')
     prompt=(f"Default branch '{branch}' does not require status check '{check}'. Onboarding can add a new repository ruleset "
             f"named '{RULESET_NAME}' on refs/heads/{branch} that requires '{check}' from GitHub Actions, with no bypass actors. "
             "Existing branch protection and rulesets stay unchanged. Add it? [y/N] ")
@@ -272,10 +317,10 @@ def ensure_required_check(repo, branch, check, permissions, ask=input):
     except EOFError:
         answer=''
     if str(answer).strip().lower() not in ('y','yes'):
-        raise ValueError(f"Default branch '{branch}' is not enforced; owner declined adding protection. Nothing was changed. Owner action: require status check '{check}' on '{branch}' in GitHub, then rerun onboarding.")
+        raise ValueError(f"Default branch '{branch}' is not enforced; owner declined adding protection. Branch protection and rulesets were not changed. Owner action: require status check '{check}' on '{branch}' in GitHub, then rerun onboarding.")
     add_required_check_ruleset(repo,branch,check)
     if protection_state(repo,branch,check,admin)!='enforced':
-        raise ValueError(f"Ruleset '{RULESET_NAME}' was submitted but GitHub does not show '{branch}' enforcing '{check}'. Owner action: inspect rulesets for this repository in GitHub, then rerun onboarding.")
+        raise ValueError(f"Ruleset '{RULESET_NAME}' was submitted but GitHub does not show '{branch}' enforcing '{check}'. Owner action: inspect rulesets for this repository in GitHub, then rerun onboarding. Onboarding made no other protection change.")
     print(f"Default branch '{branch}' enforces required check '{check}'.")
 
 
@@ -327,6 +372,7 @@ def onboard(url=None):
     existing=next((x for x in config['projects'] if x['repo'].lower()==requested.lower()),None)
     if existing:
         if not existing.get('enabled',True): raise ValueError('Repository already configured but disabled; refusing to change its state.')
+        warn_if_not_enforced(existing)
         print('Repository already configured. Resuming service.'); run('systemctl','--user','enable','--now','autocontroller.service'); return
     # Show the material authorization once, before any remote mutation.
     print(f'AutoController will clone {requested}, create a dedicated GitHub Project, import open issues authored by the owner, members or collaborators, create a bootstrap issue, and autonomously run AI coding sessions and merge reviewed green PRs. Onboarding verifies that the default branch requires the \'required\' status check and adds a ruleset only with separate consent. Existing branch protection is never weakened. An empty repository will receive a minimal first commit. AI and CI can incur costs.')

@@ -156,6 +156,22 @@ def auth(argv: list[str], state: dict) -> str:
     raise Unsupported(' '.join(argv))
 
 
+def ref_matches(condition: dict, branch: str, default_branch: str) -> bool:
+    """GitHub ref_name matching for branch rulesets: include patterns minus exclude patterns.
+
+    Supports refs/heads/<name>, ~DEFAULT_BRANCH and ~ALL (every branch). Other patterns never match here.
+    """
+    def one(pattern: str) -> bool:
+        if pattern == '~ALL':
+            return True
+        if pattern == '~DEFAULT_BRANCH':
+            return branch == default_branch
+        return pattern == f'refs/heads/{branch}'
+    included = any(one(p) for p in condition.get('include', []))
+    excluded = any(one(p) for p in condition.get('exclude', []))
+    return included and not excluded
+
+
 def governance_api(parts: list[str], method: str, flags: set, body: str | None, state: dict) -> str:
     """Branch protection (classic summary), branch rules and repository rulesets.
 
@@ -176,8 +192,7 @@ def governance_api(parts: list[str], method: str, flags: set, body: str | None, 
         for ruleset in rulesets:
             if ruleset.get('enforcement') != 'active':
                 continue  # the rules endpoint only reports active rulesets
-            includes = ruleset.get('conditions', {}).get('ref_name', {}).get('include', [])
-            if f'refs/heads/{branch}' not in includes and not ('~DEFAULT_BRANCH' in includes and branch == repo['default_branch']):
+            if not ref_matches(ruleset.get('conditions', {}).get('ref_name', {}), branch, repo['default_branch']):
                 continue
             for rule in ruleset.get('rules', []):
                 rows.append({**rule, 'ruleset_id': ruleset['id'], 'ruleset_source_type': 'Repository', 'ruleset_source': repo['full_name']})
@@ -191,6 +206,8 @@ def governance_api(parts: list[str], method: str, flags: set, body: str | None, 
             raise Unsupported('ruleset POST without --input -')
         doc = json.loads(body)
         rulesets = state.setdefault('rulesets', {}).setdefault(key, [])
+        if any(r.get('name') == doc.get('name') for r in rulesets):
+            raise Fail(1, 'HTTP 422: Validation Failed: name already exists for this repository')
         number = state.get('next_ruleset_id', 1)
         state['next_ruleset_id'] = number + 1
         stored = {**doc, 'id': number, 'current_user_can_bypass': 'never'}
