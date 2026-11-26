@@ -563,6 +563,24 @@ class SmokeRunTests(unittest.TestCase):
         self.assertEqual(doc['leftovers'], [])
         self.assertEqual(doc['status'], 'interrupted', 'a run whose teardown finished is not "passed"')
 
+    def test_ignored_sighup_during_teardown_is_not_recorded_or_reported_interrupted(self):
+        # m-1: a SIGHUP whose handler is SIG_IGN (inherited, as under nohup) is blocked and then
+        # dropped on unmask, so it was never handled. It must not be recorded as deferred, and the
+        # run must not be reported `interrupted` while the script exits 0.
+        previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        self.addCleanup(signal.signal, signal.SIGHUP, previous)
+        self.write_gh({'login': OWNER, 'repo': FULL, 'issue': 5, 'repo_exists': False,
+                       'opencode_open_pr': True, 'opencode_rc': 0, 'pr_nodes': [], 'runs': [],
+                       'signal_parent_on_delete': 'SIGHUP'})
+        rc, err = self.run_smoke_main()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(signal.getsignal(signal.SIGHUP), signal.SIG_IGN, 'the inherited ignore is kept')
+        doc = self.report_doc()
+        self.assertNotIn('SIGHUP', doc.get('deferred_signals', []), 'an ignored signal is not deferred')
+        self.assertNotEqual(doc['status'], 'interrupted', 'an ignored SIGHUP must not mark the run interrupted')
+        self.assertEqual(doc['status'], 'passed')
+        self.assertEqual(doc['deleted'], [FULL], 'teardown still completed')
+
     def test_sigterm_during_teardown_is_deferred_then_handled_once(self):
         self._signal_during_teardown('SIGTERM')
 

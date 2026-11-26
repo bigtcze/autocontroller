@@ -266,7 +266,9 @@ restored and the pending signal is handled once. The outcome is exit 3, with
 `status: interrupted` (unless the status is already `teardown-failed` or
 `teardown-incomplete`, which keep their precedence), and the names of the deferred
 signals are recorded in `deferred_signals`. A run whose teardown finished cleanly is
-never reported as `passed` when a signal arrived.
+never reported as `passed` when a handled signal arrived. A signal whose handler is
+`SIG_IGN` (for example SIGHUP under `nohup`) stays pending while blocked but is dropped
+on unmask, so it is not recorded and does not change the status or exit code.
 
 Teardown calls and their bounds (checked by reading `scripts/live-smoke.py`):
 
@@ -322,6 +324,9 @@ What each test proves (in `tests/test_live_smoke_run.py`):
   exits 3 with the exception named on stderr.
 - `test_m5_inherited_sighup_ignore_is_kept_during_the_run_and_restored`: a SIGHUP that was
   `SIG_IGN` on entry stays `SIG_IGN` during the run and afterwards.
+- `test_ignored_sighup_during_teardown_is_not_recorded_or_reported_interrupted`: with
+  SIGHUP ignored, a SIGHUP sent from the fake `gh repo delete` during teardown is not
+  listed in `deferred_signals`; the run exits 0 with `status: passed`.
 - `test_sigterm_during_teardown_is_deferred_then_handled_once` and
   `test_sigint_during_teardown_is_deferred_then_handled_once`: a real signal sent to
   the controller from inside the fake `gh repo delete` is held until teardown completes
@@ -404,14 +409,19 @@ evidence.
   `MidFlowEngramTests`, and in the pre-existing `test_memory` `RuntimeTests`), so the
   test it appears in depends on GC timing. It does not fail the suite. It is not fixed
   here because product code is out of scope for this PR.
-- Inherited and latent, not introduced by this PR: `ProjectWorker.env()`
-  (`autonomy-controller.py`) copies `os.environ`. A controller process started with
-  `AUTOCONTROLLER_LEARNING_INSTRUCTIONS` or any `AUTONOMY_*` variable in its environment
-  would pass them to every session it starts, including selection-phase sessions. A
-  selection session that received `AUTOCONTROLLER_LEARNING_INSTRUCTIONS` would be
-  granted learning access. The installed systemd unit does not set these variables, so
-  this is latent. It is not fixed here because product code is out of scope. It
-  deserves a separate Issue. The E2E tests guard against it (see below).
+- Inherited and latent, not introduced by this PR (product code, out of scope here):
+  - `ProjectWorker.env()` (`autonomy-controller.py`) copies `os.environ`, then
+    overwrites `AUTONOMY_PROJECT_ROOT`, `AUTONOMY_PROJECT_NAME`,
+    `AUTONOMY_PENDING_MARKER` and `AUTONOMY_OPENCODE`. `run_wrapper` then overwrites
+    `AUTONOMY_PHASE`. Other `AUTONOMY_*` names pass through unchanged.
+  - An inherited `AUTOCONTROLLER_LEARNING_INSTRUCTIONS` passes through unchanged into the
+    selection phase. It also passes into every phase when no memory runtime is
+    configured. It carries another session's grant path and token.
+  - The leak test (`test_leaked_learning_env_never_reaches_a_selection_session`) proves
+    the harness scrub only. It is not a product guarantee, and the product code is
+    unchanged.
+  - The installed systemd unit does not set these variables, so the defect is latent.
+    It is recommended as a separate Issue for the owner.
 - Hermetic environment for the E2E tests: `scripts/offline-tests.sh` removes every
   `AUTOCONTROLLER_*`, `AUTONOMY_*`, `OPENCODE_*`, `OPENCODE` and `ENGRAM_*` variable
   before any test runs. `E2EBase.setUp` and the worker's iteration (`World.worker`) also

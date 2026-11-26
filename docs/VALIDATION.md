@@ -10,7 +10,7 @@ The `required` check (`.github/workflows/required.yml` → `regression.yml`) run
 - The full offline regression suite (`scripts/offline-tests.sh`) as an unprivileged user in clean `debian:12`, `debian:13`, `ubuntu:24.04` and `ubuntu:26.04` containers with the distribution `python3`, plus `mise run ci` on the GitHub runner.
 - Repository contract checks: bootstrap contract files, workflow safety (no `pull_request_target`, no secrets, pinned actions, aggregate gate), no personal paths or tokens.
 - Offline E2E acceptance (`tests/test_e2e_controller.py`, 39 tests): scenarios 1–8 against the real controller, with GitHub, OMO agent and Engram service doubles. The scenario→test mapping and every stand-in limit are in [E2E_TESTING.md](E2E_TESTING.md). Nothing in this suite is verified against a live service.
-- Live-smoke guard and body tests (`tests/test_live_smoke_guards.py`, 37 tests; `tests/test_live_smoke_run.py`, 24 tests). They exercise `scripts/live-smoke.py` only through fake `gh`/`git`/`opencode` shims. The live smoke itself is never run by automation.
+- Live-smoke guard and body tests (`tests/test_live_smoke_guards.py`, 37 tests; `tests/test_live_smoke_run.py`, 25 tests). They exercise `scripts/live-smoke.py` only through fake `gh`/`git`/`opencode` shims. The live smoke itself is never run by automation.
 
 The suite simulates GitHub, OpenCode and Engram: scheduling, checkpoints and recovery, CI/merge gates, Renovate identity and fork rejection, onboarding import authorization, release policy, safe-wrapper recovery against a fake OpenCode API, and Engram runtime staging with fake binaries.
 

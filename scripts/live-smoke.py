@@ -381,11 +381,16 @@ def run_session(argv: list[str], report: Report, env: dict, *, timeout: int, cwd
     try:
         _out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        terminate_group(proc)
-        for pipe in (proc.stdout, proc.stderr):
-            if pipe is not None:
-                pipe.close()
-        report.command(display, None, time.monotonic() - started, note + ' (timeout; group terminated)')
+        # NIT 2: same shape as the BaseException branch. The record and the pipe close run in
+        # `finally`, so they happen even if terminate_group raises.
+        try:
+            terminate_group(proc)
+        finally:
+            report.command(display, None, time.monotonic() - started,
+                           note + ' (timeout; group terminated)')
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None:
+                    pipe.close()
         raise SmokeFailed(f'opencode session exceeded {timeout}s and its process group was terminated')
     except BaseException:
         # Interrupted (or any other unexpected error) while the session may still be running.
@@ -601,7 +606,10 @@ def _record_deferred_signals(report: Report, report_path: Path) -> None:
     finished cleanly is not reported as passed. Precedence: teardown-failed (leftover) and
     teardown-incomplete (a close step failed) are kept as they are.
     """
-    deferred = sorted(s.name for s in signal.sigpending() & set(INTERRUPT_SIGNALS))
+    # m-1: a blocked signal whose handler is SIG_IGN stays pending on Linux, but it is dropped on
+    # unmask (the ignore wins). It was never going to be handled, so it is not recorded as deferred.
+    deferred = sorted(s.name for s in signal.sigpending() & set(INTERRUPT_SIGNALS)
+                      if signal.getsignal(s) is not signal.SIG_IGN)
     if not deferred:
         return
     report.doc['deferred_signals'] = deferred
