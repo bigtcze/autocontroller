@@ -28,7 +28,7 @@ import release_policy as releases
 # Source of truth for install.sh. tests/test_release_artifacts.py checks install.sh against these lists.
 EXECUTABLE_PROGRAM_FILES = ('autonomy-controller.py', 'opencode-project-safe.py', 'release_policy.py',
                             'release_artifacts.py', 'memory.py', 'bootstrap_policy.py', 'onboarding.py', 'lifecycle.py',
-                            'followup.py', 'install.sh')
+                            'install.sh')
 DATA_PROGRAM_FILES = ('README.md', 'config.example.json', 'autocontroller.service')
 DATA_PROGRAM_DIRS = ('skills', 'standards', 'tests')
 PROGRAM_FILES = {'0700': EXECUTABLE_PROGRAM_FILES, '0600': DATA_PROGRAM_FILES, 'dirs': DATA_PROGRAM_DIRS}

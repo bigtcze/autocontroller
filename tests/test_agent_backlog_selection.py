@@ -13,7 +13,7 @@ m=importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(m)
 
 
-def issue(n,title=None,status='Todo',priority='P3'):
+def issue(n,title=None,status='Backlog',priority='P3'):
     return {'item_id':f'ITEM{n}','number':n,'title':title or f'Task {n}',
             'url':f'https://github.com/org/repo/issues/{n}',
             'status':status,'priority':priority}
@@ -211,7 +211,7 @@ class OutsiderCommentWake(unittest.TestCase):
         p=patch.object(m,'renovate_prs',return_value=[]);p.start();self.addCleanup(p.stop)
         p=patch.object(w,'check_maintenance',return_value=None);p.start();self.addCleanup(p.stop)
 
-    def board(self,body='a'*64,status='Todo'):
+    def board(self,body='a'*64,status='Backlog'):
         return [dict(issue(10,status=status),body_sha256=body)]
 
     def run_with_activity(self,rows,board):
@@ -264,9 +264,9 @@ class OutsiderCommentWake(unittest.TestCase):
     def test_status_change_wakes_after_no_action(self):
         w=self.worker
         with patch.object(w,'run_wrapper',return_value=(0,'AUTOCONTROLLER_NO_ACTION')) as run:
-            with patch.object(w.project,'items',return_value=self.board(status='Todo')):
+            with patch.object(w.project,'items',return_value=self.board(status='Backlog')):
                 self.run_with_activity([activity_row(10,updated='2026-11-25T08:00:00Z')],None)
-            with patch.object(w.project,'items',return_value=self.board(status='In Progress')):
+            with patch.object(w.project,'items',return_value=self.board(status='Todo')):
                 self.run_with_activity([activity_row(10,updated='2026-11-25T08:00:00Z')],None)
         self.assertEqual(run.call_count,2)
 

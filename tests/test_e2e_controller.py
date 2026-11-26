@@ -7,7 +7,6 @@ wrapper executable are replaced.
 """
 import json
 import os
-import re
 import shutil
 import tempfile
 import threading
@@ -201,7 +200,7 @@ class SchedulerHappyPathTests(E2EBase):
     def test_renovate_first_then_backlog_issue_with_exact_sha_merge(self):
         self.world.add_project('alpha', R, 1)
         issue = self.gh.add_issue(R, title='Feature A', body='Implement A', project='example-owner/1',
-                                  status='Todo')
+                                  status='Backlog')
         renovate = self.gh.add_pr(R, title='Bump dep', body='', head_sha=RENOVATE_HEAD,
                                   head_ref='renovate/dep', user=ew.eg.RENOVATE_USER)
         # Fork PR impersonating Renovate: must never reach an agent.
@@ -271,7 +270,7 @@ class SchedulerHappyPathTests(E2EBase):
         """
         self.world.add_project('alpha', R, 1)
         issue = self.gh.add_issue(R, title='Feature A', body='Implement A', project='example-owner/1',
-                                  status='Todo')
+                                  status='Backlog')
         self.world.script('alpha', [
             {'output': 'AUTOCONTROLLER_SELECT_ISSUE #%d' % issue},
             {'output': 'coding done'},
@@ -288,7 +287,7 @@ class SchedulerHappyPathTests(E2EBase):
         """The coding prompt uses the native OMO roles and invents no custom verdict."""
         self.world.add_project('alpha', R, 1)
         issue = self.gh.add_issue(R, title='Feature A', body='Implement A', project='example-owner/1',
-                                  status='Todo')
+                                  status='Backlog')
         self.world.script('alpha', [
             {'output': 'AUTOCONTROLLER_SELECT_ISSUE #%d' % issue},
             {'output': 'coding done'},
@@ -411,8 +410,8 @@ class KnownFailureRecurrenceTests(E2EBase):
         self.world.add_project('alpha', R, 1)
         second = 'example-owner/beta'
         self.world.add_project('beta', second, 2)
-        issue_a = self.gh.add_issue(R, title='Alpha bug', body='x', project='example-owner/1', status='Todo')
-        issue_b = self.gh.add_issue(second, title='Beta bug', body='y', project='example-owner/2', status='Todo')
+        issue_a = self.gh.add_issue(R, title='Alpha bug', body='x', project='example-owner/1', status='Backlog')
+        issue_b = self.gh.add_issue(second, title='Beta bug', body='y', project='example-owner/2', status='Backlog')
         # Cross-repo reuse only travels through the shared scope, which requires
         # transferable=True and a generalized lesson that does not name its source.
         lesson = {'title': 'Verify cwd before edits', 'trigger': 'working directory mismatch before edit',
@@ -480,8 +479,8 @@ class KnownFailureRecurrenceTests(E2EBase):
         a different repository's task can see the shared copy; it is not covered by this test.
         """
         self.world.add_project('alpha', R, 1)
-        issue_a = self.gh.add_issue(R, title='Alpha bug one', body='x', project='example-owner/1', status='Todo')
-        issue_c = self.gh.add_issue(R, title='Alpha bug two', body='z', project='example-owner/1', status='Todo')
+        issue_a = self.gh.add_issue(R, title='Alpha bug one', body='x', project='example-owner/1', status='Backlog')
+        issue_c = self.gh.add_issue(R, title='Alpha bug two', body='z', project='example-owner/1', status='Backlog')
         lesson = {'title': 'Verify cwd before edits', 'trigger': 'working directory mismatch before edit',
                   'lesson': 'Verify the working directory before modifying files.',
                   'proof': 'Reproduced the wrong cwd and verified the corrected path.',
@@ -712,7 +711,7 @@ class MemoryOutageTests(E2EBase):
     def test_engram_process_death_blocks_new_work_before_any_ai_session(self):
         import memory as learning
         self.world.add_project('alpha', R, 1)
-        self.gh.add_issue(R, title='Feature M', body='m', project='example-owner/1', status='Todo')
+        self.gh.add_issue(R, title='Feature M', body='m', project='example-owner/1', status='Backlog')
         runtime = self.world.runtime
         runtime.proc.kill()
         runtime.proc.wait(timeout=15)
@@ -802,7 +801,7 @@ class IdleAndSelectionTests(E2EBase):
 
     def test_no_action_decision_stops_ai_until_the_board_changes(self):
         self.world.add_project('alpha', R, 1)
-        issue = self.gh.add_issue(R, title='Vague idea', body='tbd', project='example-owner/1', status='Todo')
+        issue = self.gh.add_issue(R, title='Vague idea', body='tbd', project='example-owner/1', status='Backlog')
         self.world.script('alpha', [{'output': 'AUTOCONTROLLER_NO_ACTION'}])
         self.drive('alpha', 1)
         self.assertEqual(len(self.sessions('selection')), 1)
@@ -826,14 +825,14 @@ class OutageTests(E2EBase):
 
     def test_outage_after_selection_keeps_decision_and_restart_does_not_reselect(self):
         self.world.add_project('alpha', R, 1)
-        issue = self.gh.add_issue(R, title='Feature Z', body='z', project='example-owner/1', status='Todo')
+        issue = self.gh.add_issue(R, title='Feature Z', body='z', project='example-owner/1', status='Backlog')
         # Selection succeeds; then the outage starts before the controller can claim the Issue.
         self.world.script('alpha', [{'output': 'AUTOCONTROLLER_SELECT_ISSUE #%d' % issue,
                                      'outage_after': True}])
         with self.assertRaises(ew.ctl.ControllerError):
             self.world.worker('alpha').one_iteration()  # claim needs GitHub, which is now down
         self.assertEqual(self.checkpoint()['decision'], 'issue', 'decision persisted before GitHub is needed')
-        self.assertEqual(self.gh.project_status('example-owner/1', issue), 'Todo')
+        self.assertEqual(self.gh.project_status('example-owner/1', issue), 'Backlog')
         self.assertEqual(len(self.sessions('selection')), 1)
 
         # The outage stays up: iterations raise (run() would back off); no AI or mutation occurs.
@@ -853,7 +852,7 @@ class OutageTests(E2EBase):
 
     def test_outage_before_any_ai_session_fails_closed_with_no_mutations(self):
         self.world.add_project('alpha', R, 1)
-        self.gh.add_issue(R, title='Feature Q', body='q', project='example-owner/1', status='Todo')
+        self.gh.add_issue(R, title='Feature Q', body='q', project='example-owner/1', status='Backlog')
         self.gh.set_outage(True)
         with self.assertRaises(ew.ctl.ControllerError):
             self.world.worker('alpha').one_iteration()
@@ -870,8 +869,8 @@ class CheckpointAndQuotaTests(E2EBase):
         self.world.add_project('alpha', R, 1)
         beta = 'example-owner/beta'
         self.world.add_project('beta', beta, 2)
-        self.gh.add_issue(R, title='Feature A', body='a', project='example-owner/1', status='Todo')
-        self.gh.add_issue(beta, title='Feature B', body='b', project='example-owner/2', status='Todo')
+        self.gh.add_issue(R, title='Feature A', body='a', project='example-owner/1', status='Backlog')
+        self.gh.add_issue(beta, title='Feature B', body='b', project='example-owner/2', status='Backlog')
         self.world.script('alpha', [{'output': 'HTTP 429 quota exceeded', 'rc': 1}])
         self.world.script('beta', [{'output': 'AUTOCONTROLLER_NO_ACTION'}])
         self.drive('alpha', 1)
@@ -891,7 +890,7 @@ class CheckpointAndQuotaTests(E2EBase):
 
     def test_quota_during_coding_keeps_checkpoint_and_resumes_same_task_once(self):
         self.world.add_project('alpha', R, 1)
-        issue = self.gh.add_issue(R, title='Feature Q', body='q', project='example-owner/1', status='Todo')
+        issue = self.gh.add_issue(R, title='Feature Q', body='q', project='example-owner/1', status='Backlog')
         marker = self.world.state / 'projects' / 'alpha' / 'cycle.pending'
         self.world.script('alpha', [
             {'output': 'AUTOCONTROLLER_SELECT_ISSUE #%d' % issue},
@@ -923,11 +922,7 @@ class CheckpointAndQuotaTests(E2EBase):
         self.drive('alpha', 1)
         code = self.sessions('code')
         self.assertEqual(len(code), 2, 'exactly one resumed coding session')
-        # Each grant carries a fresh token-bound follow-up command; only that secret differs.
-        def unbound(prompt):
-            return re.sub(r'--token [0-9a-f]{48}', '--token <token>', prompt)
-        self.assertEqual(unbound(code[1]['prompt']), unbound(first_code['prompt']),
-                         'resume reuses the same task prompt')
+        self.assertEqual(code[1]['prompt'], first_code['prompt'], 'resume reuses the same task prompt')
         self.assertEqual(len(self.sessions('selection')), 1, 'quota recovery never reselects work')
         self.assertEqual(self.gh.project_status('example-owner/1', issue), 'In Progress')
 
@@ -1199,7 +1194,7 @@ class WorkerRunLoopOutageTests(E2EBase):
 
     def test_outage_backs_off_persistently_without_ai_and_stops_cleanly(self):
         self.world.add_project('alpha', R, 1)
-        self.gh.add_issue(R, title='Feature Q', body='q', project='example-owner/1', status='Todo')
+        self.gh.add_issue(R, title='Feature Q', body='q', project='example-owner/1', status='Backlog')
         cfg = dict(self.world.projects['alpha'])
         gcfg = self.world.global_cfg()
         gcfg.update(retry_max_seconds=2, poll_seconds=1)
