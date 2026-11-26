@@ -32,6 +32,16 @@ ROOT_FILES = ('onboarding.py', 'autonomy-controller.py', 'bootstrap_policy.py',
 TIMEOUT = 120
 
 
+def classic_protection(*, contexts=('required',), checks=(), enforcement_level='everyone', **extra) -> dict:
+    """Classic branch-protection summary as the fake serves it (GET repos/O/R/branches/B)."""
+    protection = {'enabled': True,
+                  'required_status_checks': {'enforcement_level': enforcement_level,
+                                             'contexts': list(contexts),
+                                             'checks': [{'context': c} for c in checks]}}
+    protection.update(extra)
+    return {'protected': True, 'protection': protection}
+
+
 class Result(NamedTuple):
     rc: int
     stdout: str
@@ -172,7 +182,10 @@ class World:
 
     def add_repo(self, owner: str, name: str, *, default_branch: str = 'main', seed: bool = True,
                  seed_files: dict | None = None, has_issues: bool = True, push: bool = True,
-                 admin: bool = False, merge=('squash',), viewer_association: str = 'OWNER') -> str:
+                 admin: bool = False, merge=('squash',), viewer_association: str = 'OWNER',
+                 protection='required') -> str:
+        """`protection`: 'required' (classic, enforcement everyone, requires the `required` check),
+        None (no classic protection), or a literal classic summary dict."""
         full = f'{owner}/{name}'
         bare = self.remote_path(owner, name)
         bare.parent.mkdir(parents=True, exist_ok=True)
@@ -190,8 +203,28 @@ class World:
                 'allow_squash_merge': 'squash' in merge, 'allow_merge_commit': 'merge' in merge,
                 'allow_rebase_merge': 'rebase' in merge, 'viewer_association': viewer_association}
             state['issues'].setdefault(full.lower(), [])
+            if protection is not None:
+                summary = classic_protection() if protection == 'required' else protection
+                state.setdefault('protection', {})[full.lower()] = summary
         self.mutate_gh(change)
         return full
+
+    def add_ruleset(self, repo: str, ruleset: dict) -> int:
+        """Append a repository ruleset (`enforcement`, `conditions`, `rules`, optional `current_user_can_bypass`)."""
+        holder = {}
+
+        def change(state):
+            rows = state.setdefault('rulesets', {}).setdefault(repo.lower(), [])
+            number = state.get('next_ruleset_id', 1)
+            state['next_ruleset_id'] = number + 1
+            rows.append({'id': number, **ruleset})
+            holder['n'] = number
+        self.mutate_gh(change)
+        return holder['n']
+
+    def set_raw_response(self, path: str, text: str):
+        """Replace the body of one API path (query string excluded) with literal text."""
+        self.mutate_gh(lambda s: s.setdefault('raw_responses', {}).__setitem__(path, text))
 
     def remote_path(self, owner: str, name: str) -> Path:
         return self.remotes / owner / f'{name}.git'
