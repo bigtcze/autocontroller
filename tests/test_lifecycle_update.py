@@ -452,6 +452,32 @@ class HealthAndRollbackTest(Base):
             self.assertEqual((self.world.install / name).read_bytes(), data, name)
         self.assertEqual(self.history()[-1]['result'], 'rolled_back')
 
+    def test_unreadable_first_state_after_start_rolls_back(self):
+        # R1: the first read after start (the window's baseline) is also a failed check, never a raise
+        # that would leave the new code running with rollback/incoming behind.
+        before = (self.world.install / 'autonomy-controller.py').read_bytes()
+        original_start, original_stop = lc.start_service, lc.stop_service
+
+        def unreadable(_service):
+            raise lc.LifecycleError('systemctl show returned unreadable output')
+
+        def start_then_garbage():
+            started = original_start()
+            if self.service.installed_tag() == 'v1.1.0':
+                self.service.show_override = unreadable
+            return started
+
+        def stop_and_clear():
+            original_stop()
+            self.service.show_override = None
+        lc.start_service, lc.stop_service = start_then_garbage, stop_and_clear
+        with self.assertRaisesRegex(lc.LifecycleError, 'failed its health check'):
+            self.update()
+        self.assertEqual(self.world.tag(), 'v1.0.0')
+        self.assertFalse((self.world.install / 'rollback' / 'incoming').exists())
+        self.assertEqual((self.world.install / 'autonomy-controller.py').read_bytes(), before)
+        self.assertEqual(self.history()[-1]['result'], 'rolled_back')
+
     def test_service_dying_in_health_window_triggers_rollback(self):
         def crash_after_start(seconds):
             if 'start' in self.service.verbs:

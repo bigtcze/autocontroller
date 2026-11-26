@@ -688,25 +688,24 @@ def healthy(*, check, seconds: int, sleep=time.sleep, clock=time.monotonic) -> b
 
     N1: every poll must read active/running with the same nonzero MainPID and the same NRestarts as
     the first poll after start. An auto-restart (a new PID, a higher counter, or a state flip to
-    activating) fails the window. Any unreadable state raises, which the caller treats as failure.
-    Polling is 1s so a crash is seen quickly. An unreadable state in the window is a failure (R1).
+    activating) fails the window. Polling is 1s so a crash is seen quickly.
+    R1: any unreadable state, including the first read, is a failed check, not an exception. The caller
+    then stops the new code and restores the previous release; a raise would skip abort_swap.
     """
     if not check():
         return False
-    first = unit_state()
-    if not can_drain(first):
-        return False
-    deadline = clock() + seconds
-    while clock() < deadline:
-        sleep(1.0)
-        # R1: an unreadable state inside the window is a failed check, not an exception. The caller then
-        # stops the new code and restores the previous release; a raise here would skip abort_swap.
-        try:
+    try:
+        first = unit_state()
+        if not can_drain(first):
+            return False
+        deadline = clock() + seconds
+        while clock() < deadline:
+            sleep(1.0)
             now = unit_state()
-        except LifecycleError:
-            return False
-        if not can_drain(now) or now['MainPID'] != first['MainPID'] or now['NRestarts'] != first['NRestarts']:
-            return False
+            if not can_drain(now) or now['MainPID'] != first['MainPID'] or now['NRestarts'] != first['NRestarts']:
+                return False
+    except LifecycleError:
+        return False
     return True
 
 
