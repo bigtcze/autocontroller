@@ -26,6 +26,15 @@ Status: unreleased; under development. No public release has been published.
   checksum-verified updates; scoped, bounded learning adapter for agents.
 - **Bootstrap policy** (`bootstrap_policy.py`, `standards/GOLDEN_STANDARD.md`):
   versioned repository contract verified at the exact merged commit.
+- **Release artifacts** (`release_artifacts.py`, `.github/workflows/release.yml`;
+  offline-tested, not yet run on GitHub): reproducible `autocontroller-<tag>.tar.gz`
+  and `SHA256SUMS` built from a git commit; the tag commit is qualified (green push
+  CI, no open `release-blocker` Issues, evidence for feature releases), built in the
+  four supported containers, and published only after asset digest verification.
+- **Lifecycle CLI** (`lifecycle.py`; offline-tested, never run against a real
+  release): `update` and `rollback` (verified release, drain, one kept previous
+  release, health check, automatic rollback), `remove`, `uninstall`, `status`,
+  `doctor`, `memory inspect`, and the refusal inside agent sessions.
 
 ## Non-goals
 
@@ -38,9 +47,10 @@ is explicit; see `.agents/SECURITY.md`), bypassing protections.
 
 - Live acceptance on fresh VMs and real GitHub/OpenCode services
   (`docs/VALIDATION.md`) has not been performed.
-- Release archives, checksums, managed stable update with drain/rollback
-  (including controller self-update), project removal, uninstall and memory
-  inspection are not implemented (tracked in GitHub Issues).
+- Managed `update` and `rollback` have not run against a real release, because no
+  public release exists yet. Their GitHub download and digest checks are simulated.
+- The controller never updates itself; this is by design, not a gap.
+- The agent refusal in lifecycle commands is a logical guard, not a sandbox.
 
 ## Compatibility obligations
 
@@ -52,3 +62,9 @@ is explicit; see `.agents/SECURITY.md`), bypassing protections.
   `Autocontroller-Release:`), selector result lines and the aggregate check
   name `required` are interfaces of running installations; change them only
   with migration and an authorized Issue.
+- Lifecycle and release interfaces: the drain state files `state/drain.request`
+  and `state/drain.ready` (the same names in `lifecycle.py` and
+  `autonomy-controller.py`); the config keys `update_repository` and
+  `release.blocker_label`; the archive layout `autocontroller-<tag>/` with its
+  `VERSION` and `MANIFEST.sha256` files; the `release-blocker` label; and
+  `docs/releases/<tag>.evidence.json` schema 1.

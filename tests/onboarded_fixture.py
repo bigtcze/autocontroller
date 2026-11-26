@@ -16,5 +16,6 @@ def onboarded_project_entry(*, name, repo, directory, base_branch, project_owner
         'bootstrap_issue': bootstrap_issue, 'standard_version': standard_version,
         'release': {'enabled': True, 'approver': approver, 'workflow': 'release.yml',
                     'strategy': 'tag_workflow', 'maintenance_days': 14,
-                    'maintenance_min_renovate_prs': 3, 'required_assets': []},
+                    'maintenance_min_renovate_prs': 3, 'required_assets': [],
+                    'blocker_label': 'release-blocker'},
     }

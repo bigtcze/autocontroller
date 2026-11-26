@@ -15,6 +15,7 @@ import fcntl
 
 from bootstrap_policy import VERSION
 import release_policy as releases
+import lifecycle
 
 ROOT = Path(__file__).resolve().parent
 CONFIG = ROOT/'config.json'
@@ -241,7 +242,7 @@ def onboard(url=None):
     cfg={'name':name,'enabled':True,'repo':repo,'directory':str(directory),'base_branch':branch,
          'project_owner':owner,'project_number':project.number,'required_check':'required',
          'required_workflow':'required.yml','merge_method':method,'bootstrap_issue':bootstrap,'standard_version':VERSION,
-         'release':{'enabled':True,'approver':user['login'],'workflow':'release.yml','strategy':'tag_workflow','maintenance_days':14,'maintenance_min_renovate_prs':3,'required_assets':[]}}
+         'release':{'enabled':True,'approver':user['login'],'workflow':'release.yml','strategy':'tag_workflow','maintenance_days':14,'maintenance_min_renovate_prs':3,'required_assets':[],'blocker_label':'release-blocker'}}
     config.setdefault('state_dir',str(ROOT/'state'));config.setdefault('wrapper',str(ROOT/'opencode-project-safe.py'));config.setdefault('opencode',binary)
     config['projects'].append(cfg)
     c.validate_config(config)
@@ -253,18 +254,128 @@ def onboard(url=None):
     print(f'\nOnboarded {repo}. Bootstrap issue: https://github.com/{repo}/issues/{bootstrap}\nBacklog: {project_url}\nEnable Renovate for this repository: https://github.com/apps/renovate\nUse autocontroller status and autocontroller logs to monitor startup. Add future real GitHub Issues to this Project; no manual Ready state is needed.')
 
 
+def lifecycle_action(action, args):
+    """update/rollback: agent refusal first, then confirmation, then locks inside lifecycle.operation."""
+    lifecycle.refuse_agent(os.environ, action)
+    if action=='rollback':
+        if args.tag: raise ValueError('--tag applies to update only')
+        if args.recover:
+            return lifecycle.recover(ROOT,yes=args.yes,environ=os.environ,drain_timeout=args.drain_timeout,
+                                     health_seconds=args.health_seconds)
+        return lifecycle.rollback(ROOT,yes=args.yes,environ=os.environ,health_seconds=args.health_seconds,
+                                  drain_timeout=args.drain_timeout)
+    tag=args.tag
+    if tag is not None and not releases.version(tag): raise ValueError('--tag must be a stable vX.Y.Z release')
+    config=c.json_read(CONFIG,c.json_read(ROOT/'config.example.json'))
+    repo=config.get('update_repository','bigtcze/autocontroller')
+    if not isinstance(repo,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*',repo):
+        raise ValueError('update_repository must be OWNER/REPOSITORY')
+    return lifecycle.update(ROOT,repo,gh=lifecycle.LiveGitHub(),tag=tag,yes=args.yes,environ=os.environ,
+                            health_seconds=args.health_seconds,drain_timeout=args.drain_timeout)
+
+
+def unit_and_bin_dirs():
+    home=Path.home()
+    return home/'.config/systemd/user', home/'.local/bin'
+
+
+def uninstall_action(args):
+    """Guard first (inside lifecycle.uninstall, before any prompt), then the operation."""
+    unit_dir,bin_dir=unit_and_bin_dirs()
+    return lifecycle.uninstall(ROOT,unit_dir=unit_dir,bin_dir=bin_dir,environ=os.environ,yes=args.yes,purge=args.purge,
+                               drain_timeout=args.drain_timeout)
+
+
+def remove_action(args):
+    """Guard first (inside lifecycle.remove, before any prompt), then the operation."""
+    if not args.url: raise ValueError('remove needs a repository URL or OWNER/REPOSITORY')
+    return lifecycle.remove(ROOT,args.url,environ=os.environ,yes=args.yes,force=args.force,
+                            delete_local_data=args.delete_local_data,drain_timeout=args.drain_timeout)
+
+
+def memory_inspect_action(args):
+    """Read-only: state/memory metrics and version; --query performs one GET /search. Never a write."""
+    import memory as learning
+    if not args.url: raise ValueError('memory inspect needs OWNER/REPOSITORY')
+    repo=lifecycle.canonical_repo(args.url)
+    try:
+        lines=learning.inspect(ROOT/'state',repo,query=args.query,shared=args.shared)
+    except (learning.MemoryError,ValueError,OSError,KeyError,TypeError) as exc:
+        raise lifecycle.LifecycleError(f'memory inspect could not reach Engram: {exc}') from exc
+    print('\n'.join(lines))
+
+
+def status_action():
+    """Read-only summary, then the existing systemctl status output.
+
+    An unreadable unit state prints `service: unknown` and does not raise: status is a report, and the
+    systemctl status output below still shows what the unit is doing. Only the summary line changes.
+    """
+    try:
+        active=lifecycle.service_active()
+    except lifecycle.LifecycleError:
+        active=None
+    for line in lifecycle.status_lines(ROOT,active=active): print(line)
+    run('systemctl','--user','status','autocontroller.service','--no-pager')
+
+
+def doctor_action():
+    """Existing preflight and controller check, plus install integrity. Exits nonzero on any failure."""
+    unit_dir,bin_dir=unit_and_bin_dirs()
+    failures,warnings=lifecycle.diagnose(ROOT,unit_dir=unit_dir,bin_dir=bin_dir)
+    for line in warnings: print(f'warning: {line}')
+    for line in failures: print(f'FAILED: {line}')
+    runtime_preflight(opencode_binary()); run(sys.executable,str(ROOT/'autonomy-controller.py'),'--check')
+    if failures: raise lifecycle.LifecycleError(f'doctor found {len(failures)} failure(s)')
+
+
+def _positive_seconds(text: str) -> float:
+    """argparse type for timeouts: a finite number greater than zero. NaN and inf would never end a wait."""
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f'not a number of seconds: {text!r}')
+    if not (value == value and value not in (float('inf'), float('-inf'))) or value <= 0:
+        raise argparse.ArgumentTypeError(f'must be finite and greater than 0: {text!r}')
+    return value
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',nargs='?',default='add',choices=['add','status','logs','doctor','memory','start','stop'])
+    parser.add_argument('action',nargs='?',default='add',choices=['add','status','logs','doctor','memory','start','stop','update','rollback','uninstall','remove'])
     parser.add_argument('url',nargs='?')
+    parser.add_argument('subject',nargs='?',help='memory: "inspect" (read-only)')
+    parser.add_argument('--query',help='memory inspect: one read-only search of the project memory')
+    parser.add_argument('--shared',action='store_true',help='memory inspect: search the shared scope instead')
+    parser.add_argument('--force',action='store_true',help='remove: allow removing a project with an in-flight cycle (state files are kept)')
+    parser.add_argument('--delete-local-data',action='store_true',help='remove: also delete the clean, fully pushed checkout and its state/projects entry')
+    parser.add_argument('--yes',action='store_true',help='skip the confirmation prompt (update/rollback/uninstall)')
+    parser.add_argument('--tag',help='update to this stable vX.Y.Z release instead of the latest')
+    parser.add_argument('--health-seconds',type=_positive_seconds,default=30,help='seconds the service must stay active after update/rollback (finite, > 0)')
+    parser.add_argument('--purge',action='store_true',help='uninstall: also delete config.json and state/ (requires typing "purge")')
+    parser.add_argument('--recover',action='store_true',help='rollback: resolve an interrupted rollback by restoring the release it replaced (rollback/swap)')
+    parser.add_argument('--drain-timeout',type=_positive_seconds,default=lifecycle.DEFAULT_DRAIN_TIMEOUT,help='update/rollback/remove/uninstall: seconds to wait for workers to drain before stopping (default 3600; finite, > 0)')
     args=parser.parse_args()
     os.umask(0o077)
-    if args.action=='status': run('systemctl','--user','status','autocontroller.service','--no-pager');return
+    if args.recover and args.action!='rollback':
+        raise ValueError('--recover applies to rollback only')
+    if args.action in ('update','rollback'):
+        print(lifecycle_action(args.action,args)); return
+    if args.action=='uninstall':
+        print(uninstall_action(args)); return
+    if args.action=='remove':
+        print(remove_action(args)); return
+    if args.action=='memory' and args.url=='inspect':
+        # `memory inspect OWNER/REPO`: the subcommand takes the url slot, the repo takes subject.
+        args.url=args.subject
+        memory_inspect_action(args); return
+    if args.action=='memory' and args.url is not None:
+        raise ValueError('memory subcommand must be "inspect"')
+    if args.action=='status': status_action();return
     if args.action=='logs': run('journalctl','--user','-u','autocontroller.service','-n','50','-f');return
     if args.action in ('start','stop'): run('systemctl','--user',args.action,'autocontroller.service');return
     if args.action=='memory': run(sys.executable,str(ROOT/'memory.py'),'--health');return
-    if args.action=='doctor':
-        runtime_preflight(opencode_binary());run(sys.executable,str(ROOT/'autonomy-controller.py'),'--check');return
+    if args.action=='doctor': doctor_action();return
     with (ROOT/'onboarding.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         onboard(args.url)
@@ -272,5 +383,5 @@ def main():
 
 if __name__=='__main__':
     try: main()
-    except (ValueError, OSError, RuntimeError, c.ControllerError, subprocess.CalledProcessError) as exc:
+    except (ValueError, OSError, RuntimeError, c.ControllerError, subprocess.CalledProcessError, lifecycle.LifecycleError) as exc:
         print(f'AutoController: {exc}',file=sys.stderr);sys.exit(1)

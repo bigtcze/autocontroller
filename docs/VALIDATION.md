@@ -11,12 +11,17 @@ The `required` check (`.github/workflows/required.yml` → `regression.yml`) run
 - Repository contract checks: bootstrap contract files, workflow safety (no `pull_request_target`, no secrets, pinned actions, aggregate gate), no personal paths or tokens.
 - Offline E2E acceptance: scenarios 1–8 against the real controller, with GitHub and OMO agent doubles. `tests/test_e2e_controller.py` (40 tests) uses a scripted wrapper double; `tests/test_e2e_real_wrapper.py` (3 tests) runs the real `opencode-project-safe.py` against a fake OpenCode V2 CLI; `tests/test_e2e_memory_cli.py` (13 tests) runs the real `memory.cli()`, and checks the Engram backend identity. Engram is the stand-in by default, or upstream binary when `E2E_ENGRAM_BINARY` is set. The scenario→test mapping and every stand-in limit are in [E2E_TESTING.md](E2E_TESTING.md). Nothing in this suite is verified against a live service.
 - Live-smoke guard and body tests (`tests/test_live_smoke_guards.py`, 37 tests; `tests/test_live_smoke_run.py`, 25 tests). They exercise `scripts/live-smoke.py` only through fake `gh`/`git`/`opencode` shims. The live smoke itself is never run by automation.
+- Release artifacts and qualification, offline: `tests/test_release_artifacts.py` (archive build, validated extraction, `SHA256SUMS` and `MANIFEST.sha256` checks), `tests/test_release_qualification.py` (tag-commit qualification: green push CI, open `release-blocker` Issues, evidence validation and ancestry), and `tests/test_release_workflow.py` (`release.yml` structure and safety). `tests/test_release_policy.py` also covers the blocker and evidence rules.
+- Lifecycle commands, offline: `tests/test_lifecycle_core.py` (locks, program-file swap, snapshots, `history.json`), `tests/test_lifecycle_update.py` (`update` and `rollback` with a simulated GitHub and a fake `systemctl`: digest checks, downgrade refusal, health failure and automatic rollback), `tests/test_drain.py` and `tests/test_lifecycle_drain.py` (drain handshake with the workers and the timeout), `tests/test_lifecycle_status.py` (`status` and `doctor` helpers), `tests/test_lifecycle_cli.py` (CLI wiring, agent refusal, confirmation), `tests/test_lifecycle_uninstall.py`, `tests/test_lifecycle_remove.py` (safe removal and `--delete-local-data` refusals), and `tests/test_memory_inspect.py` (read-only inspection against a fake backend).
+- Simulated only: none of these modules contacts GitHub, `systemctl`, `gh` or Engram. The release and update paths use local archives, a fake GitHub API and fake `systemctl`.
 
 The suite simulates GitHub, OpenCode and Engram: scheduling, checkpoints and recovery, CI/merge gates, Renovate identity and fork rejection, onboarding import authorization, release policy, safe-wrapper recovery against a fake OpenCode API, and Engram runtime staging with fake binaries.
 
 Simulated onboarding (`tests/test_onboarding_integration.py`) runs the real `onboarding.py` in a disposable install root, temporary HOME and bare remotes, against fake `gh`, `opencode` and `systemctl` stand-ins. It covers the happy paths, merge-mode and permission refusals, the OAuth handoff, a fault-injected interruption at each of 16 phases with exact-state resume, duplicate prevention, the lock, preserved config and admission isolation. The simulated GitHub contract, its fault model and its unverified assumptions are listed in [ONBOARDING_TESTING.md](ONBOARDING_TESTING.md).
 
 The selector is covered for comment-only changes: an outsider comment or `updated_at` bump after a no-action decision does not start a new OMO session, while body, label and status changes do (`tests/test_agent_backlog_selection.py`, `tests/test_admission_and_authority.py`). Known limits: only the 100 most recently updated issues are read, so an Issue outside that window changes its label, state, milestone or dependencies without waking triage until the daily recheck; and the first iteration after the signature upgrade causes one deliberate re-selection per project.
+
+Reproducible release archives were checked locally, not in CI. The orchestrator built commit `1e2339006253abf3ab73ba7dc149990a82e850f6` (built as `v0.0.1`, using that commit's own `release_artifacts.py`) in `debian:12`, `debian:13`, `ubuntu:24.04` and `ubuntu:26.04` containers and on the host. All five archives verified and had identical SHA256 digests: `21cb554e1b3d4551c2fe0193608b7000332010250852b3cfdc4d2cda74b4a4ba`. This was a local run. No `release.yml` run has happened on GitHub.
 
 These are simulated results. They do not show that real GitHub, `gh` or OpenCode behave as the stand-ins do. Live onboarding and live selector behaviour are not performed by any automated check. Containers prove OS/Python compatibility only. They do **not** prove systemd, lingering, APT installation, reboot survival, live GitHub/OpenCode behaviour or release publication; those remain in the live acceptance below.
 
@@ -63,6 +68,18 @@ readiness race, since fixed in the harness.
 
 These are local runs. The scheduled workflow has not run on GitHub.
 
+## Release and lifecycle paths: simulated only
+
+The following have been exercised only by the offline suite or the local reproducibility check above. None of them has been executed live:
+
+- `release.yml` publication: qualification, the draft release, asset digest verification and publish have not run on GitHub.
+- Docker reproducibility builds in CI: the container builds have run only locally, as described above.
+- Container images are not pinned: `regression.yml` and `release.yml` use the tag names `debian:12`, `debian:13`, `ubuntu:24.04` and `ubuntu:26.04`, not digests, so a rebuilt tag can change the base image. Digest pinning is deferred and not implemented.
+- Real `update` against GitHub Releases: no published release exists, so `update` and `rollback` have only run against the simulated GitHub API and fake `systemctl`.
+- Digest presence on real release assets: GitHub's digests for uploaded assets have not been observed.
+
+Release-specific qualification status and evidence are tracked in the GitHub release Issues; the requirements are in `.agents/RELEASE_QUALITY.md`. Evidence files for feature releases are described in [docs/releases/README.md](releases/README.md).
+
 ## Live acceptance (not yet performed)
 
 Release-specific qualification status and evidence are tracked in the GitHub release Issues; the requirements are in `.agents/RELEASE_QUALITY.md`.
@@ -78,8 +95,9 @@ Release-specific qualification status and evidence are tracked in the GitHub rel
 
 ## Current known limitations
 
+- Health window (S8, deferred, not implemented): after an update or rollback the service must stay active for `--health-seconds`. The window reads `systemctl show` once per second and requires `ActiveState=active`, `SubState=running`, a nonzero `MainPID` and the same `MainPID` and `NRestarts` as the first poll. An auto-restart, a PID change or an `activating` state fails it; unreadable output fails closed. That is process liveness only, not a heartbeat: a controller that is running but stuck still passes the window.
 - Role endpoint and GitHub APIs are documented but this onboarding implementation has not been exercised against live services. Agent quality and permissions are not sandboxed. A working API and role existence do not prove the provider can complete a task.
-- Existing issues are imported once; future issues must be real Issues that a maintainer adds to the Project. Issues are never enrolled automatically (by design). No automated controller self-update, removal command, uninstaller, OS certification or memory browser yet.
+- Existing issues are imported once; future issues must be real Issues that a maintainer adds to the Project. Issues are never enrolled automatically (by design). The controller never updates itself by design; `update` and `rollback` are user-invoked. `remove`, `uninstall` and `memory inspect` exist as offline-tested commands, but none has run against a live installation. OS certification is not done.
 - Installed git/gh/mise binaries are reused; Engram updates automatically per boot. OS package updates follow APT. `--install-only` preserves runtime configuration.
 - Onboarding currently assumes repository-owner Project creation rights. It refuses closed/ambiguous bootstrap or Project records. If interrupted with an unexpected dirty checkout, it stops for inspection rather than resetting or discarding user work.
 - New releases use the standard default cadence and empty asset allowlist; exact required artifact names must be established for products that publish assets before public release qualification.

@@ -54,5 +54,6 @@ Git config, removes GitHub/provider tokens, and puts failing shims for `gh`,
   merge methods, real CI interaction, Renovate App behaviour.
 - Live OpenCode/OMO sessions, provider quotas and real Engram releases.
 - Release workflow publication (never triggered during development).
+- Managed `update` and `rollback` against real GitHub Releases: simulated only (fake GitHub API and `gh`, local archives). Digest presence on real release assets is not verified.
 
 These are tracked in `docs/VALIDATION.md` and dedicated Issues.

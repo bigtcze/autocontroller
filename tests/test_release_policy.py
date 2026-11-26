@@ -172,10 +172,19 @@ class ControllerReleaseTests(unittest.TestCase):
         cp={'kind':'maintenance','number':0,'url':'v1.2.5','phase':'release-publish',
             'release_tag':'v1.2.5','release_sha':SHA,'previous_release_tag':'v1.2.4'}
         self.w.save_checkpoint(cp)
-        with patch.object(self.w,'release_latest',return_value=PREV),patch.object(self.w,'ensure_release_pipeline'),patch.object(ctl,'main_ci_state',return_value='passed'),patch.object(rp,'compare_tag_to_sha',return_value=True),patch.object(ctl,'push_annotated_tag') as tag,patch.object(self.w,'release_request') as approval:
+        with patch.object(self.w,'release_latest',return_value=PREV),patch.object(self.w,'ensure_release_pipeline'),patch.object(ctl,'main_ci_state',return_value='passed'),patch.object(rp,'compare_tag_to_sha',return_value=True),patch.object(ctl,'gh_api_pages',return_value=[]),patch.object(ctl,'push_annotated_tag') as tag,patch.object(self.w,'release_request') as approval:
             self.w.publish_release_cycle(cp,'maintenance',0,None)
             approval.assert_not_called();tag.assert_called_once_with('org/demo','v1.2.5',SHA)
         self.assertEqual(ctl.json_read(self.w.cycle_state)['phase'],'release-verify')
+    def test_maintenance_publish_is_blocked_by_open_release_blocker(self):
+        cp={'kind':'maintenance','number':0,'url':'v1.2.5','phase':'release-publish',
+            'release_tag':'v1.2.5','release_sha':SHA,'previous_release_tag':'v1.2.4'}
+        self.w.save_checkpoint(cp)
+        blocker=[{'number':7,'state':'open'}]
+        with patch.object(self.w,'release_latest',return_value=PREV),patch.object(self.w,'ensure_release_pipeline'),patch.object(ctl,'main_ci_state',return_value='passed'),patch.object(rp,'compare_tag_to_sha',return_value=True),patch.object(ctl,'gh_api_pages',return_value=blocker),patch.object(ctl,'push_annotated_tag') as tag:
+            self.w.publish_release_cycle(cp,'maintenance',0,None)
+            tag.assert_not_called()
+        self.assertEqual(ctl.json_read(self.w.cycle_state)['phase'],'release-publish')
     def test_verify_waits_for_artifacts(self):
         cp={'kind':'maintenance','number':0,'url':'v1.2.5','phase':'release-verify',
             'release_tag':'v1.2.5','release_sha':SHA,'previous_release_tag':'v1.2.4'}

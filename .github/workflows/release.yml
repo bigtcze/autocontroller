@@ -1,6 +1,13 @@
 # Tag-triggered native release. Only the controller or owner pushes release tags;
-# agents never create tags or releases. Artifact archives and checksums are owned
-# by a later Issue and are intentionally absent here.
+# agents never create tags or releases.
+#
+# Jobs, in order:
+#   qualify    regression matrix (reusable regression.yml; its jobs carry timeouts)
+#   candidate  SemVer + main ancestry, then release_artifacts.py qualify (read-only)
+#   artifacts  reproducible archive built in four distribution containers (read-only)
+#   publish    the only job with contents: write. Rebuilds, compares the SHA256 with
+#              the artifacts job, creates a DRAFT, verifies its asset digests, and
+#              only then publishes it (never a prerelease).
 name: release
 on:
   push:
@@ -14,13 +21,15 @@ jobs:
   qualify:
     name: qualify
     uses: ./.github/workflows/regression.yml
-  publish:
-    name: publish
+  candidate:
+    name: candidate
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     needs: [qualify]
     permissions:
-      contents: write
+      contents: read
+      actions: read
+      issues: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -40,16 +49,142 @@ jobs:
             echo "Tagged commit $GITHUB_SHA is not an ancestor of origin/main" >&2
             exit 1
           fi
-      - name: Create GitHub Release
+      - name: Qualify release candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: python3 release_artifacts.py qualify --repo "$GH_REPO" --tag "$TAG" --sha "$SHA"
+  artifacts:
+    name: artifacts
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    needs: [candidate]
+    permissions:
+      contents: read
+    outputs:
+      sha256: ${{ steps.digest.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build archives in each distribution container
+        env:
+          TAG: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Refusing non-SemVer tag: $TAG" >&2
+            exit 1
+          fi
+          out_root="$RUNNER_TEMP/dist"
+          for image in debian:12 debian:13 ubuntu:24.04 ubuntu:26.04; do
+            out="$out_root/${image//[:\/]/-}"
+            mkdir -p "$out"
+            # Tag and commit arrive through the environment; the container script is a fixed string.
+            docker run --rm --env TAG --env COMMIT \
+              --volume "$GITHUB_WORKSPACE:/src:ro" \
+              --volume "$out:/out" \
+              "$image" bash -euo pipefail -c '
+                export DEBIAN_FRONTEND=noninteractive
+                apt-get update
+                apt-get install -y --no-install-recommends git python3 ca-certificates
+                python3 /src/release_artifacts.py build --repo /src --tag "$TAG" --commit "$COMMIT" --out /out
+              '
+          done
+      - name: Verify every build and require byte-identical checksums
+        env:
+          TAG: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          out_root="$RUNNER_TEMP/dist"
+          first=""
+          for dir in "$out_root"/*/; do
+            python3 release_artifacts.py verify --dist "$dir" --tag "$TAG" --commit "$COMMIT"
+            if [[ -z "$first" ]]; then
+              first="$dir"
+            else
+              cmp "$first/SHA256SUMS" "$dir/SHA256SUMS"
+            fi
+          done
+          test -n "$first"
+          test "$(ls -d "$out_root"/*/ | wc -l)" = 4
+      - name: Export archive digest
+        id: digest
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          sums="$(find "$RUNNER_TEMP/dist" -name SHA256SUMS -print -quit)"
+          digest="$(cut -d' ' -f1 "$sums")"
+          if ! [[ "$digest" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Malformed archive digest" >&2
+            exit 1
+          fi
+          echo "sha256=$digest" >> "$GITHUB_OUTPUT"
+  publish:
+    name: publish
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    needs: [qualify, artifacts]
+    permissions:
+      contents: write
+      issues: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify tag and ancestry on main
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Refusing non-SemVer tag: $TAG" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "Tagged commit $GITHUB_SHA is not an ancestor of origin/main" >&2
+            exit 1
+          fi
+      - name: Rebuild with runner Python and compare with artifacts
+        env:
+          TAG: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+          EXPECTED_SHA256: ${{ needs.artifacts.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Missing artifacts digest; refusing publication" >&2
+            exit 1
+          fi
+          python3 release_artifacts.py build --repo . --tag "$TAG" --commit "$COMMIT" --out "$RUNNER_TEMP/publish"
+          python3 release_artifacts.py verify --dist "$RUNNER_TEMP/publish" --tag "$TAG" --commit "$COMMIT"
+          actual="$(sha256sum "$RUNNER_TEMP/publish/autocontroller-$TAG.tar.gz" | cut -d' ' -f1)"
+          if [[ "$actual" != "$EXPECTED_SHA256" ]]; then
+            echo "Rebuilt archive $actual differs from artifacts $EXPECTED_SHA256" >&2
+            exit 1
+          fi
+      - name: Create verified draft, check blockers, then publish by release ID
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          dist="$RUNNER_TEMP/publish"
+          # release_artifacts.py publish refuses an existing published release, deletes stale
+          # drafts, creates the draft, verifies its two asset digests and re-checks blockers.
           if [[ -f "docs/releases/$TAG.md" ]]; then
-            notes=(--notes-file "docs/releases/$TAG.md")
+            python3 release_artifacts.py publish --repo "$GH_REPO" --tag "$TAG" --dist "$dist" \
+              --notes-file "docs/releases/$TAG.md"
           else
-            notes=(--generate-notes)
+            python3 release_artifacts.py publish --repo "$GH_REPO" --tag "$TAG" --dist "$dist" \
+              --generate-notes
           fi
-          gh release create "$TAG" --verify-tag "${notes[@]}"

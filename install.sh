@@ -43,11 +43,20 @@ fi
 python3 -c 'import sys; assert sys.version_info >= (3,11), "Python 3.11+ is required"'
 mkdir -p "$TARGET" "$TARGET/state" "$UNIT_DIR" "$HOME/.local/bin"
 chmod 700 "$TARGET" "$TARGET/state"
-for file in autonomy-controller.py opencode-project-safe.py release_policy.py memory.py bootstrap_policy.py onboarding.py install.sh; do
+for file in autonomy-controller.py opencode-project-safe.py release_policy.py release_artifacts.py memory.py bootstrap_policy.py onboarding.py lifecycle.py install.sh; do
  [[ "$SOURCE/$file" == "$TARGET/$file" ]] || install -m 700 "$SOURCE/$file" "$TARGET/$file"
 done
 for file in README.md config.example.json autocontroller.service; do
  [[ "$SOURCE/$file" == "$TARGET/$file" ]] || install -m 600 "$SOURCE/$file" "$TARGET/$file"
+done
+# Release archives carry VERSION and MANIFEST.sha256; source checkouts do not. A source
+# install must never keep a stale release version from an earlier archive install.
+for file in VERSION MANIFEST.sha256 PROGRAM.json; do
+ if [[ -f "$SOURCE/$file" ]]; then
+  [[ "$SOURCE/$file" == "$TARGET/$file" ]] || install -m 600 "$SOURCE/$file" "$TARGET/$file"
+ else
+  rm -f "$TARGET/$file"
+ fi
 done
 for dir in skills standards tests; do
  mkdir -p "$TARGET/$dir"

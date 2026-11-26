@@ -98,14 +98,15 @@ class FakeGitHub:
 
     def add_issue(self, repo: str, *, title: str, body: str = '', state: str = 'open',
                   project: str | None = None, status: str = 'Backlog',
-                  association: str = 'OWNER', author: dict | None = None) -> int:
+                  association: str = 'OWNER', author: dict | None = None,
+                  labels: tuple = ()) -> int:
         def change(d):
             r = d['repos'][repo]
             n = max([int(k) for k in r['issues']] + [0]) + 1
             r['issues'][str(n)] = {'number': n, 'title': title, 'body': body, 'state': state,
                                    'author_association': association,
                                    'user': author or {'login': 'example-author', 'type': 'User', 'id': 2002},
-                                   'labels': [], 'milestone': None, 'assignees': [], 'comments': 0,
+                                   'labels': [{'name': x} for x in labels], 'milestone': None, 'assignees': [], 'comments': 0,
                                    'html_url': f'https://github.com/{repo}/issues/{n}'}
             if project:
                 p = d['projects'][project]
@@ -459,8 +460,14 @@ class FakeGitHub:
         if rest == ['issues'] and parts[-1].startswith('issues'):
             rows = [self._public_issue(i) for i in r['issues'].values()]
             rows += [self._public_pr(p) | {'pull_request': {'url': 'x'}} for p in r['prs'].values()]
+            # Label filter as GitHub applies it: only when a `labels` query is present.
+            if 'labels' in query:
+                wanted = {x for x in query['labels'].split(',') if x}
+                rows = [x for x in rows if wanted <= {label['name'] for label in x.get('labels', [])}]
+            if query.get('state') == 'open':
+                rows = [x for x in rows if x.get('state') == 'open']
             rows = sorted(rows, key=lambda x: -x['number'])
-            return rows
+            return [rows] if slurp else rows
         if rest[:1] == ['issues'] and len(rest) == 2:
             issue = r['issues'].get(rest[1])
             if issue is None:
