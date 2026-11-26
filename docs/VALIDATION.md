@@ -57,6 +57,8 @@ These are local runs. The scheduled workflow has not run on GitHub.
 
 ## Live acceptance (not yet performed)
 
+Release-specific qualification status and evidence are tracked in the GitHub release Issues; the requirements are in `.agents/RELEASE_QUALITY.md`.
+
 - Fresh VM per supported distribution: install with no Git, gh, mise or Engram; complete GitHub device authorization and repository URL prompt; detach SSH; confirm continued service and reboot survival.
 - Exercise an initialized and an empty test repository, personal and organization ownership, non-main default branch, existing protection and multiple merge methods. Confirm one isolated Project per repo. Interrupt each onboarding phase and retry without duplicate Project/issue or overwriting local work. Verify scope, no PAT prompt, safe config permissions, stable identities and no accidental merge before consent.
 - Observe actual OMO bootstrap: agent reads existing contracts, creates real tests/mise tasks, required PR and push workflows, Renovate dashboard config, and native release pipeline. Verify CI for exact PR + merged SHA and a real failed CI that cannot merge. Confirm missing checks do not cause an indefinite bootstrap deadlock, and a manually closed bootstrap cannot unblock work.
@@ -67,7 +69,7 @@ These are local runs. The scheduled workflow has not run on GitHub.
 ## Current known limitations
 
 - Role endpoint and GitHub APIs are documented but this onboarding implementation has not been exercised against live services. Agent quality and permissions are not sandboxed. A working API and role existence do not prove the provider can complete a task.
-- Existing issues imported once; future issues must be real Issues added to the Project. No automatic enrollment of future issues outside it yet. No automated controller self-update, removal command, uninstaller, OS certification or memory browser yet.
+- Existing issues are imported once; future issues must be real Issues that a maintainer adds to the Project. Issues are never enrolled automatically (by design). No automated controller self-update, removal command, uninstaller, OS certification or memory browser yet.
 - Installed git/gh/mise binaries are reused; Engram updates automatically per boot. OS package updates follow APT. `--install-only` preserves runtime configuration.
 - Onboarding currently assumes repository-owner Project creation rights. It refuses closed/ambiguous bootstrap or Project records. If interrupted with an unexpected dirty checkout, it stops for inspection rather than resetting or discarding user work.
 - New releases use the standard default cadence and empty asset allowlist; exact required artifact names must be established for products that publish assets before public release qualification.

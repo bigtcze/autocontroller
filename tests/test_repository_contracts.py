@@ -250,6 +250,39 @@ class RepositoryContractTests(unittest.TestCase):
             with self.subTest(path=relative(path)):
                 self.assertIsNone(TOKEN.search(text), 'token-like string in repository text')
 
+    def test_release_contract_forbids_partial_public_releases(self):
+        # Whitespace is normalized so phrases may wrap across Markdown lines.
+        text = ' '.join((ROOT / '.agents' / 'RELEASE_QUALITY.md').read_text(encoding='utf-8').split()).lower()
+        self.assertNotIn('source-only', text)
+        for phrase in ('sha256 manifest', 'release-blocking', 'pre-release',
+                       'no partial releases', 'disposable systemd vm',
+                       'live sandbox acceptance', 'never a waived test',
+                       'technical maintenance releases need no owner approval',
+                       'meet every per-release requirement'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+
+    def test_no_prerelease_status_claims_in_user_docs_and_contracts(self):
+        banned = r'(?i)\b(alpha|beta|preview|mvp)\b'
+        for name in ('.agents/PRODUCT_SCOPE.md', '.agents/RELEASE_QUALITY.md'):
+            with self.subTest(path=name):
+                text = (ROOT / name).read_text(encoding='utf-8')
+                status = re.search(r'(?ms)^Status:.*?(?=\n\s*\n|\Z)', text)
+                self.assertIsNotNone(status, 'Status paragraph missing')
+                self.assertNotRegex(status.group(0), banned)
+        headings_and_quotes = [line for line in (ROOT / 'README.md').read_text(encoding='utf-8').splitlines()
+                               if line.startswith(('#', '>'))]
+        self.assertTrue(headings_and_quotes)
+        for line in headings_and_quotes:
+            with self.subTest(line=line):
+                self.assertNotRegex(line, banned)
+
+    def test_issue_admission_is_not_described_as_planned_auto_enrollment(self):
+        pattern = r'(?i)automatic (?:enrollment|import|adding)[^.]*\b(?:yet|not (?:yet )?implemented)\b'
+        for name in ('README.md', 'docs/VALIDATION.md', '.agents/PRODUCT_SCOPE.md'):
+            with self.subTest(path=name):
+                self.assertNotRegex((ROOT / name).read_text(encoding='utf-8'), pattern)
+
 
 if __name__ == '__main__':
     unittest.main()

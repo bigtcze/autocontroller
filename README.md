@@ -4,9 +4,9 @@
 
 AutoController coordinates existing OpenCode V2 and Oh My OpenCode Slim agents against native GitHub Issues, Projects and pull requests. It is not an AI provider, a new agent framework, or a second issue tracker. No Docker, web UI, separate database service or additional model is required by the controller itself.
 
-> **Development alpha — not a public release.** The controller core and simulated integrations are regression tested. Fresh-VM onboarding, live GitHub provisioning, and the first complete bootstrap PR have not yet passed live acceptance testing. Use a disposable trusted repository first. Licensed under the [MIT License](LICENSE).
+> **Unreleased development version — not a public release.** The controller core and simulated integrations are regression tested. Fresh-VM onboarding, live GitHub provisioning, and the first complete bootstrap PR have not yet passed live acceptance testing. Use a disposable trusted repository first. Licensed under the [MIT License](LICENSE).
 
-## Quick start (alpha)
+## Quick start (development)
 
 Target platforms: Debian 12/13 and Ubuntu 24.04/26.04 LTS on an amd64 or arm64 VM with systemd. These are the intended support matrix, not yet a certified clean-VM test matrix. Use a normal, sudo-capable account with OpenCode V2, OMO Slim (`orchestrator`, `fixer`, `oracle`) and a working, persistent provider configuration. The controller does not install, modify or upgrade OpenCode or OMO.
 
@@ -22,7 +22,7 @@ AutoController clones the repository into its own managed checkout, provisions a
 
 Engram installs on first service start; its stable release is checked at each VM boot. Memory is mandatory; if it becomes unusable, development stops and the recovery mechanism preserves checkpoints. No independent backup job is installed. The updater stages a transient generation of the database to test migrations before activating the new binary; it is not a retained backup.
 
-After setup, open the displayed GitHub Project to create or add **real repository Issues**, not draft Project cards. No manual Ready transition is required. Install the [Renovate GitHub App](https://github.com/apps/renovate) for the repository after the bootstrap has prepared its configuration. App authorization must be done by the owner. Future issues are managed explicitly through the Project; automatic import of newly created issues outside the Project is not yet implemented.
+After setup, open the displayed GitHub Project to create or add **real repository Issues**, not draft Project cards. No manual Ready transition is required. Install the [Renovate GitHub App](https://github.com/apps/renovate) for the repository after the bootstrap has prepared its configuration. App authorization must be done by the owner. Issues are never added to the Project automatically after onboarding; a maintainer admits each Issue by adding it to the Project (by design, not a missing feature).
 
 ## Daily use
 

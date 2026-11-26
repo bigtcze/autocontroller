@@ -40,6 +40,12 @@ Git config, removes GitHub/provider tokens, and puts failing shims for `gh`,
   without merge, missing evidence).
 - No silent skipping: tests must not `skipTest` based on environment to hide
   failures. Full suite green is required for acceptance.
+- Scope: the rules above govern the regression suite wherever it runs. The
+  scheduled VM suite (`vm-lifecycle.yml`) uses real packages and network but no
+  secrets (see `docs/VM_TESTING.md`). Release live acceptance (see
+  `.agents/RELEASE_QUALITY.md`) is a separate, explicitly invoked path with
+  isolated nonproduction sandbox credentials and repositories and bounded AI
+  spend. It never runs in PR jobs or with privileged secrets.
 
 ## Inherited gaps (not covered by automation)
 
