@@ -59,7 +59,10 @@ instance.
 - **GitHub content** (Issues, PRs, comments, branch names, fork PRs): untrusted.
   Renovate work requires the verified `renovate[bot]` Bot identity and a
   same-repository head; linked/repair/release PRs from forks are ignored.
-  Project membership plus a nonterminal status authorizes scheduling.
+  Scheduling authority is the Project Status: `Todo`/`To do` for new work,
+  `In Progress`/`Review` for recovery (see `.agents/SECURITY.md` "Work
+  authorization"). The only post-onboarding addition the controller makes to the
+  Project is bounded follow-up admission through `followup.py`.
 - **Agents**: run with the controller user's privileges; not sandboxed. The
   controller independently verifies GitHub state rather than trusting agent
   claims.

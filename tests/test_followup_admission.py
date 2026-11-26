@@ -5,7 +5,6 @@ and the controller read. Nothing here runs gh or touches the network. Controller
 drive the real ProjectWorker.one_iteration against the same fake.
 """
 import importlib.util
-import importlib.util
 import json
 import re
 import shutil
@@ -59,7 +58,7 @@ class FakeGitHub:
     Shapes mirror the live gh/REST output that followup.py reads:
       api user                              -> {login, id}
       api repos/R/issues/N                  -> {id, number, state, html_url, user{login,id}, pull_request?}
-      api repos/R/issues?...&creator=&since -> paginated list (honours creator and since)
+      api repos/R/issues?state=all&since=...  -> paginated list (honours since on updated_at)
       api repos/R/issues/N/dependencies/blocked_by GET/POST
       project item-list/view/field-list/item-add/item-edit
       issue create (body on stdin)
@@ -74,8 +73,10 @@ class FakeGitHub:
         self.viewer_login = VIEWER_LOGIN
         self.viewer_id = VIEWER_ID
         self.todo_option = 'opt-todo'
+        self.todo_option_name = 'Todo'
         self.has_status_field = True
         self.fail = {}                                # argv key -> remaining injected failures
+        self.lost_reply = []                          # per issue-create: None | 'error' | 'empty' | 'garbage'
         self.edits = []
         self.created = []                             # (repo, number) created by issue create
         self.add_issue(REPO, PARENT, title='parent', state='open', status='In Progress', user_id=VIEWER_ID)
@@ -83,9 +84,12 @@ class FakeGitHub:
     # ---- fixture helpers
     def add_issue(self, repo, number, *, title='t', body='', state='open', status=None,
                   user_id=VIEWER_ID, login=None, pull_request=False, in_project=True):
+        now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        # Realistic REST shape: `url` is the API URL, `html_url` the web URL.
         issue = {'number': number, 'title': title, 'body': body, 'state': state,
+                 'url': f'https://api.github.com/repos/{repo}/issues/{number}',
                  'html_url': url_for(repo, number), 'id': ISSUE_ID_BASE + number,
-                 'created_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                 'created_at': now, 'updated_at': now,
                  'user': {'login': login or self.viewer_login, 'id': user_id, 'type': 'User'}}
         if pull_request:
             issue['pull_request'] = {'url': 'x'}
@@ -125,13 +129,22 @@ class FakeGitHub:
     def command(self, argv, *, stdin=None, timeout=120):
         self.calls.append(list(argv))
         if argv[:2] == ['issue', 'create']:
-            self._check('issue create')
             repo = next(a.split('=', 1)[1] for a in argv if a.startswith('--repo='))
             title = next(a.split('=', 1)[1] for a in argv if a.startswith('--title='))
             number = self.next_number
             self.next_number += 1
             self.add_issue(repo, number, title=title, body=stdin or '', user_id=self.viewer_id)
             self.created.append((repo, number))
+            # Server-side success with a lost response: the issue exists, but the reply is
+            # an error (rc != 0) or empty/unparsable. Both must be adopted on retry.
+            mode = self.lost_reply.pop(0) if self.lost_reply else None
+            if mode == 'error':
+                raise f.FollowupError('gh rc=1: connection reset after server accepted the issue')
+            if mode == 'empty':
+                return ''
+            if mode == 'garbage':
+                return '<html>502 Bad Gateway</html>'
+            self._check('issue create')
             return url_for(repo, number) + '\n'
         if argv[:2] == ['project', 'item-add']:
             self._check('item-add')
@@ -144,8 +157,13 @@ class FakeGitHub:
             self._check('item-edit')
             item_id = argv[argv.index('--id') + 1]
             row = next(r for rows in self.projects.values() for r in rows if r['item_id'] == item_id)
-            self.edits.append((row['url'], argv[argv.index('--single-select-option-id') + 1]))
-            row['status'] = 'Todo'
+            option = argv[argv.index('--single-select-option-id') + 1]
+            self.edits.append((row['url'], option))
+            # The row takes the name of the option that was selected, as the real Project does.
+            if option == self.todo_option:
+                row['status'] = self.todo_option_name
+            else:
+                row['status'] = option
             return ''
         if argv[:2] == ['project', 'item-list']:
             self._check('item-list')
@@ -157,11 +175,11 @@ class FakeGitHub:
         if argv[:2] == ['project', 'view']:
             return json.dumps({'id': 'PVT_project'})
         if argv[:2] == ['project', 'field-list']:
-            options = [{'name': 'Todo', 'id': self.todo_option}] if self.todo_option else []
+            options = [{'name': self.todo_option_name, 'id': self.todo_option}] if self.todo_option else []
             fields = [{'name': 'Status', 'id': 'PVTSSF_status', 'options': options}] if self.has_status_field else []
             return json.dumps({'fields': fields})
         if argv[:3] == ['api', '--method', 'GET'] and len(argv) > 3 and argv[3].startswith('repos/') \
-                and '--paginate' in argv:
+                and '--paginate' in argv and '/dependencies/' not in argv[3]:
             return self._list(argv[3])
         if argv[:2] == ['api', 'user']:
             return json.dumps({'login': self.viewer_login, 'id': self.viewer_id})
@@ -170,13 +188,12 @@ class FakeGitHub:
         raise AssertionError(f'unexpected gh call in test: {argv!r}')
 
     def _list(self, path):
-        m = re.fullmatch(r'repos/([^/]+/[^/]+)/issues\?state=all&creator=([^&]+)&since=([^&]+)&per_page=100', path)
+        m = re.fullmatch(r'repos/([^/]+/[^/]+)/issues\?state=all&since=([^&]+)&per_page=100', path)
         if not m:
             raise AssertionError(f'unexpected issue list path: {path}')
-        repo, creator, since = m.group(1), m.group(2), m.group(3)
-        # Honour both server-side filters: creator login and created_at >= since (same ISO Z format).
-        rows = [i for i in self.repos.get(repo, {}).values()
-                if i['user']['login'] == creator and i['created_at'] >= since]
+        repo, since = m.group(1), m.group(2)
+        # Honour the server-side `since` filter on updated_at; no creator filter (identity is by id).
+        rows = [i for i in self.repos.get(repo, {}).values() if i['updated_at'] >= since]
         return json.dumps([rows])
 
     def _api(self, argv, stdin):
@@ -189,7 +206,8 @@ class FakeGitHub:
                 blocker = self._issue_by_id(json.loads(stdin or '{}')['issue_id'])
                 self.deps.setdefault((repo, number), set()).add(blocker['number'])
                 return '{}'
-            return json.dumps([{'number': n} for n in sorted(self.deps.get((repo, number), set()))])
+            # Paginated GET (--paginate --slurp) returns a list of pages; one page is enough here.
+            return json.dumps([[{'number': n} for n in sorted(self.deps.get((repo, number), set()))]])
         pr = re.fullmatch(r'repos/([^/]+/[^/]+)/pulls/(\d+)', path)
         if pr:
             # Renovate PR read: a verified open PR (fixtures decide head/base elsewhere).
@@ -211,6 +229,9 @@ class FakeGitHub:
             if issue is None:
                 raise f.FollowupError(f'gh rc=1: Not Found #{number} in {repo}')
             return json.dumps(issue)
+        if re.fullmatch(r'repos/[^/]+/[^/]+/issues/\D.*', path):
+            # gh rejects a non-numeric issue path with an HTTP-level error, like the real API.
+            raise f.FollowupError(f'gh rc=1: invalid issue path {path}')
         raise AssertionError(f'unexpected api path: {path}')
 
 
@@ -501,14 +522,13 @@ class IdentityTests(FollowupBase):
         self.assertEqual(entry['viewer_login'], VIEWER_LOGIN)
         self.assertTrue(entry['intent_at'])
 
-    def test_listing_is_creator_and_since_scoped_and_paginated_not_limited_to_1000(self):
+    def test_listing_is_since_scoped_and_paginated_not_limited_to_1000(self):
         self.create(self.payload(key='one'))
-        listing = [c for c in self.gh.calls if any(a.startswith('repos/') and 'creator=' in a for a in c)]
+        listing = [c for c in self.gh.calls if any(a.startswith('repos/') and 'since=' in a for a in c)]
         self.assertTrue(listing, 'the REST listing is used')
         path = next(a for a in listing[0] if a.startswith('repos/'))
         self.assertIn('state=all', path)
-        self.assertIn(f'creator={VIEWER_LOGIN}', path)
-        self.assertIn('since=', path)
+        self.assertNotIn('creator=', path, 'identity is checked by numeric id, not by login')
         self.assertIn('per_page=100', path)
         self.assertIn('--paginate', listing[0])
         self.assertFalse([c for c in self.gh.calls if '--limit' in c and c[:2] == ['issue', 'list']])
@@ -523,11 +543,11 @@ class IdentityTests(FollowupBase):
         with patch.object(f, 'gh_command', side_effect=foreign_create):
             with self.assertRaises(f.FollowupError):
                 self.create()
-        self.assertEqual(self.gh.calls[-1][:2] if False else self.gh.created[-1][0], REPO)
+        self.assertEqual(self.gh.created[-1][0], REPO)
         self.assertFalse([c for c in self.gh.calls if c[:2] == ['project', 'item-add']])
 
-    def test_since_bound_is_intent_time_minus_ten_minutes(self):
-        self.assertEqual(f.since_iso('2026-11-27T10:00:00+00:00'), '2026-11-27T09:50:00Z')
+    def test_since_bound_is_intent_time_minus_a_24h_clock_skew_margin(self):
+        self.assertEqual(f.since_iso('2026-11-27T10:00:00+00:00'), '2026-11-26T10:00:00Z')
 
     def test_adoption_finds_own_marked_issue_by_numeric_id(self):
         self.gh.add_issue(REPO, 80, body=f.marker(PARENT, 'followup-a'), status=None, in_project=False)
@@ -586,6 +606,228 @@ class CreateTests(FollowupBase):
     def test_item_add_is_only_ever_called_from_followup_py(self):
         self.create()
         self.assertTrue(any(c[:2] == ['project', 'item-add'] for c in self.gh.calls))
+
+
+class LostCreateReplyTests(FollowupBase):
+    """B1: issue create succeeds server-side but the reply is an error, empty or unparsable."""
+
+    def assert_retry_adopts(self, mode):
+        self.gh.lost_reply = [mode]
+        with self.assertRaises(f.FollowupError):
+            self.create()
+        self.assertEqual(len(self.gh.created), 1)
+        self.assertEqual(self.journal()[0]['state'], 'intent')
+        # (a) CLI retry with the same key adopts the existing issue, no duplicate create.
+        result = self.create()
+        self.assertEqual(result['state'], 'done')
+        self.assertEqual(len(self.gh.created), 1, 'no duplicate issue')
+        self.assertEqual(self.project_status(result['number']), 'Todo')
+
+    def test_cli_retry_adopts_after_error_reply(self):
+        self.assert_retry_adopts('error')
+
+    def test_cli_retry_adopts_after_empty_reply(self):
+        self.assert_retry_adopts('empty')
+
+    def test_cli_retry_adopts_after_unparsable_reply(self):
+        self.assert_retry_adopts('garbage')
+
+    def test_controller_reconcile_adopts_lost_create_and_reaches_done(self):
+        self.gh.lost_reply = ['error']
+        with self.assertRaises(f.FollowupError):
+            self.create()
+        # (b) controller reconcile adopts the same issue without a second create.
+        results = self.reconcile()
+        self.assertEqual([r['ok'] for r in results], [True])
+        self.assertEqual(len(self.gh.created), 1)
+        self.assertEqual(self.journal()[0]['state'], 'done')
+
+    def test_controller_one_iteration_adopts_lost_create_and_reaches_done(self):
+        self.gh.lost_reply = ['garbage']
+        with self.assertRaises(f.FollowupError):
+            self.create()
+        w = make_worker(self)
+        with patch.object(w, 'notice'):
+            self.assertFalse(w.followup_gate(), 'admission completed, selection not deferred')
+        self.assertEqual(len(self.gh.created), 1)
+        self.assertEqual(self.journal()[0]['state'], 'done')
+
+    def test_adopted_row_with_mismatched_number_is_refused_not_journaled(self):
+        entry = {'parent': PARENT, 'key': 'followup-a', 'repo': REPO, 'owner': OWNER, 'project': PROJECT,
+                 'viewer_login': VIEWER_LOGIN, 'viewer_id': VIEWER_ID, 'intent_at': '2026-11-27T10:00:00+00:00',
+                 'state': 'intent', 'title': 'Follow-up A', 'body': 'Details.', 'reason': 'Needed for X',
+                 'blocks': [], 'blocked_by': []}
+        self.gh.add_issue(REPO, 81, body=f.marker(PARENT, 'followup-a'))
+        self.gh.repos[REPO][81]['updated_at'] = '2026-11-27T10:00:30Z'
+        with patch.object(f, 'find_marked', return_value={'number': 99, 'html_url': url_for(REPO, 81)}):
+            with self.assertRaises(f.FollowupError):
+                f.step_intent(entry)
+        self.assertEqual(entry['state'], 'intent')
+
+    def test_reconcile_converts_malformed_entry_to_per_entry_blocker(self):
+        # A 'created' entry missing its `url` raises KeyError inside step_created.
+        self.gh.fail['item-add'] = 1
+        with self.assertRaises(f.FollowupError):
+            self.create()
+        entries = self.journal()
+        del entries[0]['url']
+        (self.pdir / f.JOURNAL_FILE).write_text(json.dumps({'entries': entries}), encoding='utf-8')
+        results = self.reconcile()
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0]['ok'])
+        self.assertIn('malformed follow-up entry', results[0]['error'])
+        self.assertIn('KeyError', results[0]['error'])
+
+    def test_one_malformed_entry_does_not_block_a_healthy_sibling(self):
+        self.gh.fail['item-add'] = 1
+        with self.assertRaises(f.FollowupError):
+            self.create()
+        entries = self.journal()
+        broken = dict(entries[0], key='broken')
+        del broken['url']
+        entries.append(broken)
+        (self.pdir / f.JOURNAL_FILE).write_text(json.dumps({'entries': entries}), encoding='utf-8')
+        results = {r['key']: r for r in self.reconcile()}
+        self.assertFalse(results['broken']['ok'])
+        self.assertTrue(results['followup-a']['ok'], 'the healthy entry still completes')
+
+
+class TodoAdmissionTests(FollowupBase):
+    """Non-blocking 1 and 6: a follow-up is done only when live Todo; one normalizer for option names."""
+
+    def backlog_on_add(self, edit_sticks):
+        """Project workflow sets Backlog on add; item-edit either sticks or is silently ignored."""
+        original = self.gh.command
+
+        def command(argv, *, stdin=None, timeout=120):
+            if argv[:2] == ['project', 'item-edit'] and not edit_sticks:
+                self.gh.edits.append(('ignored', argv[argv.index('--single-select-option-id') + 1]))
+                return ''
+            out = original(argv, stdin=stdin, timeout=timeout)
+            if argv[:2] == ['project', 'item-add']:
+                self.gh.row(argv[argv.index('--url') + 1])['status'] = 'Backlog'
+            return out
+
+        return patch.object(f, 'gh_command', side_effect=command)
+
+    def test_automation_sets_backlog_on_add_and_edit_corrects_it_to_todo(self):
+        with self.backlog_on_add(edit_sticks=True):
+            result = self.create()
+        self.assertEqual(result['state'], 'done')
+        self.assertEqual(self.project_status(result['number']), 'Todo')
+        self.assertEqual(len(self.gh.edits), 1)
+
+    def test_edit_that_does_not_stick_leaves_a_blocker_and_is_never_done(self):
+        with self.backlog_on_add(edit_sticks=False):
+            with self.assertRaises(f.FollowupError) as ctx:
+                self.create()
+        self.assertIn('not Todo after the status edit', str(ctx.exception))
+        self.assertEqual(self.journal()[0]['state'], 'added', 'never marked done')
+
+    def test_option_named_to_do_with_hyphen_resolves_in_admission(self):
+        self.gh.todo_option_name = 'To-do'
+        result = self.create()
+        self.assertEqual(result['state'], 'done')
+        self.assertEqual(self.project_status(result['number']), 'To-do')
+
+    def test_normalizer_handles_case_whitespace_and_hyphen(self):
+        self.assertEqual(f.normalize_status('To-do'), 'to do')
+        self.assertEqual(f.normalize_status('  TODO  '), 'todo')
+        self.assertEqual(f.normalize_status('To   do'), 'to do')
+
+    def test_project_without_todo_option_is_a_concrete_blocker_and_entry_is_kept(self):
+        self.gh.todo_option = None
+        with self.assertRaises(f.FollowupError) as ctx:
+            self.create()
+        self.assertIn('no Todo or To do Status option', str(ctx.exception))
+        self.assertEqual(len(self.journal()), 1, 'entry kept')
+        self.assertNotEqual(self.journal()[0]['state'], 'done')
+
+
+class CliExitTests(FollowupBase):
+    """Non-blocking 2: exit 2 with 'follow-up refused:' only before journaling; exit 3 with pending JSON after."""
+
+    def run_cli(self, payload):
+        import io
+        out, err = io.StringIO(), io.StringIO()
+        argv = ['--grant', str(self.grant_path), '--token', TOKEN, 'create']
+        with patch.object(f, 'ROOT', self.tmp), patch('sys.stdin', io.StringIO(payload)), \
+                patch('sys.stdout', out), patch('sys.stderr', err):
+            rc = f.main(argv)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_refusal_before_journaling_exits_2_with_refused_message(self):
+        self.gh.repos[REPO][PARENT]['state'] = 'closed'
+        rc, out, err = self.run_cli(self.payload())
+        self.assertEqual(rc, 2)
+        self.assertIn('follow-up refused:', err)
+        self.assertEqual(self.journal(), [])
+
+    def test_failure_after_journaling_exits_3_with_pending_json(self):
+        self.gh.fail['item-add'] = 1
+        rc, out, err = self.run_cli(self.payload())
+        self.assertEqual(rc, f.EXIT_PENDING)
+        result = json.loads(out)
+        self.assertTrue(result['pending'])
+        self.assertEqual(result['key'], 'followup-a')
+        self.assertEqual(result['state'], 'created')
+        self.assertIn('error', result)
+        self.assertNotIn('follow-up refused', err)
+        self.assertEqual(len(self.journal()), 1)
+
+    def test_instruction_forbids_recreating_under_a_new_key(self):
+        text = f.instruction(self.pdir, TOKEN)
+        self.assertIn('exit 3', text)
+        self.assertIn('do NOT re-create with a different key', text)
+        self.assertIn('retry the SAME key only', text)
+
+
+class ForgeryAndMarkerTests(FollowupBase):
+    """Non-blocking 3 and 4: forged entries refused before item-add; marker must lead the body; reserved word."""
+
+    def tamper_after_failure(self, **changes):
+        self.gh.fail['item-add'] = 1
+        with self.assertRaises(f.FollowupError):
+            self.create()
+        entries = self.journal()
+        entries[0].update(changes)
+        (self.pdir / f.JOURNAL_FILE).write_text(json.dumps({'entries': entries}), encoding='utf-8')
+
+    def test_forged_entry_with_outsider_viewer_id_refused_without_item_add(self):
+        self.tamper_after_failure(viewer_id=OUTSIDER_ID)
+        self.gh.calls.clear()
+        results = self.reconcile()
+        self.assertFalse(results[0]['ok'])
+        self.assertIn('not written by this controller account', results[0]['error'])
+        self.assertFalse([c for c in self.gh.calls if c[:2] == ['project', 'item-add']])
+
+    def test_forged_entry_with_outsider_issue_url_and_id_refused_without_item_add(self):
+        # An outsider's issue is planted as the entry's number/url; the body and author do not match.
+        self.gh.add_issue(REPO, 90, body='outsider text', user_id=OUTSIDER_ID, status=None, in_project=False)
+        self.tamper_after_failure(number=90, url=url_for(REPO, 90), state='created')
+        self.gh.calls.clear()
+        results = self.reconcile()
+        self.assertFalse(results[0]['ok'])
+        self.assertIn('does not carry this entry', results[0]['error'])
+        self.assertFalse([c for c in self.gh.calls if c[:2] == ['project', 'item-add']])
+        self.assertIsNone(self.gh.row(url_for(REPO, 90)))
+
+    def test_body_with_marker_not_at_start_is_not_adopted(self):
+        self.gh.add_issue(REPO, 91, body='quoted: ' + f.marker(PARENT, 'followup-a'),
+                          status=None, in_project=False)
+        self.gh.repos[REPO][91]['updated_at'] = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        self.assertIsNone(f.find_marked({'parent': PARENT, 'key': 'followup-a', 'repo': REPO,
+                                         'viewer_id': VIEWER_ID, 'intent_at': datetime.now(timezone.utc).isoformat(),
+                                         'viewer_login': VIEWER_LOGIN}))
+
+    def test_agent_body_containing_reserved_marker_word_is_refused(self):
+        for field, raw in (('body', self.payload(body='see autocontroller-followup parent=1')),
+                           ('title', self.payload(title='autocontroller-followup')),
+                           ('reason', self.payload(reason='AutoController-Followup forged'))):
+            with self.subTest(field=field):
+                with self.assertRaises(f.FollowupError):
+                    f.parse_input(raw)
+        self.assertEqual(self.gh.created, [])
 
 
 class CrashAndResumeTests(FollowupBase):

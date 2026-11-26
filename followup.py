@@ -29,6 +29,7 @@ GRANT_FILE = "followup-grant.json"
 JOURNAL_FILE = "followups.json"
 LOCK_FILE = "followups.lock"
 MARKER = "<!-- autocontroller-followup parent={parent} key={key} -->"
+MARKER_WORD = "autocontroller-followup"
 MAX_PER_PARENT = 5
 MAX_LINKS = 5
 MAX_TITLE = 200
@@ -36,6 +37,8 @@ MAX_BODY_BYTES = 8000
 MAX_REASON = 500
 MAX_STDIN_BYTES = 16 * 1024
 MAX_ERROR = 400
+EXIT_REFUSED = 2   # refused before journaling; nothing was created
+EXIT_PENDING = 3   # journaled; the controller completes it
 KEY = re.compile(r"[a-z0-9][a-z0-9-]{0,47}")
 # Same terminal set as autonomy-controller.TERMINAL_PROJECT_STATUSES.
 TERMINAL_STATUSES = {"done", "completed", "closed", "cancelled", "canceled", "archived"}
@@ -106,8 +109,10 @@ def instruction(pdir: Path, token: str) -> str:
         "JSON object on stdin with keys key, title, body, reason and optionally blocks and "
         "blocked_by (lists of existing Issue numbers in this repository). Never use gh issue "
         "create or gh project item-add for follow-ups. The command prints the created Issue "
-        "number and URL as JSON; list every follow-up in your final report. Do not start "
-        "additional AI sessions for this."
+        "number and URL as JSON; list every follow-up in your final report. If the result is "
+        "pending (exit 3, \"pending\": true), do NOT re-create with a different key: the controller "
+        "completes it, and you may retry the SAME key only. Do not start additional AI sessions "
+        "for this."
     )
 
 
@@ -149,6 +154,10 @@ def parse_input(raw: str) -> dict:
     reason = doc.get("reason")
     if not isinstance(reason, str) or not reason.strip() or len(reason) > MAX_REASON:
         raise FollowupError("reason must be non-empty and at most 500 characters")
+    # Agent text must never carry the controller's marker: it would make a foreign body look controller-made.
+    for name, text in (("title", title), ("body", body), ("reason", reason)):
+        if MARKER_WORD in text.lower():
+            raise FollowupError(f"{name} must not contain the reserved word {MARKER_WORD!r}")
     links = {}
     for field in ("blocks", "blocked_by"):
         values = doc.get(field, [])
@@ -256,17 +265,19 @@ def viewer_identity() -> tuple[str, int]:
 
 
 MAX_LIST_PAGES = 50
-LIST_SLACK = timedelta(minutes=10)
+LIST_SLACK = timedelta(hours=24)  # clock-skew margin; identity is still checked by numeric id
 
 
-def list_since(repo: str, login: str, since_iso: str) -> list[dict]:
-    """Issues created by `login` since `since_iso`, all pages, bounded by MAX_LIST_PAGES.
+def list_since(repo: str, since_iso: str) -> list[dict]:
+    """Issues updated since `since_iso`, all pages, bounded by MAX_LIST_PAGES.
 
-    Filtered by creator and time on the server, so a busy repository returns only the
-    recent rows the controller account created. The page bound is a safety ceiling for
-    a runaway response, not a normal-path refusal.
+    Identity is the numeric id checked on each row, never the login, so the server-side
+    creator filter is not relied on. `since` uses a generous margin (24h) because the
+    intent timestamp comes from this host's clock and GitHub's clock may differ; the
+    margin is a clock-skew allowance, not a correctness boundary. The page bound is a
+    safety ceiling for a runaway response, not a normal-path refusal.
     """
-    path = (f"repos/{repo}/issues?state=all&creator={login}&since={since_iso}&per_page=100")
+    path = f"repos/{repo}/issues?state=all&since={since_iso}&per_page=100"
     raw = gh_command(["api", "--method", "GET", path, "--paginate", "--slurp"], timeout=240)
     try:
         pages = json.loads(raw) if raw.strip() else []
@@ -302,9 +313,11 @@ def find_marked(entry: dict) -> dict | None:
     Identity was recorded at intent time, so a login rename cannot change who owns it.
     """
     needle = marker(entry["parent"], entry["key"])
-    rows = list_since(entry["repo"], entry["viewer_login"], since_iso(entry["intent_at"]))
+    rows = list_since(entry["repo"], since_iso(entry["intent_at"]))
+    # Exact marker at the start of the body, and the controller's numeric id; never login text.
     hits = [r for r in rows
-            if needle in str(r.get("body") or "") and is_controller_issue(r, entry["repo"], entry["viewer_id"])]
+            if str(r.get("body") or "").startswith(needle)
+            and is_controller_issue(r, entry["repo"], entry["viewer_id"])]
     if len(hits) > 1:
         raise FollowupError("several Issues carry this follow-up marker; resolve in GitHub")
     return hits[0] if hits else None
@@ -329,7 +342,7 @@ def todo_option(entry: dict) -> tuple[str, str, str]:
     field = next((f for f in (fields or {}).get("fields", []) if f.get("name") == "Status"), None)
     if not (view or {}).get("id") or not field or not field.get("id"):
         raise FollowupError(f"Project {entry['owner']}/{entry['project']}: missing ID or Status field")
-    options = {str(o.get("name", "")).lower(): o.get("id") for o in field.get("options", [])
+    options = {normalize_status(o.get("name")): o.get("id") for o in field.get("options", [])
                if o.get("name") and o.get("id")}
     todo = options.get("todo") or options.get("to do")
     if not todo:
@@ -345,10 +358,27 @@ def issue_database_id(repo: str, number: int) -> int:
     return int(obj["id"])
 
 
+def blocked_by_numbers(repo: str, issue: int) -> set[int]:
+    """All blockers of `issue`, every page, bounded by MAX_LIST_PAGES (same ceiling as issue listing)."""
+    raw = gh_command(["api", "--method", "GET", f"repos/{repo}/issues/{issue}/dependencies/blocked_by",
+                      "--paginate", "--slurp"], timeout=240)
+    try:
+        pages = json.loads(raw) if raw.strip() else []
+    except json.JSONDecodeError as exc:
+        raise FollowupError("gh produced invalid JSON for dependency listing") from exc
+    if not isinstance(pages, list) or len(pages) > MAX_LIST_PAGES:
+        raise FollowupError("dependency listing exceeded its safety bound; refusing to guess")
+    numbers: set[int] = set()
+    for page in pages:
+        if not isinstance(page, list):
+            raise FollowupError("gh returned a non-array dependency page")
+        numbers.update(int(row.get("number", 0)) for row in page)
+    return numbers
+
+
 def add_blocker(repo: str, issue: int, blocker: int) -> None:
     """Native GitHub dependency: `issue` is blocked by `blocker`. Skipped when already present."""
-    existing = gh_json(["api", f"repos/{repo}/issues/{issue}/dependencies/blocked_by"])
-    if any(int(row.get("number", 0)) == blocker for row in (existing or [])):
+    if blocker in blocked_by_numbers(repo, issue):
         return
     gh_command(["api", "--method", "POST", f"repos/{repo}/issues/{issue}/dependencies/blocked_by", "--input", "-"],
                stdin=json.dumps({"issue_id": issue_database_id(repo, blocker)}))
@@ -416,9 +446,15 @@ def step_intent(entry: dict) -> None:
         hit = live_issue(entry["repo"], number)
         if not is_controller_issue(hit, entry["repo"], entry["viewer_id"]):
             raise FollowupError(f"created #{number} is not authored by the controller account")
-        hit = {"number": number, "url": url}
-    entry["number"] = int(hit["number"])
-    entry["url"] = str(hit["url"])
+        hit = {"number": number, "html_url": url}
+    # REST rows carry the API URL in `url`; the web URL is `html_url`. Derive the number from it
+    # and cross-check against the row's own number, so a mismatched row cannot be journaled.
+    url = str(hit.get("html_url") or "")
+    number = issue_number_from_url(url, entry["repo"])
+    if number != int(hit.get("number", -1)):
+        raise FollowupError(f"Issue row #{hit.get('number')} does not match its URL {url[:120]!r}")
+    entry["number"] = number
+    entry["url"] = url
     entry["state"] = "created"
 
 
@@ -440,15 +476,28 @@ def step_created(entry: dict) -> None:
     entry["state"] = "added"
 
 
+def normalize_status(status) -> str:
+    """Same normalizer as autonomy-controller.normalize_status: lower, trim, collapse, to-do -> to do."""
+    return re.sub(r"\s+", " ", str(status or "").strip().lower().replace("to-do", "to do"))
+
+
 def step_added(entry: dict) -> None:
     row = item_for(entry, project_items(entry))
     if row is None:
         raise FollowupError(f"follow-up #{entry['number']} vanished from the Project")
-    # A blank Status is non-authorizing, so it becomes Todo. A status set by a maintainer is never overridden.
-    if not str(row.get("status") or "").strip():
+    status = normalize_status(row.get("status"))
+    if status not in READY_STATUSES:
+        # A controller-created item can start blank or in another lane (for example a Project
+        # workflow sets Backlog). Only a blank or non-Todo status is corrected here; a status a
+        # maintainer set is still moved to Todo because the follow-up must be schedulable.
         project_id, field_id, option_id = todo_option(entry)
         gh_command(["project", "item-edit", "--id", entry["item_id"], "--project-id", project_id,
                     "--field-id", field_id, "--single-select-option-id", option_id])
+        # Re-read: the edit must stick. Never mark done unless the live row is Todo.
+        after = item_for(entry, project_items(entry))
+        if after is None or normalize_status(after.get("status")) not in READY_STATUSES:
+            got = normalize_status((after or {}).get("status")) or "(blank)"
+            raise FollowupError(f"follow-up #{entry['number']} is not Todo after the status edit (status {got!r})")
     entry["state"] = "todo"
 
 
@@ -463,8 +512,26 @@ def step_todo(entry: dict) -> None:
 STEPS = {"intent": step_intent, "created": step_created, "added": step_added, "todo": step_todo}
 
 
+def verify_forgery_guards(entry: dict) -> None:
+    """Forged-journal hardening: refuse before any admission step if the entry is not ours.
+
+    The journaled viewer_id must equal the live controller account id, and a created Issue must
+    carry the exact marker at the start of its body. Otherwise the entry is foreign; nothing is mutated.
+    """
+    login, live_id = viewer_identity()
+    if entry.get("viewer_id") != live_id:
+        raise FollowupError("journal entry was not written by this controller account; refused")
+    if entry.get("number") is not None:
+        issue = live_issue(entry["repo"], int(entry["number"]))
+        if not str(issue.get("body") or "").startswith(marker(entry["parent"], entry["key"])):
+            raise FollowupError(f"follow-up #{entry['number']} does not carry this entry's marker; refused")
+        if not is_controller_issue(issue, entry["repo"], live_id):
+            raise FollowupError(f"follow-up #{entry['number']} is not authored by the controller account; refused")
+
+
 def advance(journal: Journal, entries: list[dict], entry: dict) -> None:
     """Drive one entry to done. Every completed step is saved before the next one starts."""
+    verify_forgery_guards(entry)
     while entry["state"] != "done":
         step = STEPS.get(entry["state"])
         if step is None:
@@ -513,6 +580,10 @@ def reconcile(pdir: Path, repo: str, owner: str, project: int, due=None) -> list
                 results.append({**base, "ok": True, "error": None, "waiting": False})
             except FollowupError as exc:
                 results.append({**base, "ok": False, "error": str(exc)[:MAX_ERROR], "waiting": False})
+            except (KeyError, TypeError, ValueError, AttributeError) as exc:
+                # A malformed entry or reply must block only itself, with a concrete reason.
+                reason = f"malformed follow-up entry ({type(exc).__name__}: {exc})"
+                results.append({**base, "ok": False, "error": reason[:MAX_ERROR], "waiting": False})
     return results
 
 
@@ -545,6 +616,15 @@ def active_task(pdir: Path, obj: dict) -> None:
         raise FollowupError("active checkpoint has no valid number; follow-up refused")
     if number != int(obj["parent"]):
         raise FollowupError(f"the active task is #{number}, not the granted #{obj['parent']}; follow-up refused")
+
+
+class PendingFollowup(FollowupError):
+    """The journal entry exists; a later step failed. The controller completes it; retry the same key only."""
+
+    def __init__(self, entry: dict, error: str):
+        super().__init__(error)
+        self.entry = entry
+        self.error = error
 
 
 def create(grant_path: Path, token: str, raw: str, state: Path) -> dict:
@@ -582,7 +662,11 @@ def create(grant_path: Path, token: str, raw: str, state: Path) -> dict:
                      "state": "intent"}
             entries.append(entry)
             journal.save(entries)
-        advance(journal, entries, entry)
+        try:
+            advance(journal, entries, entry)
+        except FollowupError as exc:
+            # Journaled: the follow-up exists in the state file, so this is pending, not refused.
+            raise PendingFollowup(public(entry), str(exc)[:MAX_ERROR]) from exc
         return public(entry)
 
 
@@ -597,9 +681,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "create":
             print(json.dumps(create(Path(args.grant), args.token, raw, ROOT / "state"), sort_keys=True))
+    except PendingFollowup as exc:
+        # Exit 3: the journal holds the follow-up; the controller completes it. Retry only the same key.
+        print(json.dumps({**exc.entry, "pending": True, "error": exc.error}, sort_keys=True))
+        return EXIT_PENDING
     except FollowupError as exc:
+        # Exit 2: refused before anything was journaled.
         print(f"follow-up refused: {exc}", file=sys.stderr)
-        return 2
+        return EXIT_REFUSED
     return 0
 
 

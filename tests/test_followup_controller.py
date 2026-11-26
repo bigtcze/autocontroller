@@ -290,5 +290,42 @@ class FollowupAgentScenario(ControllerFollowupBase):
         return f.create(self.pdir / f.GRANT_FILE, 'a' * 48, raw, self.state)
 
 
+class MaintenanceSuppressionTests(ControllerFollowupBase):
+    """Non-blocking 7: a non-schedulable release Issue for the next tag must not suppress maintenance."""
+
+    def due(self, items):
+        w = self.w
+        w.release_cfg = {'enabled': True, 'maintenance_days': 14, 'maintenance_min_renovate_prs': 3}
+        w.release_cache = self.pdir / 'release-cache.json'
+        self.p(w, 'release_enabled', return_value=True)
+        self.p(w, 'release_latest', return_value={'tag_name': 'v1.2.4', 'published_at': '2026-10-01T00:00:00Z'})
+        self.p(m.releases, 'released_since', return_value=60)
+        self.p(m.releases, 'merged_since', return_value=[])
+        self.p(m.releases, 'maintenance_due', return_value=True)
+        self.p(m.releases, 'next_patch_tag', return_value='v1.2.5')
+        # The base setUp stubs the instance's check_maintenance to None; call the real method
+        # on this worker, and prove the release_enabled re-patch is the one in effect.
+        self.assertTrue(w.release_enabled(), 'the release_enabled re-patch must be in effect')
+        return m.ProjectWorker.check_maintenance(w, items)
+
+    def release_item(self, status):
+        return {'number': 40, 'title': 'v1.2.5 Release', 'status': status, 'item_id': 'x',
+                'url': url_for(REPO, 40)}
+
+    def test_backlog_release_issue_for_next_tag_does_not_suppress_maintenance(self):
+        decision = self.due([self.release_item('Backlog')])
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision['tag'], 'v1.2.5')
+
+    def test_blank_release_issue_for_next_tag_does_not_suppress_maintenance(self):
+        self.assertIsNotNone(self.due([self.release_item('')]))
+
+    def test_todo_release_issue_for_next_tag_still_owns_the_version(self):
+        self.assertIsNone(self.due([self.release_item('Todo')]))
+
+    def test_in_progress_feature_release_still_suppresses_maintenance(self):
+        self.assertIsNone(self.due([self.release_item('In Progress')]))
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -35,7 +35,8 @@ Status: unreleased; under development. No public release has been published.
   GitHub): an admitted Issue task may create at most 5 necessary follow-up Issues
   per parent through a token-bound CLI, admitted to `Todo` with native dependencies.
   Before anything is journaled, the parent and every link target must be a live
-  open Issue of the repository in the Project with a nonterminal Status. Authorship
+  open Issue of the repository in the Project with a non-blank, nonterminal Status
+  (link validation only, not scheduling authority). Authorship
   is by the controller account's numeric id recorded at intent time; adoption of an
   interrupted attempt searches the creator's recent Issues (REST, paginated) rather
   than a truncated list. The controller completes unfinished follow-ups without AI

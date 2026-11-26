@@ -117,7 +117,7 @@ proof, bootstrap priority, admission by Todo status (blank, Backlog, Blocked,
 custom and terminal statuses are never offered), empty boards, unlisted
 selections, outsider approval text, fork Renovate impersonation, fork closing
 references, outsider comments not waking the selector, and a static check that
-the controller source never contains an `item-add` literal. Follow-up admission
+no executable program file other than `followup.py` and `onboarding.py` contains an `item-add` literal (the AST check covers every program file in `release_artifacts.EXECUTABLE_PROGRAM_FILES` except those two and `install.sh`). Follow-up admission
 (`tests/test_followup_admission.py` and `tests/test_followup_controller.py`) is covered
 separately: grant token binding, the active-checkpoint check, journal idempotency and
 project matching, numeric-id authorship, the `item-add` writer being `followup.py` only,

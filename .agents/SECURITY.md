@@ -39,7 +39,9 @@ repositories. Relevant threats:
   of the same project directory (`cycle.pending` and `cycle.json` with `kind=issue`
   and `number` equal to the grant's parent). Before journaling, the parent and every
   `blocks`/`blocked_by` target must be live, open, non-pull-request Issues of the
-  granted repository, members of the granted Project, with a nonterminal Status.
+  granted repository, members of the granted Project, with a non-blank, nonterminal
+  Status. This is link validation only; it does not grant scheduling authority, which
+  is the Work authorization rule above.
   Authorship of an adopted or created follow-up is decided by the controller
   account's **numeric id** recorded at intent time, never by login text. The
   controller reconciles journal entries without AI, refuses any entry whose

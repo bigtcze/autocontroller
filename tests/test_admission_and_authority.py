@@ -445,9 +445,18 @@ class OutsiderCommentsDoNotWake(ControllerCase):
 class NoAutoAdmission(ControllerCase):
     def test_controller_source_never_invokes_project_item_add(self):
         # Parsed AST, not raw text: comments and docstrings are not code and cannot
-        # trip or hide the check. Only executable string literals count.
-        tree = ast.parse((ROOT / 'autonomy-controller.py').read_text(encoding='utf-8'))
-        self.assertEqual(executable_strings_containing(tree, 'item-add'), [])
+        # trip or hide the check. Only executable string literals count. Every executable
+        # program file is checked except the two that legitimately write Project items:
+        # followup.py (the only post-onboarding writer) and onboarding.py (import and bootstrap).
+        import release_artifacts
+        allowed = {'followup.py', 'onboarding.py'}
+        checked = [name for name in release_artifacts.EXECUTABLE_PROGRAM_FILES
+                   if name.endswith('.py') and name not in allowed]
+        self.assertIn('autonomy-controller.py', checked)
+        for name in checked:
+            with self.subTest(file=name):
+                tree = ast.parse((ROOT / name).read_text(encoding='utf-8'))
+                self.assertEqual(executable_strings_containing(tree, 'item-add'), [], name)
 
     def test_item_add_checker_has_positive_and_negative_controls(self):
         # Positive: a real argv literal is caught, including inside a nested list.

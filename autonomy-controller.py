@@ -261,7 +261,7 @@ class GitHubProject:
         if not self.project_id or not entry or not entry.get("id"):
             raise ControllerError(f"Project {self.owner}/{self.number}: missing ID or Status field")
         self.status_field_id = entry["id"]
-        self.options = {str(o["name"]).lower():o["id"] for o in entry.get("options",[]) if o.get("name") and o.get("id")}
+        self.options = {normalize_status(o["name"]):o["id"] for o in entry.get("options",[]) if o.get("name") and o.get("id")}
         # Project workflows differ. Only field identity is essential; do not
         # require exact status vocabulary merely to schedule engineering work.
 
@@ -284,14 +284,15 @@ class GitHubProject:
             raise ControllerError(f"Project item #{item['number']} has no item ID")
         if not self.project_id:
             self.ensure_metadata()
-        option = self.options.get(status.lower())
-        if not option and status.lower() == "in progress":
+        wanted = normalize_status(status)
+        option = self.options.get(wanted)
+        if not option and wanted == "in progress":
             option = next((self.options[x] for x in ("in progress", "doing", "active", "started") if x in self.options), None)
-        if not option and status.lower() == "done":
+        if not option and wanted == "done":
             option = next((self.options[x] for x in ("done", "completed", "closed") if x in self.options), None)
-        if not option and status.lower() in ("backlog", "todo", "to do"):
+        if not option and wanted in ("backlog", "todo", "to do"):
             option = self.options.get("todo") or self.options.get("to do")
-        if not option and status.lower() in ("todo", "to do"):
+        if not option and wanted in ("todo", "to do"):
             # Admission into Todo is the only way new work becomes schedulable: never skip silently.
             raise ControllerError(f"{self.repo}: Project {self.owner}/{self.number} has no Todo or To do Status option; "
                                   "owner action required before work can be admitted")
@@ -1308,9 +1309,12 @@ class ProjectWorker:
                      days=int(self.release_cfg.get("maintenance_days",14)),
                      minimum=int(self.release_cfg.get("maintenance_min_renovate_prs",3))):
                     tag=releases.next_patch_tag(current["tag_name"])
-                    # A release Issue already owning this version takes
-                    # precedence, even if it is still in Backlog.
-                    if not any(releases.release_issue_tag(x.get("title",""))==tag for x in items):
+                    # A release Issue already owning this version takes precedence only while
+                    # it can still be scheduled (Todo, To do, In Progress, Review). A Backlog or
+                    # blank release Issue is non-authorizing and must not suppress maintenance forever.
+                    if not any(releases.release_issue_tag(x.get("title",""))==tag
+                               and schedulable_status(x.get("status"))
+                               for x in items):
                         decision={"tag":tag,"previous":current["tag_name"],
                                   "renovate_count":sum(releases.renovate_pr(p,self.repo) for p in prs)}
         # Low-frequency GitHub API discovery even if the normal issue poll is 5m.
