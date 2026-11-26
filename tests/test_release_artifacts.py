@@ -347,6 +347,15 @@ class ProgramJsonTests(ArchiveFixture):
         files = ra.verify(dist.parent, TAG, commit)
         self.assertNotIn('README.md', json.loads(files['PROGRAM.json'])['data'])
 
+    def test_commit_without_release_artifacts_is_refused_at_build_with_no_module_fallback(self):
+        # NIT: a commit that lacks release_artifacts.py is refused. The running module's constants must never
+        # stand in for it, even when the repo is this checkout.
+        git(self.repo, 'rm', '-q', 'release_artifacts.py')
+        git(self.repo, 'commit', '-q', '-m', 'drop the declaring module')
+        commit = git(self.repo, 'rev-parse', 'HEAD')
+        with self.assertRaisesRegex(ra.ArtifactError, 'has no release_artifacts.py'):
+            ra.build(self.repo, TAG, commit, self.root / 'd-nofallback')
+
     def test_non_literal_list_is_refused_at_build(self):
         for body in ("EXECUTABLE_PROGRAM_FILES = tuple(['a.py'])\n",
                      "EXECUTABLE_PROGRAM_FILES = ('a.py', name)\n",
@@ -354,6 +363,33 @@ class ProgramJsonTests(ArchiveFixture):
             with self.subTest(body=body):
                 with self.assertRaisesRegex(ValueError, 'literal|non-string'):
                     ra.program_lists_from_source(body + "DATA_PROGRAM_FILES = ()\nDATA_PROGRAM_DIRS = ()\n")
+
+    LISTS = ("EXECUTABLE_PROGRAM_FILES = ('a.py',)\nDATA_PROGRAM_FILES = ()\nDATA_PROGRAM_DIRS = ()\n")
+
+    def test_augmented_assignment_to_a_list_is_refused(self):
+        # R2: `+=` rebinds the list after the literal was read; the parser must not accept it.
+        with self.assertRaisesRegex(ValueError, 'other than as one top-level literal'):
+            ra.program_lists_from_source(self.LISTS + "EXECUTABLE_PROGRAM_FILES += ('b.py',)\n")
+
+    def test_reassignment_inside_if_is_refused(self):
+        # R2: a conditional rebinding is not a top-level assignment and must be refused, not ignored.
+        with self.assertRaisesRegex(ValueError, 'other than as one top-level literal'):
+            ra.program_lists_from_source(self.LISTS + "if True:\n    EXECUTABLE_PROGRAM_FILES = ('x.py',)\n")
+
+    def test_duplicate_top_level_assignment_is_refused(self):
+        # R2: a second top-level assignment of a list name is refused as a duplicate.
+        with self.assertRaisesRegex(ValueError, 'more than once'):
+            ra.program_lists_from_source(self.LISTS + "EXECUTABLE_PROGRAM_FILES = ('b.py',)\n")
+
+    def test_del_of_a_list_name_is_refused(self):
+        # R2: `del` removes the binding the reader relies on; refuse it.
+        with self.assertRaisesRegex(ValueError, 'other than as one top-level literal'):
+            ra.program_lists_from_source(self.LISTS + "del DATA_PROGRAM_DIRS\n")
+
+    def test_read_only_use_of_a_list_name_is_still_accepted(self):
+        # R2 must not over-refuse: reading a list name without binding it is harmless.
+        found = ra.program_lists_from_source(self.LISTS + "COPY = (DATA_PROGRAM_DIRS,)\n")
+        self.assertEqual(found['DATA_PROGRAM_DIRS'], ())
 
     def test_duplicate_assignment_is_refused(self):
         with self.assertRaisesRegex(ValueError, 'more than once'):

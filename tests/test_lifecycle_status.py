@@ -117,6 +117,13 @@ class IntegrityTest(unittest.TestCase):
         _, warnings = self.diagnose()
         self.assertTrue(any('.skills.new' in w for w in warnings))
 
+    def test_leftover_previous_old_is_a_warning_and_not_a_failure(self):
+        # NIT: an aside copy left by an interrupted rollback is reported, but it changes no program file.
+        (self.target / 'rollback' / 'previous.old').mkdir(parents=True)
+        failures, warnings = self.diagnose()
+        self.assertEqual(failures, [])
+        self.assertTrue(any('rollback/previous.old is left over' in w for w in warnings), warnings)
+
     def test_diagnose_is_read_only(self):
         before = sorted(str(p.relative_to(self.target)) for p in self.target.rglob('*'))
         self.diagnose()
@@ -225,6 +232,12 @@ class StatusTest(unittest.TestCase):
 
     def lines(self, active=True):
         return lc.status_lines(self.target, active=active)
+
+    def test_unknown_service_state_is_reported_as_unknown_not_as_stopped(self):
+        # NIT: an unreadable unit state (None) must say unknown, never active or not active.
+        lines = self.lines(active=None)
+        self.assertIn('service: unknown', lines)
+        self.assertNotIn('service: not active', lines)
 
     def test_reports_version_service_and_no_history(self):
         lines = self.lines(active=False)

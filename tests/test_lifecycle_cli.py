@@ -223,6 +223,19 @@ class LifecycleCliTest(unittest.TestCase):
         self.assertIn('drain files: none', proc.stdout)
         self.assertEqual(self.world.gh_calls(), [])
 
+    def test_status_with_unreadable_unit_state_prints_unknown_and_does_not_raise(self):
+        # NIT: a `show` that cannot be parsed (non-numeric MainPID) must not crash status. The summary says
+        # unknown; the command still exits 0 and prints the summary before the systemctl status output.
+        state = json.loads(self.world.sys_state.read_text())
+        state['unit'] = {'MainPID': 'not-a-pid'}
+        self.world.sys_state.write_text(json.dumps(state))
+        proc = self.run_cli('status')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn('Traceback', proc.stderr)
+        self.assertIn('service: unknown', proc.stdout)
+        self.assertNotIn('service: not active', proc.stdout)
+        self.assertIn('version: v1.0.0', proc.stdout)
+
     def test_doctor_reports_modified_program_file_and_exits_nonzero(self):
         # README.md is a data file never imported at startup. Tampering an imported module (memory.py)
         # makes onboarding.py fail at import before doctor runs, so that case is not reported here.

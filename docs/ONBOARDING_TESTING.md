@@ -18,7 +18,7 @@ ones.
 | --- | --- | --- | --- |
 | `gh` | `tests/fake_gh.py` | The `gh` invocations onboarding and the controller's Project code use: `auth`, `api` (repos, issues, user), `project` (list, create, link, view, field-list, item-list, item-add, item-edit). | Exits 4 on any unlisted invocation. Exits 5 if `GH_TOKEN`, `GITHUB_TOKEN` or `GH_ENTERPRISE_TOKEN` is set, and records the refusal in a sidecar `<state>.refused` file without reading or mutating state. |
 | `opencode` | `tests/fake_opencode.py` | The read-only API probe (`api GET /api/info`, `/api/agent/{orchestrator,fixer,oracle}`). Every call is logged. | `run` (a paid model session) always exits 3. Unknown forms exit 4. |
-| `systemctl` | `tests/fake_systemctl.py` | `--user` with `enable`, `disable`, `restart`, `start`, `stop`, `is-active`, `status`, for `autocontroller.service` only. | Anything else exits 4. Faults fail before any effect. |
+| `systemctl` | `tests/fake_systemctl.py` | `--user` with `enable`, `disable`, `restart`, `start`, `stop`, `is-active`, `status`, `show`, `daemon-reload`, for `autocontroller.service` only. | Anything else exits 4. Faults fail before any effect. |
 
 State lives in JSON files inside the disposable world. `fake_gh.py` takes an
 `fcntl` lock on a sidecar file and replaces state atomically. Every invocation

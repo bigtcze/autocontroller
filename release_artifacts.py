@@ -106,6 +106,34 @@ def _manifest_text(files: dict[str, bytes]) -> bytes:
     return ''.join(lines).encode('utf-8')
 
 
+def _refuse_other_bindings(tree: ast.AST, origin: str):
+    """Refuse any binding of a program-list name except its one top-level literal Assign.
+
+    R2: a list name may be bound only by a plain `NAME = ...` statement at module top level. Any other
+    site (augmented, annotated, walrus, for/with/import/def/class target, del, global) would let the
+    source change the list after the literal was read, so the reader refuses it outright.
+    """
+    allowed = set()
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            allowed.add(id(node.targets[0]))
+    for node in ast.walk(tree):
+        # Store/Del covers plain, augmented, annotated and walrus targets, for/with targets and `del`.
+        if isinstance(node, ast.Name) and node.id in PROGRAM_LISTS:
+            if isinstance(node.ctx, (ast.Store, ast.Del)) and id(node) not in allowed:
+                raise ValueError(f'{origin} binds {node.id} other than as one top-level literal assignment')
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if (alias.asname or alias.name.split('.')[0]) in PROGRAM_LISTS:
+                    raise ValueError(f'{origin} imports over a program list name')
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name in PROGRAM_LISTS:
+                raise ValueError(f'{origin} defines a program list name')
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            if any(name in PROGRAM_LISTS for name in node.names):
+                raise ValueError(f'{origin} declares a program list name global or nonlocal')
+
+
 def program_lists_from_source(text: bytes | str, origin: str = 'release_artifacts.py') -> dict[str, tuple[str, ...]]:
     """The three program lists declared by a release_artifacts.py source, read WITHOUT executing it.
 
@@ -117,13 +145,14 @@ def program_lists_from_source(text: bytes | str, origin: str = 'release_artifact
         tree = ast.parse(text if isinstance(text, str) else text.decode('utf-8'), filename=origin)
     except (SyntaxError, UnicodeDecodeError) as exc:
         raise ValueError(f'{origin} does not parse: {type(exc).__name__}') from exc
+    _refuse_other_bindings(tree, origin)
     found: dict[str, tuple[str, ...]] = {}
     for node in tree.body:
-        if not isinstance(node, ast.Assign) or len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+        # Every binding site of a list name was already checked: only plain top-level Assigns remain.
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id in PROGRAM_LISTS):
             continue
         name = node.targets[0].id
-        if name not in PROGRAM_LISTS:
-            continue
         if name in found:
             raise ValueError(f'{origin} assigns {name} more than once')
         if not isinstance(node.value, (ast.Tuple, ast.List)):
@@ -154,25 +183,17 @@ def program_json(lists: dict[str, tuple[str, ...]]) -> bytes:
 def _committed_program_lists(repo: Path, commit: str) -> dict[str, tuple[str, ...]]:
     """The lists the building commit's own release_artifacts.py declares.
 
-    Fallback: a commit that has no release_artifacts.py at all is only accepted when the repo IS this
-    checkout, and then the module constants are used. Any other commit without the file is refused.
+    A commit without release_artifacts.py is refused. The running module's constants are never used
+    as a fallback: they could differ from the commit being built.
     """
     names = {name for _, _, name in tree_entries(repo, commit)}
     if 'release_artifacts.py' not in names:
-        if Path(repo).resolve() == Path(__file__).resolve().parent and commit == _git_head(repo):
-            return {'EXECUTABLE_PROGRAM_FILES': EXECUTABLE_PROGRAM_FILES,
-                    'DATA_PROGRAM_FILES': DATA_PROGRAM_FILES,
-                    'DATA_PROGRAM_DIRS': DATA_PROGRAM_DIRS}
         raise ArtifactError(f'{commit} has no release_artifacts.py; cannot build PROGRAM.json')
     blob = [obj for mode, obj, name in tree_entries(repo, commit) if name == 'release_artifacts.py'][0]
     try:
         return program_lists_from_source(_git(repo, 'cat-file', 'blob', blob), f'{commit}:release_artifacts.py')
     except ValueError as exc:
         raise ArtifactError(str(exc)) from exc
-
-
-def _git_head(repo: Path) -> str:
-    return _git(repo, 'rev-parse', 'HEAD', timeout=30).decode('ascii').strip()
 
 
 def release_files(repo: Path, tag: str, commit: str) -> dict[str, tuple[int, bytes]]:

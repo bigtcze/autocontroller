@@ -203,7 +203,9 @@ class HealthWindowTest(unittest.TestCase):
     def test_activating_at_the_first_poll_is_unhealthy(self):
         self.assertFalse(self.healthy(UnitModel(ActiveState='activating', SubState='auto-restart', MainPID=0)))
 
-    def test_unreadable_output_during_the_window_raises_not_healthy(self):
+    def test_unreadable_output_during_the_window_is_not_healthy(self):
+        # R1: an unreadable read inside the window is a failed check (False), not an exception, so the
+        # update path can stop the new code and restore the previous release.
         model = UnitModel()
 
         def garbage(m):
@@ -212,8 +214,7 @@ class HealthWindowTest(unittest.TestCase):
         model.fields = dict(model.fields)
         model.on_poll = garbage
         with mock.patch.object(lc.subprocess, 'run', side_effect=model.run):
-            with self.assertRaises(lc.LifecycleError):
-                lc.healthy(check=lambda: True, seconds=3, sleep=lambda s: None, clock=_FakeClock().now)
+            self.assertFalse(lc.healthy(check=lambda: True, seconds=3, sleep=lambda s: None, clock=_FakeClock().now))
 
 
 class _FakeClock:

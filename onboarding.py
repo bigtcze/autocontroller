@@ -306,8 +306,15 @@ def memory_inspect_action(args):
 
 
 def status_action():
-    """Read-only summary, then the existing systemctl status output."""
-    active=lifecycle.service_active()
+    """Read-only summary, then the existing systemctl status output.
+
+    An unreadable unit state prints `service: unknown` and does not raise: status is a report, and the
+    systemctl status output below still shows what the unit is doing. Only the summary line changes.
+    """
+    try:
+        active=lifecycle.service_active()
+    except lifecycle.LifecycleError:
+        active=None
     for line in lifecycle.status_lines(ROOT,active=active): print(line)
     run('systemctl','--user','status','autocontroller.service','--no-pager')
 

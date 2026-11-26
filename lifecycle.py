@@ -689,7 +689,7 @@ def healthy(*, check, seconds: int, sleep=time.sleep, clock=time.monotonic) -> b
     N1: every poll must read active/running with the same nonzero MainPID and the same NRestarts as
     the first poll after start. An auto-restart (a new PID, a higher counter, or a state flip to
     activating) fails the window. Any unreadable state raises, which the caller treats as failure.
-    Polling is 1s so a crash is seen quickly.
+    Polling is 1s so a crash is seen quickly. An unreadable state in the window is a failure (R1).
     """
     if not check():
         return False
@@ -699,7 +699,12 @@ def healthy(*, check, seconds: int, sleep=time.sleep, clock=time.monotonic) -> b
     deadline = clock() + seconds
     while clock() < deadline:
         sleep(1.0)
-        now = unit_state()
+        # R1: an unreadable state inside the window is a failed check, not an exception. The caller then
+        # stops the new code and restores the previous release; a raise here would skip abort_swap.
+        try:
+            now = unit_state()
+        except LifecycleError:
+            return False
         if not can_drain(now) or now['MainPID'] != first['MainPID'] or now['NRestarts'] != first['NRestarts']:
             return False
     return True
@@ -1184,6 +1189,12 @@ def diagnose(target: Path, *, unit_dir: Path, bin_dir: Path) -> tuple[list[str],
         failures.append('rollback/incoming exists: an earlier update did not finish; inspect it before updating')
     if (target / 'rollback' / 'swap').exists() or (target / 'rollback' / 'swap').is_symlink():
         failures.append('rollback/swap exists: an earlier rollback did not finish; run `autocontroller rollback --recover`')
+    aside = target / 'rollback' / 'previous.old'
+    if aside.exists() or aside.is_symlink():
+        # A leftover aside copy with no swap: the rollback finished, only the old store was not removed.
+        # `rollback --recover` deletes it; it changes no program file, so it is a warning.
+        warnings.append('rollback/previous.old is left over from an interrupted rollback; '
+                        'run `autocontroller rollback --recover` to remove it')
     request = target / 'state' / DRAIN_REQUEST
     if os.path.lexists(request):
         # S2: a request counts only while its updater holds lifecycle.lock. Without the lock it is
@@ -1198,10 +1209,14 @@ def diagnose(target: Path, *, unit_dir: Path, bin_dir: Path) -> tuple[list[str],
     return failures, warnings
 
 
-def status_lines(target: Path, *, active: bool) -> list[str]:
-    """Human-readable status. Read-only: takes the service state from the caller."""
+def status_lines(target: Path, *, active: bool | None) -> list[str]:
+    """Human-readable status. Read-only: takes the service state from the caller.
+
+    `active` is None when the unit state could not be read: the service line then says unknown.
+    """
+    service = 'unknown' if active is None else ('active' if active else 'not active')
     lines = [f'version: {installed_version(target) or "unknown"}',
-             f'service: {"active" if active else "not active"}']
+             f'service: {service}']
     rollback = _read_json(target / 'rollback' / 'previous' / 'VERSION')
     kept = rollback.get('tag') if isinstance(rollback, dict) else None
     lines.append(f'previous kept for rollback: {kept or "none"}')

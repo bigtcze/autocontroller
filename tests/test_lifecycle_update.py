@@ -421,6 +421,37 @@ class HealthAndRollbackTest(Base):
             self.update(check=lambda: False)
         self.assertEqual(self.history()[-1]['result'], 'rollback_unhealthy')
 
+    def test_unreadable_state_inside_health_window_rolls_back_and_restores_previous(self):
+        # R1: a `show` read that fails inside the window must not escape update. It is a failed check:
+        # the new code is stopped, the staged swap is aborted, the previous release is restored byte-identical,
+        # no rollback/incoming is left, and the failure is reported in the update result.
+        before = {n: (self.world.install / n).read_bytes() for n in ('autonomy-controller.py', 'PROGRAM.json')}
+        reads = {'after_start': 0}
+
+        def unreadable(_service):
+            reads['after_start'] += 1
+            raise lc.LifecycleError('systemctl show returned unreadable output')
+
+        def garbage_after_start(seconds):
+            if 'start' in self.service.verbs and self.service.show_override is None and not reads['after_start']:
+                self.service.show_override = unreadable
+        original_stop = lc.stop_service
+
+        def stop_and_clear():
+            original_stop()
+            self.service.show_override = None  # the rollback's stop ends the scripted failure
+        lc.stop_service = stop_and_clear
+        self.addCleanup(setattr, lc, 'stop_service', original_stop)
+        self.world.on_sleep = garbage_after_start
+        with self.assertRaisesRegex(lc.LifecycleError, 'failed its health check'):
+            self.update()
+        self.assertGreaterEqual(reads['after_start'], 1, 'the unreadable read must happen inside the window')
+        self.assertEqual(self.world.tag(), 'v1.0.0')
+        self.assertFalse((self.world.install / 'rollback' / 'incoming').exists())
+        for name, data in before.items():
+            self.assertEqual((self.world.install / name).read_bytes(), data, name)
+        self.assertEqual(self.history()[-1]['result'], 'rolled_back')
+
     def test_service_dying_in_health_window_triggers_rollback(self):
         def crash_after_start(seconds):
             if 'start' in self.service.verbs:
