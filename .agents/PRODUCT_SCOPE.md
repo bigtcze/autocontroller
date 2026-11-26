@@ -38,12 +38,17 @@ Status: unreleased; under development. No public release has been published.
   open Issue of the repository in the Project with a non-blank, nonterminal Status
   (link validation only, not scheduling authority). Authorship
   is by the controller account's numeric id recorded at intent time; adoption of an
-  interrupted attempt searches the creator's recent Issues (REST, paginated) rather
-  than a truncated list. The controller completes unfinished follow-ups without AI
+  interrupted attempt lists the repository's recent Issues (REST, paginated, `since`
+  with a 24h clock-skew margin) and matches the controller account's numeric id and
+  the body marker, never the login (`creator=` is not used). The controller completes unfinished follow-ups without AI
   before new selection and also defers maintenance while one is blocked. Each
   journal entry must match its worker's repository and Project or it is refused.
   Authority rule: `.agents/SECURITY.md` ("Work authorization"); this is a logical
   control, not a sandbox.
+- **Known unknown:** follow-up admission and link validation refuse a Project with more
+  than 1000 items (`project item-list --limit 1000` plus a `totalCount` check), and a
+  long-blocked intent entry can hit the repository listing page bound; recovery is in
+  the README ("Recovering a blocked or foreign follow-up").
 - **Known unknown:** the native dependency endpoint
   (`repos/{repo}/issues/{n}/dependencies/blocked_by`, POST with the database `id`)
   is modelled offline only. It has not been exercised against live GitHub, so a

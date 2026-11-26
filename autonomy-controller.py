@@ -139,7 +139,7 @@ def is_renovate(pr: dict, repo: str) -> bool:
 TERMINAL_PROJECT_STATUSES = {"done", "completed", "closed", "cancelled", "canceled", "archived"}
 # New ordinary work is selected only from Todo; In Progress/Review are recovery of already-started work.
 READY_PROJECT_STATUSES = {"todo", "to do"}
-ACTIVE_PROJECT_STATUSES = {"in progress", "review"}
+ACTIVE_PROJECT_STATUSES = {"in progress", "review", "doing", "active", "started"}
 
 
 def normalize_status(status) -> str:
@@ -1300,7 +1300,7 @@ class ProjectWorker:
             # An active feature-release ticket suppresses maintenance, including
             # one waiting on explicit human approval.
             active=any(releases.release_issue_tag(item.get("title",""))
-                       and item.get("status","").lower() in ("in progress","review")
+                       and normalize_status(item.get("status")) in ACTIVE_PROJECT_STATUSES
                        for item in items)
             if not active:
                 prs=releases.merged_since(self.repo,self.base_branch,current["published_at"],

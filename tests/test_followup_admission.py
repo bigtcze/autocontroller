@@ -206,8 +206,13 @@ class FakeGitHub:
                 blocker = self._issue_by_id(json.loads(stdin or '{}')['issue_id'])
                 self.deps.setdefault((repo, number), set()).add(blocker['number'])
                 return '{}'
-            # Paginated GET (--paginate --slurp) returns a list of pages; one page is enough here.
-            return json.dumps([[{'number': n} for n in sorted(self.deps.get((repo, number), set()))]])
+            # Without --paginate gh returns only page 1. The fake serves two pages, with the existing
+            # blockers split so that page 2 holds at least one link: a missing --paginate loses it.
+            links = [{'number': n} for n in sorted(self.deps.get((repo, number), set()))]
+            if '--paginate' not in argv:
+                return json.dumps(links[:1])
+            half = max(1, len(links) // 2)
+            return json.dumps([links[:half], links[half:]] if len(links) > 1 else [links])
         pr = re.fullmatch(r'repos/([^/]+/[^/]+)/pulls/(\d+)', path)
         if pr:
             # Renovate PR read: a verified open PR (fixtures decide head/base elsewhere).
@@ -598,6 +603,39 @@ class CreateTests(FollowupBase):
         self.create(self.payload(key='dep', blocks=[50]))
         self.assertEqual(len([c for c in self.gh.calls if '--method' in c and 'POST' in c]), posts)
 
+    def test_existing_link_on_page_two_is_seen_so_no_duplicate_post(self):
+        # The parent of the new follow-up (blocks=[50]) already blocks on 51 and 52. The two-page
+        # split puts one of them on page 2; the production GET passes --paginate, so the
+        # existing link is seen and no duplicate POST is sent.
+        self.gh.add_issue(REPO, 50, status='Todo')
+        self.gh.add_issue(REPO, 51, status='Todo')
+        self.gh.add_issue(REPO, 52, status='Todo')
+        self.gh.deps[(REPO, 50)] = {51, 52}
+        f.add_blocker(REPO, 50, 51)  # already present (page 2): must not POST again
+        posts = [c for c in self.gh.calls if '--method' in c and 'POST' in c]
+        self.assertEqual(posts, [], 'an existing blocker on page 2 is not re-posted')
+
+    def test_dependency_get_is_paginated_and_reads_page_two(self):
+        self.gh.add_issue(REPO, 60, status='Todo')
+        self.gh.deps[(REPO, 60)] = {61, 62}
+        real = self.gh.command
+        seen = []
+
+        def spy(argv, *, stdin=None, timeout=120):
+            if any('dependencies/blocked_by' in a for a in argv):
+                seen.append(list(argv))
+            return real(argv, stdin=stdin, timeout=timeout)
+
+        with patch.object(f, 'gh_command', side_effect=spy):
+            try:
+                blockers = f.blocked_by_numbers(REPO, 60)
+            except f.FollowupError:
+                blockers = None
+        # Asserted first, on the argv the production code sent: a GET without --paginate is the defect.
+        self.assertTrue(seen, 'the dependency GET was issued')
+        self.assertTrue(all('--paginate' in a for a in seen), f'every dependency GET must paginate: {seen}')
+        self.assertEqual(blockers, {61, 62}, 'both pages read')
+
     def test_blocked_by_parent_is_refused(self):
         with self.assertRaises(f.FollowupError):
             self.create(self.payload(key='self', blocked_by=[PARENT]))
@@ -642,7 +680,7 @@ class LostCreateReplyTests(FollowupBase):
         self.assertEqual(len(self.gh.created), 1)
         self.assertEqual(self.journal()[0]['state'], 'done')
 
-    def test_controller_one_iteration_adopts_lost_create_and_reaches_done(self):
+    def test_controller_followup_gate_adopts_lost_create_and_reaches_done(self):
         self.gh.lost_reply = ['garbage']
         with self.assertRaises(f.FollowupError):
             self.create()
@@ -744,6 +782,44 @@ class TodoAdmissionTests(FollowupBase):
         self.assertNotEqual(self.journal()[0]['state'], 'done')
 
 
+class TerminalStatusTests(FollowupBase):
+    """N1: a maintainer's terminal status is never overridden; a closed Issue is never admitted."""
+
+    def test_done_status_is_not_overridden_and_becomes_a_blocker(self):
+        original = self.gh.command
+
+        def done_on_add(argv, *, stdin=None, timeout=120):
+            out = original(argv, stdin=stdin, timeout=timeout)
+            if argv[:2] == ['project', 'item-add']:
+                self.gh.row(argv[argv.index('--url') + 1])['status'] = 'Done'
+            return out
+
+        with patch.object(f, 'gh_command', side_effect=done_on_add):
+            with self.assertRaises(f.FollowupError) as ctx:
+                self.create()
+        self.assertIn("maintainer moved follow-up", str(ctx.exception))
+        self.assertIn("'done'", str(ctx.exception))
+        self.assertIn('owner action', str(ctx.exception))
+        self.assertEqual(self.gh.edits, [], 'no item-edit was sent over a terminal status')
+        self.assertEqual(self.journal()[0]['state'], 'added', 'entry kept unfinished, never done')
+
+    def test_closed_issue_is_not_admitted(self):
+        original = self.gh.command
+
+        def close_on_add(argv, *, stdin=None, timeout=120):
+            out = original(argv, stdin=stdin, timeout=timeout)
+            if argv[:2] == ['project', 'item-add']:
+                self.gh.repos[REPO][self.gh.created[-1][1]]['state'] = 'closed'
+            return out
+
+        with patch.object(f, 'gh_command', side_effect=close_on_add):
+            with self.assertRaises(f.FollowupError) as ctx:
+                self.create()
+        self.assertIn('is closed; not admitted', str(ctx.exception))
+        self.assertEqual(self.gh.edits, [], 'a closed Issue is never edited into Todo')
+        self.assertNotEqual(self.journal()[0]['state'], 'done')
+
+
 class CliExitTests(FollowupBase):
     """Non-blocking 2: exit 2 with 'follow-up refused:' only before journaling; exit 3 with pending JSON after."""
 
@@ -774,6 +850,52 @@ class CliExitTests(FollowupBase):
         self.assertIn('error', result)
         self.assertNotIn('follow-up refused', err)
         self.assertEqual(len(self.journal()), 1)
+
+    def test_malformed_reply_after_journaling_exits_3_pending(self):
+        original = self.gh.command
+        listing = {'calls': 0}
+
+        def backlog_then_malformed(argv, *, stdin=None, timeout=120):
+            if argv[:2] == ['project', 'item-add']:
+                out = original(argv, stdin=stdin, timeout=timeout)
+                # Automation lands the new item in Backlog, so step_added must edit and re-read.
+                self.gh.row(argv[argv.index('--url') + 1])['status'] = 'Backlog'
+                return out
+            if argv[:2] == ['project', 'item-edit']:
+                return original(argv, stdin=stdin, timeout=timeout)
+            if argv[:2] == ['project', 'item-list'] and self.gh.edits:
+                listing['calls'] += 1
+                # The re-read reply is malformed: a row with a non-dict content raises TypeError
+                # inside item_for's .get, which step_added must convert to a pending blocker.
+                return json.dumps({'items': [{'content': 'not-a-dict', 'status': 'Todo', 'id': 'x'}],
+                                   'totalCount': 1})
+            return original(argv, stdin=stdin, timeout=timeout)
+
+        def malformed_read(argv, stdin=None):
+            # project_items reads through gh_json, not gh_command: inject the malformed list there.
+            if argv[:2] == ['project', 'item-list'] and self.gh.edits:
+                listing['calls'] += 1
+                return {'items': [{'content': 'not-a-dict', 'status': 'Todo', 'id': 'x'}], 'totalCount': 1}
+            return json.loads(self.gh.command(argv, stdin=stdin) or 'null')
+
+        with patch.object(f, 'gh_command', side_effect=backlog_then_malformed), \
+                patch.object(f, 'gh_json', side_effect=malformed_read):
+            rc, out, err = self.run_cli(self.payload())
+        self.assertGreaterEqual(listing['calls'], 1, 'the malformed re-read happened after journaling')
+        self.assertEqual(rc, f.EXIT_PENDING)
+        result = json.loads(out)
+        self.assertTrue(result['pending'])
+        self.assertIn('malformed reply', result['error'])
+        self.assertNotIn('follow-up refused', err)
+        self.assertEqual(len(self.journal()), 1, 'entry journaled, not refused')
+
+    def test_malformed_input_before_journaling_exits_2_refused(self):
+        # A grant whose repo field is not a string fails before journaling: refused, exit 2.
+        self.write_grant(repo=None)
+        rc, out, err = self.run_cli(self.payload())
+        self.assertEqual(rc, f.EXIT_REFUSED)
+        self.assertIn('follow-up refused:', err)
+        self.assertEqual(self.journal(), [])
 
     def test_instruction_forbids_recreating_under_a_new_key(self):
         text = f.instruction(self.pdir, TOKEN)

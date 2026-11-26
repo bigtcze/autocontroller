@@ -426,7 +426,7 @@ def onboard(url=None):
     c.json_atomic(CONFIG,config)
     run('systemctl','--user','enable','autocontroller.service')
     run('systemctl','--user','restart','autocontroller.service')
-    print(f'\nOnboarded {repo}. Bootstrap issue: https://github.com/{repo}/issues/{bootstrap}\nBacklog: {project_url}\nEnable Renovate for this repository: https://github.com/apps/renovate\nUse autocontroller status and autocontroller logs to monitor startup. To give the agent new work, add a real GitHub Issue to this Project and set its Status to Todo (or To do); the controller offers only Todo and In Progress/Review Issues.')
+    print(f'\nOnboarded {repo}. Bootstrap issue: https://github.com/{repo}/issues/{bootstrap}\nProject: {project_url}\nEnable Renovate for this repository: https://github.com/apps/renovate\nUse autocontroller status and autocontroller logs to monitor startup. To give the agent new work, add a real GitHub Issue to this Project and set its Status to Todo (or To do); the controller offers only Todo and In Progress/Review Issues.')
 
 
 def lifecycle_action(action, args):

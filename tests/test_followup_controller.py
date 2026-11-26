@@ -63,7 +63,10 @@ class ControllerFollowupBase(FollowupBase):
         return patcher.start()
 
     def _stop_patch(self, name):
-        for index, (key, patcher) in enumerate(self._patchers):
+        # LIFO: the same name may be patched repeatedly (subtests); stopping the newest first
+        # restores the original object instead of leaking an older mock into other tests.
+        for index in range(len(self._patchers) - 1, -1, -1):
+            key, patcher = self._patchers[index]
             if key == name:
                 patcher.stop()
                 del self._patchers[index]
@@ -325,6 +328,15 @@ class MaintenanceSuppressionTests(ControllerFollowupBase):
 
     def test_in_progress_feature_release_still_suppresses_maintenance(self):
         self.assertIsNone(self.due([self.release_item('In Progress')]))
+
+    def test_started_synonyms_suppress_maintenance_like_in_progress(self):
+        # N8: the active check uses the shared normalizer and ACTIVE_PROJECT_STATUSES, which
+        # includes the set_status synonyms (doing, active, started).
+        for status in ('Doing', 'Active', 'Started', '  STARTED  '):
+            with self.subTest(status=status):
+                # check_maintenance caches its decision for 30 min; clear it so each status is evaluated.
+                self.w.release_cache.unlink(missing_ok=True)
+                self.assertIsNone(self.due([self.release_item(status)]))
 
 
 if __name__ == '__main__':

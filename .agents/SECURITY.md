@@ -21,7 +21,9 @@ repositories. Relevant threats:
   the selector only when it is a native Issue of the configured repository, is
   a member of its configured GitHub Project, and its Project Status is `Todo`
   or `To do` (new work), or `In Progress` or `Review` (recovery of work the
-  controller already admitted). Blank, `Backlog`, `Blocked`, custom and terminal
+  controller already admitted; `Doing`, `Active` and `Started` are accepted as the
+  same recovery lanes, matching `set_status`, see `ACTIVE_PROJECT_STATUSES`). Blank,
+  `Backlog`, `Blocked`, custom and terminal
   (`Done`, `Completed`, `Closed`, `Cancelled`, `Archived`) statuses are
   non-authorizing. Python never sorts candidates; ordering and dependencies are
   OMO's. Onboarding imports only open Issues authored by

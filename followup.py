@@ -482,14 +482,18 @@ def normalize_status(status) -> str:
 
 
 def step_added(entry: dict) -> None:
+    if str(live_issue(entry["repo"], int(entry["number"])).get("state") or "") != "open":
+        raise FollowupError(f"follow-up #{entry['number']} is closed; not admitted")
     row = item_for(entry, project_items(entry))
     if row is None:
         raise FollowupError(f"follow-up #{entry['number']} vanished from the Project")
     status = normalize_status(row.get("status"))
     if status not in READY_STATUSES:
-        # A controller-created item can start blank or in another lane (for example a Project
-        # workflow sets Backlog). Only a blank or non-Todo status is corrected here; a status a
-        # maintainer set is still moved to Todo because the follow-up must be schedulable.
+        # A blank status or a non-terminal lane (for example a Project workflow's Backlog) is
+        # corrected to Todo. A terminal status (Done, Closed, ...) is a maintainer decision and is
+        # never overridden: the entry stays unfinished as a blocker for the owner.
+        if status in TERMINAL_STATUSES:
+            raise FollowupError(f"maintainer moved follow-up #{entry['number']} to {status!r}; owner action")
         project_id, field_id, option_id = todo_option(entry)
         gh_command(["project", "item-edit", "--id", entry["item_id"], "--project-id", project_id,
                     "--field-id", field_id, "--single-select-option-id", option_id])
@@ -628,6 +632,21 @@ class PendingFollowup(FollowupError):
 
 
 def create(grant_path: Path, token: str, raw: str, state: Path) -> dict:
+    """Refused (FollowupError, exit 2) before journaling; pending (PendingFollowup, exit 3) after.
+
+    A malformed grant, reply or link before journaling is converted to a refusal, never a traceback.
+    """
+    try:
+        return _create(grant_path, token, raw, state)
+    except PendingFollowup:
+        raise
+    except FollowupError:
+        raise
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise FollowupError(f"malformed input or grant ({type(exc).__name__}: {exc})") from exc
+
+
+def _create(grant_path: Path, token: str, raw: str, state: Path) -> dict:
     grant_path = check_grant_path(grant_path, state)
     pdir = grant_path.parent
     obj = read_json(grant_path, None)
@@ -635,6 +654,9 @@ def create(grant_path: Path, token: str, raw: str, state: Path) -> dict:
         raise FollowupError("invalid or stale follow-up token")
     if obj.get("kind") != "issue":
         raise FollowupError("follow-ups are granted only for Issue tasks")
+    # Refuse a malformed grant before any GitHub call builds a path from it.
+    if not isinstance(obj.get("repo"), str) or "/" not in obj["repo"]:
+        raise FollowupError("grant has no valid repository; refused")
     # Pdir name must be the grant's project directory: a copied grant cannot be used elsewhere.
     if pdir.name != obj.get("project_dir"):
         raise FollowupError("grant does not belong to this project directory")
@@ -667,6 +689,9 @@ def create(grant_path: Path, token: str, raw: str, state: Path) -> dict:
         except FollowupError as exc:
             # Journaled: the follow-up exists in the state file, so this is pending, not refused.
             raise PendingFollowup(public(entry), str(exc)[:MAX_ERROR]) from exc
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            # A malformed reply after journaling is still pending: the controller completes it.
+            raise PendingFollowup(public(entry), f"malformed reply ({type(exc).__name__}: {exc})"[:MAX_ERROR]) from exc
         return public(entry)
 
 
