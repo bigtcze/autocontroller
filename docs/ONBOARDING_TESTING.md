@@ -16,7 +16,7 @@ ones.
 
 | Stand-in | File | Models | Refuses / fails closed |
 | --- | --- | --- | --- |
-| `gh` | `tests/fake_gh.py` | The `gh` invocations onboarding and the controller's Project code use: `auth`, `api` (repos, issues, user), `project` (list, create, link, view, field-list, item-list, item-add, item-edit). | Exits 4 on any unlisted invocation. Exits 5 if `GH_TOKEN`, `GITHUB_TOKEN` or `GH_ENTERPRISE_TOKEN` is set, and records the refusal in a sidecar `<state>.refused` file without reading or mutating state. |
+| `gh` | `tests/fake_gh.py` | The `gh` invocations onboarding and the controller's Project code use: `auth`, `api` (repos, issues, user, branch protection summary `repos/O/R/branches/B`, branch rules `repos/O/R/rules/branches/B`, repository rulesets list, get and POST `repos/O/R/rulesets`), `project` (list, create, link, view, field-list, item-list, item-add, item-edit). The rulesets POST reads its JSON body from `--input -`. | Exits 4 on any unlisted invocation. Exits 5 if `GH_TOKEN`, `GITHUB_TOKEN` or `GH_ENTERPRISE_TOKEN` is set, and records the refusal in a sidecar `<state>.refused` file without reading or mutating state. |
 | `opencode` | `tests/fake_opencode.py` | The read-only API probe (`api GET /api/info`, `/api/agent/{orchestrator,fixer,oracle}`). Every call is logged. | `run` (a paid model session) always exits 3. Unknown forms exit 4. |
 | `systemctl` | `tests/fake_systemctl.py` | `--user` with `enable`, `disable`, `restart`, `start`, `stop`, `is-active`, `status`, `show`, `daemon-reload`, for `autocontroller.service` only. | Anything else exits 4. Faults fail before any effect. |
 
@@ -54,8 +54,8 @@ A fault is `{"match": [tokens], "mode": "before" | "after", "rc": N, "once": boo
   root's `config.json` are not created. The harness fails fast if a subprocess
   exceeds its timeout (120 s per call).
 
-Every subprocess has a timeout. The whole integration module (32 tests) runs in about 48 s
-on the development host.
+Every subprocess has a timeout. The integration module (`tests/test_onboarding_integration.py`, 53 tests) runs in about 100 s
+on the development host. The unit module (`tests/test_onboarding.py`, 55 tests) runs in under a second.
 
 ## 3. Fault-injection phase matrix
 
@@ -85,10 +85,11 @@ successful unit action.
 | `final item-list` | Final presence check fails |
 | `systemctl enable` | Enable fails |
 | `systemctl restart` | Restart fails |
+| `ruleset POST` (gate, not in the 16-phase loop) | Ruleset created, response lost; the rerun verifies enforcement and adds no second ruleset (`test_lost_ruleset_post_response_resumes_to_one_ruleset_and_no_second_post`) |
 
 Other recovery and duplicate tests:
 
-- A second successful run is a no-op: no mutating GitHub call and an identical config file.
+- A second successful run is a no-op: no mutating GitHub call and an identical config file. Its protection check is read-only and prints a stderr warning only if the required check is no longer enforced.
 - Lost local config, with remote Project and bootstrap intact: the rerun creates no Project, no item-add and no issue.
 - A held `onboarding.lock` refuses the run before any call.
 - Existing config entries and settings are preserved, and the config mode stays `0600`.
@@ -102,11 +103,12 @@ Other recovery and duplicate tests:
 | Merge modes | Preferred method is squash, then merge, then rebase; no supported method refuses before any mutation. |
 | Permissions | Missing push refused; issues disabled and no admin refused; issues disabled with admin patched; org Project creation denied; another user's personal repo refused; missing `project` scope triggers refresh; refresh failure leaves no remote mutation. |
 | OAuth handoff | Not logged in runs `auth login --web --scopes project,workflow` with exact arguments; login abort is nonzero with no mutation; `GH_TOKEN` in the onboarding environment is refused before any `gh` call; the token value never appears in output or config. |
-| Interruption / resume | The 16-phase matrix above, run with the OWNER viewer. The `POST issue` phase is also run with a CONTRIBUTOR viewer (`test_post_issue_interruption_with_contributor_viewer_resumes_to_one_bootstrap`). |
+| Interruption / resume | The 16-phase matrix above, run with the OWNER viewer. The 16 phases use the default `required` classic protection, so no ruleset is added in them. The `POST issue` phase is also run with a CONTRIBUTOR viewer (`test_post_issue_interruption_with_contributor_viewer_resumes_to_one_bootstrap`). |
 | Duplicates and lock | Second run no-op; lost local config reuses remote state; lost config with a CONTRIBUTOR viewer creates no second bootstrap (`test_lost_config_rerun_with_contributor_viewer_creates_no_second_bootstrap`); concurrent lock refused. |
 | Existing state | Config preserved; `insteadOf` resume accepted; uncommitted and ahead checkouts refused. |
 | Admission and isolation | Only open, trusted, non-Renovate Issues are imported; foreign-repo items refuse before linking; a Project assigned to another configured repo is refused; a closed same-title Project is refused; no side effects outside the world. |
 | Config shape | The entry onboarding writes equals the shared fixture `tests/onboarded_fixture.py` (drift guard). |
+| Required-check gate | Classic `everyone` with `required` passes with zero POST; no protection with admin and consent adds exactly one ruleset, then configures; decline or EOF changes nothing; no protection without admin fails closed with an owner action; a same-named disabled ruleset is refused and not modified; a bypassable ruleset (`always`, `pull_requests_only`, `exempt`) does not count; classic `non_admins` is missing for admins and added after consent; existing stronger classic rules and other rulesets stay byte-identical; ambiguous summaries and truncated or malformed rules responses refuse; a rules API error refuses; a lost ruleset POST resumes to one ruleset; a same-name ruleset is refused before any POST, and the fake returns 422 for a duplicate name; `~ALL` with an `exclude` is matched as GitHub documents it. An OpenCode session (`OPENCODE_SESSION_ID`) is refused before the consent prompt and any POST, and protection is still read first. Resume on an enrolled repository is read-only: an enforced branch prints nothing, and a removed requirement prints a stderr warning with zero mutating calls and an unchanged config. A static test confirms `onboarding.py` has one ruleset POST and no PUT/PATCH/DELETE on protection or rulesets. A POST timeout and a `ControllerError` from the rules read both become owner-action errors. Classic enforcement is decided before rulesets, so a classic-enforced branch is not blocked by an ambiguous rules response; without classic enforcement an ambiguous rules response still refuses. |
 
 Controller-side admission and authority tests (`tests/test_admission_and_authority.py`)
 use the same fixture as the bootstrap config. They cover failed bootstrap PR or
@@ -153,6 +155,13 @@ checked against live GitHub. A live run must confirm or correct each one.
 16. The `selector_signature` activity read (`repos/O/R/issues?state=all&sort=updated`) returns comments-independent fields the decider needs.
 17. `gh project item-list` returns `content.body` for each Issue row. The controller's board digest (`body_sha256`) depends on it; without it, body edits would not wake the selector.
 18. `POST repos/O/R/issues` returns `user.id` for the authenticated account. Bootstrap re-discovery for a non-trusted viewer depends on it (B-1).
+19. `GET repos/O/R/branches/B` returns `protected` and, when protected, `protection.required_status_checks` with `enforcement_level`, `contexts` and `checks`, readable without admin rights. Its `protected`/`protection` shape and `enforcement_level` values (`off`, `non_admins`, `everyone`) are assumed.
+20. `GET repos/O/R/rules/branches/B` lists only active rulesets, each `required_status_checks` rule carrying `ruleset_id`, and paginates as a list of pages. `GET repos/O/R/rulesets/ID` returns `enforcement` and `current_user_can_bypass` (`always`, `pull_requests_only`, `exempt`, `never`). The fake also treats `current_user_can_bypass` as present for every ruleset; live GitHub may omit it, which onboarding refuses.
+21. `POST repos/O/R/rulesets` with `--input -` and the body onboarding sends (`target: branch`, `bypass_actors: []`, `integration_id: 15368`, GitHub Actions) is accepted for a repository admin and rejected with a readable message on plans without rulesets. The fake returns 403 for non-admins and assigns ids incrementally.
+22. `GET repos/O/R/rulesets?includes_parents=false` lists the repository's own rulesets with `name` and `enforcement`, used to detect an owner-disabled ruleset named `AutoController required check`.
+23. Ref matching for `conditions.ref_name` follows GitHub's documented semantics: `include` and `exclude` patterns are evaluated against the branch; `~ALL` matches every branch; `~DEFAULT_BRANCH` matches only the default branch. The fake implements exactly these three forms. Other patterns (for example `refs/heads/feature/*`) never match in the fake, so a live ruleset using them could be classified differently.
+24. A POST whose `name` already exists in the repository's rulesets is rejected with HTTP 422. The fake returns 422 for this case; live GitHub's exact status and message are assumed, not checked. Onboarding refuses before the POST when a same-named ruleset exists, so this path is a defence, not the main path.
+25. Agent-session detection reuses the controller's `lifecycle.refuse_agent` markers (`OPENCODE_SESSION_ID` and `AUTONOMY_*`); the gate refuses before consent, so an agent cannot consent to a ruleset write.
 
 **Security note.** Once a maintainer admits an outsider-authored Issue to the Project (for example by adding it manually), that author's later title, body and label edits can wake a new selection. Admission is the trust decision; the selector does not re-check the author.
 
@@ -212,5 +221,5 @@ sandbox organization is shared or per-run; and the exact cost ceiling.
 
 - The suite does not prove GitHub's real responses. Section 6 lists what it assumes.
 - No test runs `install.sh`, the real `autonomy-controller.py` service, or a real OpenCode session.
-- Pagination, rate limits, SSO, branch protection and proxies are not simulated.
+- Pagination beyond one page, rate limits, SSO and proxies are not simulated. Branch protection and rulesets are simulated only as the fixed summaries and rows described in section 1 and assumptions 19 to 22; they have not been checked against live GitHub.
 - Live onboarding, the sandbox path in section 7 and the VM lifecycle suite are separate; see [VALIDATION.md](VALIDATION.md).

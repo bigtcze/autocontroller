@@ -23,6 +23,7 @@ import re
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import unquote
 
 TOKEN_ENV = ('GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN')
 ISSUE_URL = re.compile(r'^https://github\.com/([^/]+)/([^/]+)/issues/(\d+)$')
@@ -30,7 +31,7 @@ DEFAULT_STATUS = ['Todo', 'In Progress', 'Done']
 VALUE_OPTIONS = {'--method', '-X', '-f', '-F', '-H', '--owner', '--format', '--limit',
                  '--title', '--repo', '--url', '--scopes', '--hostname', '--git-protocol',
                  '--id', '--project-id', '--field-id', '--single-select-option-id',
-                 '--dir', '--pattern'}
+                 '--dir', '--pattern', '--input'}
 BOOL_OPTIONS = {'-i', '--paginate', '--slurp', '--closed', '--web'}
 
 
@@ -155,7 +156,76 @@ def auth(argv: list[str], state: dict) -> str:
     raise Unsupported(' '.join(argv))
 
 
-def api(args: list[str], state: dict) -> str:
+def ref_matches(condition: dict, branch: str, default_branch: str) -> bool:
+    """GitHub ref_name matching for branch rulesets: include patterns minus exclude patterns.
+
+    Supports refs/heads/<name>, ~DEFAULT_BRANCH and ~ALL (every branch). Other patterns never match here.
+    """
+    def one(pattern: str) -> bool:
+        if pattern == '~ALL':
+            return True
+        if pattern == '~DEFAULT_BRANCH':
+            return branch == default_branch
+        return pattern == f'refs/heads/{branch}'
+    included = any(one(p) for p in condition.get('include', []))
+    excluded = any(one(p) for p in condition.get('exclude', []))
+    return included and not excluded
+
+
+def governance_api(parts: list[str], method: str, flags: set, body: str | None, state: dict) -> str:
+    """Branch protection (classic summary), branch rules and repository rulesets.
+
+    State: `protection[<repo lower>]` = {'protected': bool, 'protection': {...}} (classic summary, applied to
+    every branch); `rulesets[<repo lower>]` = rulesets with `id`, `name`, `enforcement`, `conditions`, `rules`
+    and optional `current_user_can_bypass` (default 'never'; null omits the field); `next_ruleset_id`.
+    """
+    repo = find_repo(state, parts[1], parts[2])
+    key = repo['full_name'].lower()
+    # Reads must not create state: only the POST below writes the rulesets list.
+    rulesets = state.get('rulesets', {}).get(key, [])
+    if parts[3] == 'branches' and len(parts) == 5 and method == 'GET':
+        summary = state.get('protection', {}).get(key, {'protected': False, 'protection': {'enabled': False, 'required_status_checks': {'enforcement_level': 'off', 'contexts': [], 'checks': []}}})
+        return json.dumps({'name': unquote(parts[4]), **summary}) + '\n'
+    if parts[3] == 'rules' and len(parts) == 6 and parts[4] == 'branches' and method == 'GET':
+        branch = unquote(parts[5])
+        rows = []
+        for ruleset in rulesets:
+            if ruleset.get('enforcement') != 'active':
+                continue  # the rules endpoint only reports active rulesets
+            if not ref_matches(ruleset.get('conditions', {}).get('ref_name', {}), branch, repo['default_branch']):
+                continue
+            for rule in ruleset.get('rules', []):
+                rows.append({**rule, 'ruleset_id': ruleset['id'], 'ruleset_source_type': 'Repository', 'ruleset_source': repo['full_name']})
+        return json.dumps([rows] if '--slurp' in flags else rows) + '\n'
+    if parts[3] == 'rulesets' and len(parts) == 4 and method == 'GET':
+        return json.dumps([rulesets] if '--slurp' in flags else rulesets) + '\n'
+    if parts[3] == 'rulesets' and len(parts) == 4 and method == 'POST':
+        if not repo['permissions'].get('admin'):
+            raise Fail(1, 'HTTP 403: Must have admin rights to Repository.')
+        if body is None:
+            raise Unsupported('ruleset POST without --input -')
+        doc = json.loads(body)
+        rulesets = state.setdefault('rulesets', {}).setdefault(key, [])
+        if any(r.get('name') == doc.get('name') for r in rulesets):
+            raise Fail(1, 'HTTP 422: Validation Failed: name already exists for this repository')
+        number = state.get('next_ruleset_id', 1)
+        state['next_ruleset_id'] = number + 1
+        stored = {**doc, 'id': number, 'current_user_can_bypass': 'never'}
+        rulesets.append(stored)
+        return json.dumps(stored) + '\n'
+    if parts[3] == 'rulesets' and len(parts) == 5 and method == 'GET':
+        for ruleset in rulesets:
+            if str(ruleset['id']) == parts[4]:
+                doc = dict(ruleset)
+                bypass = doc.pop('current_user_can_bypass', 'never')
+                if bypass is not None:
+                    doc['current_user_can_bypass'] = bypass
+                return json.dumps(doc) + '\n'
+        raise Fail(1, 'HTTP 404: Not Found (https://api.github.com/repos/rulesets)')
+    raise Unsupported('governance api ' + '/'.join(parts))
+
+
+def api(args: list[str], state: dict, body: str | None = None) -> str:
     positional, opts, flags, fields = parse(args)
     if len(positional) != 1:
         raise Unsupported('api ' + ' '.join(args))
@@ -173,6 +243,11 @@ def api(args: list[str], state: dict) -> str:
         scopes = ', '.join(sorted(state.get('scopes', [])))
         return ('HTTP/2.0 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n'
                 f'X-OAuth-Scopes: {scopes}\r\nX-Accepted-OAuth-Scopes: \r\n\r\n' + body)
+    if parts[:1] == ['repos'] and len(parts) >= 4 and parts[3] in ('branches', 'rules', 'rulesets'):
+        # `raw_responses` replaces a path's body with literal text (ambiguity and truncation fixtures).
+        if base in state.get('raw_responses', {}):
+            return state['raw_responses'][base]
+        return governance_api(parts, method, flags, body, state)
     if parts[:1] == ['repos'] and len(parts) in (3, 4):
         repo = find_repo(state, parts[1], parts[2])
         key = repo['full_name'].lower()
@@ -326,7 +401,7 @@ def release_cmd(args: list[str], state: dict) -> str:
     return ''
 
 
-def handle(argv: list[str], state: dict) -> str:
+def handle(argv: list[str], state: dict, body: str | None = None) -> str:
     if not argv:
         raise Unsupported('(no arguments)')
     if argv[0] == 'auth' and len(argv) > 1:
@@ -338,7 +413,7 @@ def handle(argv: list[str], state: dict) -> str:
             return git_ref_api(argv[1].split('/git/ref/', 1)[1], state)
         if len(argv) == 4 and argv[1:3] == ['--method', 'GET'] and '/releases/' in argv[3]:
             return release_api(argv[3].split('/releases/', 1)[1], state)
-        return api(argv[1:], state)
+        return api(argv[1:], state, body)
     if argv[0] == 'project' and len(argv) > 1:
         return project(argv[1:], state)
     if argv[0] == 'release' and len(argv) > 1:
@@ -360,7 +435,7 @@ def matches(tokens: list[str], argv: list[str]) -> bool:
     return True
 
 
-def run_invocation(argv: list[str], state: dict) -> tuple[int, str, str]:
+def run_invocation(argv: list[str], state: dict, body: str | None = None) -> tuple[int, str, str]:
     for fault in state.get('faults', []):
         if not matches(fault.get('match') or [], argv):
             continue
@@ -377,12 +452,12 @@ def run_invocation(argv: list[str], state: dict) -> tuple[int, str, str]:
         if fault.get('mode') != 'after':
             return 4, '', 'fake gh: invalid fault mode\n'
         try:
-            handle(argv, state)  # the server accepted the mutation ...
+            handle(argv, state, body)  # the server accepted the mutation ...
         except Fail:
             pass
         return rc, '', 'fake gh: injected lost response after the server accepted the request\n'
     try:
-        return 0, handle(argv, state), ''
+        return 0, handle(argv, state, body), ''
     except Fail as exc:
         return exc.rc, '', exc.message + '\n'
     except Exception as exc:  # fail closed: an internal error is never success
@@ -414,11 +489,14 @@ def main(argv: list[str]) -> int:
         sys.stderr.write('fake gh: FAKE_GH_STATE is not set\n')
         return 4
     path = Path(raw)
+    # Read the --input body once, before any replay: fault "after" re-invokes the handler.
+    index = argv.index('--input') if '--input' in argv else -1
+    body = sys.stdin.read() if index >= 0 and argv[index + 1:index + 2] == ['-'] else None
     try:
         with path.with_name(path.name + '.lock').open('a', encoding='utf-8') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             state = json.loads(path.read_text(encoding='utf-8'))
-            rc, out, err = run_invocation(argv, state)
+            rc, out, err = run_invocation(argv, state, body)
             state.setdefault('calls', []).append({'argv': argv, 'rc': rc})
             save(path, state)
     except (OSError, ValueError) as exc:

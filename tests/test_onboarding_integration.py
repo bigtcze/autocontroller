@@ -8,13 +8,14 @@ contract and its limits are documented in docs/ONBOARDING_TESTING.md.
 import fcntl
 import json
 import re
+import subprocess
 import sys
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import onboarding_harness  # noqa: E402
-from onboarding_harness import World, OWNER, ORG  # noqa: E402
+from onboarding_harness import World, OWNER, ORG, classic_protection  # noqa: E402
 from onboarded_fixture import onboarded_project_entry  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -292,7 +293,7 @@ class InterruptionResumeTests(OnboardingCase):
             'project link': [fault(['project', 'link'])],
             'project field-list': [fault(['project', 'field-list'])],
             'project item-list': [fault(['project', 'item-list'])],
-            'issues list': [fault(['GET', 'repos/'])],
+            'issues list': [fault(['GET', f'repos/{repo}/issues'])],
             'POST issue': [fault(['POST', 'repos/'], 'after')],
             'first item-add': [fault(['project', 'item-add'], 'after')],
             'later item-add': [fault(['project', 'item-add'], 'before', skip=1)],
@@ -592,3 +593,243 @@ class AdmissionIsolationTests(OnboardingCase):
         self.assertTrue(self.w.config_path().exists())
         self.assertTrue(self.w.checkout_dir(repo).is_relative_to(self.w.root))
         self.assertNotEqual(self.w.home, Path.home())
+
+
+GATE_RULESET = 'AutoController required check'
+
+
+def ruleset_posts(world):
+    """Every ruleset POST attempt, including ones whose response was lost (rc != 0 recorded)."""
+    return [c for c in world.gh_calls() if '--method' in c['argv'] and 'POST' in c['argv']
+            and any(a.startswith('repos/') and a.endswith('/rulesets') for a in c['argv'])]
+
+
+class RequiredCheckGateTests(OnboardingCase):
+    """Default-branch enforcement of the 'required' check, against the fake GitHub's protection and rulesets."""
+
+    def test_no_protection_admin_consent_adds_exactly_one_ruleset_and_configures(self):
+        repo = self.w.add_repo(OWNER, 'demo', default_branch='trunk', admin=True, protection=None)
+        result = self.onboard(repo, stdin='y\ny\n')
+        self.assertEqual(result.rc, 0, result.stderr)
+        self.assertIn("enforces required check 'required'", result.stdout)
+        rulesets = self.w.gh()['rulesets'][repo.lower()]
+        self.assertEqual(len(rulesets), 1)
+        ruleset = rulesets[0]
+        self.assertEqual(ruleset['name'], GATE_RULESET)
+        self.assertEqual(ruleset['enforcement'], 'active')
+        self.assertEqual(ruleset['bypass_actors'], [])
+        self.assertEqual(ruleset['conditions'], {'ref_name': {'include': ['refs/heads/trunk'], 'exclude': []}})
+        self.assertEqual(ruleset['rules'][0]['parameters']['required_status_checks'],
+                         [{'context': 'required', 'integration_id': 15368}])
+        self.assertEqual(len(ruleset_posts(self.w)), 1)
+        self.assert_success_state(repo, OWNER, 'trunk')
+
+    def test_lost_config_rerun_adds_no_second_ruleset(self):
+        repo = self.w.add_repo(OWNER, 'demo', default_branch='trunk', admin=True, protection=None)
+        self.assertEqual(self.onboard(repo, stdin='y\ny\n').rc, 0)
+        posts_before = len(ruleset_posts(self.w))
+        self.w.config_path().unlink()
+        rerun = self.onboard(repo)
+        self.assertEqual(rerun.rc, 0, rerun.stderr)
+        self.assertEqual(len(self.w.gh()['rulesets'][repo.lower()]), 1)
+        self.assertEqual(len(ruleset_posts(self.w)), posts_before)
+        self.assertEqual(posts_before, 1)
+
+    def test_declined_or_eof_consent_refuses_without_ruleset_project_config_or_bootstrap(self):
+        for stdin in ('y\nn\n', 'y\n'):
+            with self.subTest(stdin=stdin):
+                world = self.new_world()
+                self.w = world
+                repo = world.add_repo(OWNER, 'demo', default_branch='trunk', admin=True, protection=None)
+                result = self.onboard(repo, stdin=stdin)
+                self.assertNotEqual(result.rc, 0)
+                self.assertIn('owner declined', result.stderr)
+                self.assertIn('Branch protection and rulesets were not changed', result.stderr)
+                self.assertEqual(world.gh().get('rulesets', {}).get(repo.lower(), []), [])
+                self.assertEqual(ruleset_posts(world), [])
+                self.assertEqual(world.projects(), [])
+                self.assertEqual(world.bootstrap_issues(repo), [])
+                self.assertFalse(world.config_path().exists())
+
+    def test_non_admin_without_protection_fails_closed_with_owner_action_and_no_mutation(self):
+        repo = self.w.add_repo(OWNER, 'demo', default_branch='trunk', admin=False, protection=None)
+        result = self.onboard(repo, stdin='y\n')
+        self.assertNotEqual(result.rc, 0)
+        self.assertIn('ask a repository admin', result.stderr)
+        self.assertEqual(self.w.mutating_gh_calls(), [])
+        self.assertEqual(self.w.gh().get('rulesets', {}), {})
+        self.assertEqual(self.w.projects(), [])
+        self.assertFalse(self.w.config_path().exists())
+
+    def test_classic_protection_with_stronger_rules_and_existing_ruleset_is_preserved(self):
+        stronger = classic_protection(contexts=('lint',), checks=(), enforcement_level='everyone',
+                                      required_pull_request_reviews={'required_approving_review_count': 2},
+                                      required_signatures={'enabled': True},
+                                      required_linear_history={'enabled': True},
+                                      enforce_admins={'enabled': True})
+        repo = self.w.add_repo(OWNER, 'demo', default_branch='trunk', admin=True, protection=stronger)
+        other = {'enforcement': 'active', 'conditions': {'ref_name': {'include': ['~ALL'], 'exclude': []}},
+                 'rules': [{'type': 'pull_request', 'parameters': {'required_approving_review_count': 1}}]}
+        self.w.add_ruleset(repo, {'name': 'team rules', **other})
+        before_protection = json.dumps(self.w.gh()['protection'], sort_keys=True)
+        before_rulesets = json.dumps(self.w.gh()['rulesets'], sort_keys=True)
+        result = self.onboard(repo, stdin='y\ny\n')
+        self.assertEqual(result.rc, 0, result.stderr)
+        after = self.w.gh()
+        self.assertEqual(json.dumps(after['protection'], sort_keys=True), before_protection)
+        before_rows = json.loads(before_rulesets)[repo.lower()]
+        self.assertEqual(after['rulesets'][repo.lower()][:len(before_rows)], before_rows)
+        self.assertEqual(len(after['rulesets'][repo.lower()]), len(before_rows) + 1)
+        for call in self.w.gh_calls():
+            argv = call['argv']
+            if any(m in argv for m in ('PUT', 'PATCH', 'DELETE')):
+                self.assertFalse(any('/protection' in a or '/rulesets' in a for a in argv), argv)
+        self.assertEqual(len(ruleset_posts(self.w)), 1)
+
+    def test_owner_disabled_same_named_ruleset_refuses_without_modification(self):
+        repo = self.w.add_repo(OWNER, 'demo', default_branch='trunk', admin=True, protection=None)
+        self.w.add_ruleset(repo, {'name': GATE_RULESET, 'enforcement': 'disabled',
+                                  'conditions': {'ref_name': {'include': ['refs/heads/trunk'], 'exclude': []}},
+                                  'rules': [{'type': 'required_status_checks', 'parameters': {
+                                      'required_status_checks': [{'context': 'required'}]}}]})
+        before = json.dumps(self.w.gh()['rulesets'], sort_keys=True)
+        result = self.onboard(repo, stdin='y\ny\n')
+        self.assertNotEqual(result.rc, 0)
+        self.assertIn('will not modify it', result.stderr)
+        self.assertEqual(ruleset_posts(self.w), [])
+        self.assertEqual(json.dumps(self.w.gh()['rulesets'], sort_keys=True), before)
+        self.assertFalse(self.w.config_path().exists())
+
+    def test_ambiguous_branch_summary_fails_closed(self):
+        repo = self.w.add_repo(OWNER, 'demo', default_branch='trunk', admin=True, protection=None)
+        self.w.set_raw_response(f'repos/{repo}/branches/trunk', '{"protected": true}')
+        result = self.onboard(repo, stdin='y\ny\n')
+        self.assertNotEqual(result.rc, 0)
+        self.assertIn('could not be verified', result.stderr)
+        self.assertEqual(ruleset_posts(self.w), [])
+        self.assertEqual(self.w.mutating_gh_calls(), [])
+        self.assertFalse(self.w.config_path().exists())
+
+    def test_truncated_or_malformed_rules_responses_fail_closed(self):
+        over_limit = json.dumps([[{'type': 'other'}] * 1001])
+        cases = {
+            'over limit': over_limit,
+            'page not a list': json.dumps({'message': 'Not Found'}),
+            'rule without type': json.dumps([[{'parameters': {}}]]),
+            'required rule without ruleset_id': json.dumps([[{'type': 'required_status_checks', 'parameters': {
+                'required_status_checks': [{'context': 'required'}]}}]]),
+        }
+        for label, text in cases.items():
+            with self.subTest(case=label):
+                world = self.new_world()
+                self.w = world
+                repo = world.add_repo(OWNER, 'demo', default_branch='trunk', admin=True, protection=None)
+                world.set_raw_response(f'repos/{repo}/rules/branches/trunk', text)
+                result = self.onboard(repo, stdin='y\ny\n')
+                self.assertNotEqual(result.rc, 0)
+                self.assertEqual(ruleset_posts(world), [])
+                self.assertFalse(world.config_path().exists())
+
+    def test_rules_endpoint_api_error_fails_closed_without_post(self):
+        repo = self.w.add_repo(OWNER, 'demo', default_branch='trunk', admin=True, protection=None)
+        self.w.set_gh_faults([fault([f'repos/{repo}/rules/'])])
+        result = self.onboard(repo, stdin='y\ny\n')
+        self.assertNotEqual(result.rc, 0)
+        self.assertEqual(ruleset_posts(self.w), [])
+        self.assertFalse(self.w.config_path().exists())
+
+    def test_bypassable_ruleset_does_not_count_and_admin_gets_a_new_ruleset(self):
+        for bypass in ('always', 'pull_requests_only', 'exempt'):
+            with self.subTest(bypass=bypass):
+                world = self.new_world()
+                self.w = world
+                repo = world.add_repo(OWNER, 'demo', default_branch='trunk', admin=True, protection=None)
+                world.add_ruleset(repo, {'name': 'bypassable', 'enforcement': 'active', 'current_user_can_bypass': bypass,
+                                         'conditions': {'ref_name': {'include': ['refs/heads/trunk'], 'exclude': []}},
+                                         'rules': [{'type': 'required_status_checks', 'parameters': {
+                                             'required_status_checks': [{'context': 'required'}]}}]})
+                result = self.onboard(repo, stdin='y\ny\n')
+                self.assertEqual(result.rc, 0, result.stderr)
+                self.assertEqual(len(ruleset_posts(world)), 1)
+
+    def test_classic_non_admins_level_refused_for_admin_account_then_added(self):
+        summary = classic_protection(enforcement_level='non_admins')
+        repo = self.w.add_repo(OWNER, 'demo', default_branch='trunk', admin=True, protection=summary)
+        result = self.onboard(repo, stdin='y\ny\n')
+        self.assertEqual(result.rc, 0, result.stderr)
+        self.assertEqual(len(ruleset_posts(self.w)), 1)
+
+    def test_classic_everyone_with_required_passes_with_zero_posts(self):
+        repo = self.w.add_repo(OWNER, 'demo', default_branch='trunk', admin=True)
+        result = self.onboard(repo, stdin='y\n')
+        self.assertEqual(result.rc, 0, result.stderr)
+        self.assertEqual(ruleset_posts(self.w), [])
+        self.assertEqual(self.w.gh().get('rulesets', {}), {})
+
+    def test_resume_with_enforced_protection_prints_no_warning_and_resumes(self):
+        repo = self.w.add_repo(OWNER, 'demo', default_branch='trunk', admin=True)
+        self.assertEqual(self.onboard(repo).rc, 0)
+        result = self.onboard(repo)
+        self.assertEqual(result.rc, 0, result.stderr)
+        self.assertNotIn('WARNING', result.stderr)
+        self.assertIn('already configured', result.stdout.lower())
+        self.assertIn(['--user', 'enable', '--now', 'autocontroller.service'], self.w.systemctl_calls())
+
+    def test_resume_after_protection_removed_warns_with_zero_mutations(self):
+        repo = self.w.add_repo(OWNER, 'demo', default_branch='trunk', admin=True)
+        self.assertEqual(self.onboard(repo).rc, 0)
+        self.w.mutate_gh(lambda s: s['protection'].__setitem__(repo.lower(), {'protected': False}))
+        snapshot = len(self.w.mutating_gh_calls())
+        before_config = self.w.config_path().read_bytes()
+        result = self.onboard(repo)
+        self.assertEqual(result.rc, 0, result.stderr)
+        self.assertIn('WARNING', result.stderr)
+        self.assertIn('no longer requires status check', result.stderr)
+        self.assertEqual(len(self.w.mutating_gh_calls()), snapshot)
+        self.assertEqual(self.w.gh().get('rulesets', {}), {})
+        self.assertEqual(self.w.config_path().read_bytes(), before_config)
+
+    def test_owned_same_name_ruleset_refused_before_any_post_or_second_ruleset(self):
+        repo = self.w.add_repo(OWNER, 'demo', default_branch='trunk', admin=True, protection=None)
+        self.w.add_ruleset(repo, {'name': GATE_RULESET, 'enforcement': 'disabled', 'conditions': {'ref_name': {'include': [], 'exclude': []}}, 'rules': []})
+        result = self.onboard(repo, stdin='y\ny\n')
+        self.assertNotEqual(result.rc, 0)
+        self.assertIn('will not modify it', result.stderr)
+        self.assertEqual(len(self.w.gh()['rulesets'][repo.lower()]), 1)
+
+    def test_fake_gh_rejects_duplicate_ruleset_name_with_422(self):
+        repo = self.w.add_repo(OWNER, 'demo', default_branch='trunk', admin=True, protection=None)
+        doc = {'name': GATE_RULESET, 'target': 'branch', 'enforcement': 'active', 'rules': []}
+        first = subprocess.run(['gh', 'api', '--method', 'POST', f'repos/{repo}/rulesets', '--input', '-'],
+                               input=json.dumps(doc), text=True, capture_output=True, timeout=60,
+                               env=self.w.env(), check=False)
+        second = subprocess.run(['gh', 'api', '--method', 'POST', f'repos/{repo}/rulesets', '--input', '-'],
+                                input=json.dumps(doc), text=True, capture_output=True, timeout=60,
+                                env=self.w.env(), check=False)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 1)
+        self.assertIn('HTTP 422', second.stderr)
+        self.assertEqual(len(self.w.gh()['rulesets'][repo.lower()]), 1)
+
+    def test_all_branches_ruleset_with_exclusion_is_matched_by_fake(self):
+        repo = self.w.add_repo(OWNER, 'demo', default_branch='trunk', admin=True, protection=None)
+        self.w.add_ruleset(repo, {'name': 'all but trunk', 'enforcement': 'active',
+                                  'conditions': {'ref_name': {'include': ['~ALL'], 'exclude': ['refs/heads/trunk']}},
+                                  'rules': [{'type': 'required_status_checks', 'parameters': {
+                                      'required_status_checks': [{'context': 'required'}]}}]})
+        result = self.onboard(repo, stdin='y\ny\n')
+        self.assertEqual(result.rc, 0, result.stderr)
+        self.assertEqual(len(ruleset_posts(self.w)), 1)
+
+    def test_lost_ruleset_post_response_resumes_to_one_ruleset_and_no_second_post(self):
+        repo = self.w.add_repo(OWNER, 'demo', default_branch='trunk', admin=True, protection=None)
+        self.w.set_gh_faults([fault(['POST', f'repos/{repo}/rulesets'], 'after')])
+        first = self.onboard(repo, stdin='y\ny\n')
+        self.assertNotEqual(first.rc, 0, first.stderr)
+        self.assertEqual(len(self.w.gh()['rulesets'][repo.lower()]), 1)
+        self.assertFalse(self.w.config_path().exists())
+        second = self.onboard(repo, stdin='y\n')
+        self.assertEqual(second.rc, 0, second.stderr)
+        self.assertEqual(len(self.w.gh()['rulesets'][repo.lower()]), 1)
+        self.assertEqual(len(ruleset_posts(self.w)), 1)
+        self.assert_success_state(repo, OWNER, 'trunk')
