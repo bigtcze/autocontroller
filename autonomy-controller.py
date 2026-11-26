@@ -667,15 +667,18 @@ def process_start_ticks(pid: int) -> int | None:
         return None
 
 
-def sync_controller_ready(state_home: Path, workers: list, memory_ok: bool) -> None:
-    """Publish ready.json once Engram is up and every enabled worker is initialized (zero workers: trivially so).
+def sync_controller_ready(state_home: Path, workers: list) -> bool:
+    """Publish ready.json once every enabled worker is initialized. Returns True when it was written.
 
-    Startup readiness only: the marker is not unlinked on every tick, it is removed at startup and shutdown.
+    Reaching the main loop means Engram startup succeeded. Startup readiness only: the marker is not
+    unlinked on every tick; it is removed at startup and shutdown. The empty-list case is a helper edge
+    case only: validate_config rejects zero enabled projects, so main() never passes an empty list.
     """
-    if not memory_ok or not all(w.initialized.is_set() for w in workers):
-        return
+    if not all(w.initialized.is_set() for w in workers):
+        return False
     pid = os.getpid()
     json_atomic(state_home / CONTROLLER_READY, {"schema": 1, "pid": pid, "started": process_start_ticks(pid), "at": time.time()})
+    return True
 
 
 def sync_drain_ready(state_home: Path, workers: list, lock_path: Path | None = None) -> None:
@@ -1892,6 +1895,9 @@ class ProjectWorker:
                     continue
                 # Once per process, before the persisted backoff: a backoff written by a previous process
                 # must not hold startup readiness for hours. A failure goes through the except path below.
+                # Trade-off, accepted: each process start runs one validate() even when a previous process
+                # saved a backoff, so a still-failing GitHub check increments the saved backoff once per start.
+                # The backoff gates only later iterations. No behavior change beyond readiness.
                 if not self._init_attempted and not getattr(self,"_validated",False):
                     self._init_attempted=True
                     self.validate(ignore_conflicts=True)
@@ -2017,9 +2023,12 @@ def main():
             thread=threading.Thread(target=worker.run,name=worker.name,daemon=False)
             threads.append(thread);thread.start()
         next_probe=time.monotonic()+30
+        published=False
         while not stop.is_set():
-            # Startup readiness: Engram started above; publish once every enabled worker has validated.
-            sync_controller_ready(state_dir,running,memory_ok=True)
+            # Startup readiness, once per process: reaching this loop means Engram started. The flag is set
+            # only after the marker was actually written; every enabled worker must have initialized first.
+            if not published:
+                published=sync_controller_ready(state_dir,running)
             stop.wait(5)
             if stop.is_set(): break
             # Publish drain.ready only after every worker has parked (see ProjectWorker.run).

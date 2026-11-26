@@ -107,7 +107,7 @@ class ControllerReadyTest(unittest.TestCase):
 
 
 class SyncControllerReadyTest(unittest.TestCase):
-    """autonomy-controller.sync_controller_ready: publish only when memory and every worker are initialized."""
+    """autonomy-controller.sync_controller_ready: publish only when every worker is initialized."""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory(prefix='sync-ready-')
@@ -123,20 +123,21 @@ class SyncControllerReadyTest(unittest.TestCase):
             w.initialized.set()
         return w
 
-    def test_not_published_when_memory_is_not_ok(self):
-        ctl.sync_controller_ready(self.state, [self.worker(True)], memory_ok=False)
-        self.assertFalse(self.marker.exists())
-
     def test_not_published_while_any_worker_is_uninitialized(self):
-        ctl.sync_controller_ready(self.state, [self.worker(True), self.worker(False)], memory_ok=True)
+        self.assertFalse(ctl.sync_controller_ready(self.state, [self.worker(True), self.worker(False)]))
         self.assertFalse(self.marker.exists())
 
-    def test_zero_enabled_workers_publish_once_memory_is_ok(self):
-        ctl.sync_controller_ready(self.state, [], memory_ok=True)
+    def test_published_when_every_worker_is_initialized(self):
+        self.assertTrue(ctl.sync_controller_ready(self.state, [self.worker(True), self.worker(True)]))
+        self.assertTrue(self.marker.exists())
+
+    def test_helper_edge_case_empty_list_publishes(self):
+        # Helper edge case only: validate_config rejects zero enabled projects, so main() never passes [].
+        self.assertTrue(ctl.sync_controller_ready(self.state, []))
         self.assertTrue(self.marker.exists())
 
     def test_marker_binds_this_process_and_its_real_start_ticks(self):
-        ctl.sync_controller_ready(self.state, [self.worker(True)], memory_ok=True)
+        ctl.sync_controller_ready(self.state, [self.worker(True)])
         doc = json.loads(self.marker.read_text(encoding='utf-8'))
         self.assertEqual(doc['schema'], 1)
         self.assertEqual(doc['pid'], os.getpid())
@@ -144,7 +145,7 @@ class SyncControllerReadyTest(unittest.TestCase):
         self.assertEqual(self.marker.stat().st_mode & 0o777, 0o600)
 
     def test_lifecycle_accepts_the_marker_written_by_this_process(self):
-        ctl.sync_controller_ready(self.state, [self.worker(True)], memory_ok=True)
+        ctl.sync_controller_ready(self.state, [self.worker(True)])
         self.assertTrue(lc.controller_ready(self.state, os.getpid()))
 
 
@@ -201,14 +202,32 @@ class WorkerStartupTest(DrainFixture):
         self.assertFalse(w.worker_backoff.exists())
 
 
+REAL_EVENT = threading.Event
+
+
+class NoWaitEvent(REAL_EVENT):
+    """The main loop's 5 s poll (`stop.wait(5)`) returns at once; other waits keep their real semantics."""
+
+    def wait(self, timeout=None):
+        if timeout == 5:
+            return self.is_set()
+        return super().wait(timeout)
+
+
 class MainReadinessTest(unittest.TestCase):
-    """autonomy-controller.main: marker lifecycle around Engram startup and the worker loop."""
+    """autonomy-controller.main: marker lifecycle around Engram startup and the worker loop.
+
+    The loop is driven without real waits: the 5 s poll returns at once (NoWaitEvent) and the fake runtime
+    check ends the run by setting the stop event it was given (no signals, no sleeps).
+    """
 
     class Harness:
         startup_error = None
         worker_initialized = True
         observed: list = []
         marker_at_startup = 'unset'
+        checks_before_stop = 1
+        stop_event = None
 
     class FakeRuntime:
         def __init__(self, state):
@@ -225,10 +244,11 @@ class MainReadinessTest(unittest.TestCase):
                 raise MainReadinessTest.Harness.startup_error
 
         def check(self, full=False):
-            # Runs once per loop, after the loop's readiness publication. Record the marker, then stop.
+            # Runs once per loop, after that loop's readiness publication: record what the loop wrote, then stop.
             path = MainReadinessTest.state / ctl.CONTROLLER_READY
             MainReadinessTest.Harness.observed.append(json.loads(path.read_text()) if path.exists() else None)
-            os.kill(os.getpid(), signal.SIGTERM)
+            if len(MainReadinessTest.Harness.observed) >= MainReadinessTest.Harness.checks_before_stop:
+                MainReadinessTest.Harness.stop_event.set()
 
         def close(self):
             pass
@@ -237,6 +257,7 @@ class MainReadinessTest(unittest.TestCase):
         def __init__(self, cfg, global_cfg, stop, quota_lock):
             self.name = str(cfg['name'])
             self.stop = stop
+            MainReadinessTest.Harness.stop_event = stop
             self.pending = Path(global_cfg['state_dir']) / 'no-such-marker'
             self.initialized = threading.Event()
             if MainReadinessTest.Harness.worker_initialized:
@@ -259,11 +280,14 @@ class MainReadinessTest(unittest.TestCase):
         MainReadinessTest.Harness.startup_error = None
         MainReadinessTest.Harness.worker_initialized = True
         MainReadinessTest.Harness.observed = []
+        MainReadinessTest.Harness.checks_before_stop = 1
+        MainReadinessTest.Harness.stop_event = None
         self.marker = MainReadinessTest.state / ctl.CONTROLLER_READY
         patches = [mock.patch.object(ctl, 'DEFAULT_STATE', MainReadinessTest.state),
                    mock.patch.object(ctl, 'INSTALL_ROOT', install),
                    mock.patch.object(ctl.learning, 'Runtime', MainReadinessTest.FakeRuntime),
                    mock.patch.object(ctl, 'ProjectWorker', MainReadinessTest.FakeWorker),
+                   mock.patch.object(ctl.threading, 'Event', NoWaitEvent),
                    mock.patch.object(sys, 'argv', ['autonomy-controller.py', '--config', str(config)])]
         for p in patches:
             p.start()
@@ -281,10 +305,25 @@ class MainReadinessTest(unittest.TestCase):
         self.assertEqual(observed[0]['started'], ctl.process_start_ticks(os.getpid()))
         self.assertFalse(self.marker.exists(), 'shutdown must invalidate readiness')
 
+    def test_marker_is_published_once_per_process_not_rewritten_each_loop(self):
+        MainReadinessTest.Harness.checks_before_stop = 3
+        real = ctl.sync_controller_ready
+        calls = []
+
+        def counting(state_home, workers):
+            published = real(state_home, workers)
+            calls.append(published)
+            return published
+        with mock.patch.object(ctl, 'sync_controller_ready', side_effect=counting):
+            self.assertEqual(ctl.main(), 0)
+        self.assertEqual(len(MainReadinessTest.Harness.observed), 3)
+        self.assertEqual(calls, [True], 'after publishing, the loop must stop calling the publisher')
+
     def test_uninitialized_worker_publishes_nothing(self):
         MainReadinessTest.Harness.worker_initialized = False
+        MainReadinessTest.Harness.checks_before_stop = 2
         self.assertEqual(ctl.main(), 0)
-        self.assertEqual(MainReadinessTest.Harness.observed[0], None)
+        self.assertEqual(MainReadinessTest.Harness.observed, [None, None])
 
     def test_failed_engram_startup_publishes_nothing_and_removes_a_stale_marker(self):
         self.marker.write_text(json.dumps({'schema': 1, 'pid': 1, 'started': 1, 'at': 1}))
@@ -425,6 +464,25 @@ class UpdateReadinessTest(Base):
         self.service.silent_tags.add('v1.1.0')
         self.assertIn('v1.0.0 -> v1.1.0', self.update())
         self.assertEqual(self.service.verbs, ['stop'], 'an inactive service is never started for readiness')
+
+    def test_zero_enabled_projects_with_inactive_service_updates_without_readiness(self):
+        # validate_config refuses zero enabled projects for a running controller; the service is disabled
+        # in that state, so an update sees it inactive. The fixture config is {"projects": []}.
+        self.assertEqual(self.world.install.joinpath('config.json').read_text(), '{"projects": []}\n')
+        self.service.active = False
+        self.service.silent_tags.add('v1.1.0')  # no readiness is ever published
+        consulted = []
+        real_ready = lc.controller_ready
+
+        def spy(state_dir, pid):
+            consulted.append(pid)
+            return real_ready(state_dir, pid)
+        with mock.patch.object(lc, 'controller_ready', side_effect=spy):
+            self.assertIn('v1.0.0 -> v1.1.0', self.update())
+        self.assertEqual(consulted, [], 'an inactive service must not consult the readiness path')
+        self.assertEqual(self.service.verbs, ['stop'], 'an inactive service is never started')
+        self.assertEqual(self.world.tag(), 'v1.1.0')
+        self.assertEqual(self.history()[-1]['result'], 'ok')
 
     def test_stop_after_drain_invalidates_the_marker_before_restart(self):
         self.world.state_dir.mkdir(parents=True, exist_ok=True)
