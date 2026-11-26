@@ -231,7 +231,10 @@ def _rulesets_enforce(repo, branch, check, enc):
             if not isinstance(entry,dict) or not isinstance(entry.get('context'),str): raise _unverified(branch,check)
             names.append(entry['context'])
         if check not in names: continue
-        rs=gh('api',f'repos/{repo}/rulesets/{rid}')
+        try:
+            rs=gh('api',f'repos/{repo}/rulesets/{rid}')
+        except c.ControllerError as exc:
+            raise _unverified(branch,check,_detail(exc)) from exc
         bypass=rs.get('current_user_can_bypass') if isinstance(rs,dict) else None
         if not isinstance(bypass,str): raise _unverified(branch,check)
         # 'always', 'pull_requests_only' and 'exempt' let this account skip the check.
@@ -267,7 +270,7 @@ def add_required_check_ruleset(repo, branch, check):
         proc=subprocess.run(['gh','api','--method','POST',f'repos/{repo}/rulesets','--input','-'],
                             input=json.dumps(body),text=True,capture_output=True,timeout=120)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ValueError(f"Adding ruleset '{RULESET_NAME}' on '{branch}' did not complete ({_detail(exc)}). If ruleset '{RULESET_NAME}' now exists in GitHub (a lost response), rerun onboarding. Otherwise owner action: enable rulesets for this repository or require status check '{check}' manually, then rerun onboarding. Branch protection and rulesets were not changed by this attempt.") from exc
+        raise ValueError(f"Adding ruleset '{RULESET_NAME}' on '{branch}' did not complete ({_detail(exc)}). If ruleset '{RULESET_NAME}' now exists in GitHub (a lost response), rerun onboarding. Otherwise owner action: enable rulesets for this repository or require status check '{check}' manually, then rerun onboarding.") from exc
     if proc.returncode:
         detail=(proc.stderr or '').strip()[:400]
         raise ValueError(f"GitHub refused to add ruleset '{RULESET_NAME}' on '{branch}' ({detail}). If ruleset '{RULESET_NAME}' now exists in GitHub (a lost response), rerun onboarding. Otherwise owner action: enable rulesets for this repository (plan or visibility may not allow them), or require status check '{check}' manually, then rerun onboarding.")
@@ -283,6 +286,7 @@ def warn_if_not_enforced(entry):
     try:
         branch=entry.get('base_branch') or 'main'
         info=gh('api',f'repos/{repo}')
+        if not isinstance(info,dict): raise _unverified(branch,check)
         admin=bool((info.get('permissions') or {}).get('admin'))
         state=protection_state(repo,branch,check,admin)
     except (ValueError,c.ControllerError,lifecycle.LifecycleError) as exc:

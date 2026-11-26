@@ -255,6 +255,20 @@ class ProtectionStateTests(unittest.TestCase):
         self.assertIn('not changed',str(caught.exception))
         self.assertIsInstance(caught.exception.__cause__,o.c.ControllerError)
 
+    def test_ruleset_by_id_read_error_becomes_owner_action_value_error(self):
+        # Item C: a failed repos/{repo}/rulesets/{id} read is wrapped like the other governance reads.
+        rule=_rule(7)
+        def gh(*args):
+            if args[1].startswith('repos/org/demo/branches/'): return {'protected':False}
+            if args[1]=='repos/org/demo/rulesets/7': raise o.c.ControllerError('rc=1: ruleset read failed')
+            raise AssertionError(args)
+        with patch.object(o,'gh',side_effect=gh), patch.object(o.c,'gh_api_pages',return_value=[rule]):
+            with self.assertRaises(ValueError) as caught:
+                o.protection_state('org/demo','main','required',False)
+        self.assertIn('Owner action',str(caught.exception))
+        self.assertIn('ruleset read failed',str(caught.exception))
+        self.assertIsInstance(caught.exception.__cause__,o.c.ControllerError)
+
     def test_branch_summary_read_is_read_only(self):
         _, g = self.state(CLASSIC_EVERYONE)
         self.assertEqual([c.args[0] for c in g.call_args_list], ['api'])
@@ -296,6 +310,15 @@ class ResumeWarningTests(unittest.TestCase):
         def gh(*args):
             raise o.c.ControllerError('rc=1: boom')
         self.assertIn('could not verify',self.warn(gh))
+
+    def test_non_dict_repo_response_warns_instead_of_raising(self):
+        # Item A: a malformed repos/{repo} body must not escape as AttributeError.
+        def gh(*args):
+            if args[1]=='repos/org/demo': return [{'permissions':{'admin':True}}]
+            raise AssertionError(args)
+        text=self.warn(gh)
+        self.assertIn('could not verify',text)
+        self.assertIn('WARNING',text)
 
 
 class NoProtectionMutationSourceTests(unittest.TestCase):

@@ -55,7 +55,7 @@ A fault is `{"match": [tokens], "mode": "before" | "after", "rc": N, "once": boo
   exceeds its timeout (120 s per call).
 
 Every subprocess has a timeout. The integration module (`tests/test_onboarding_integration.py`, 53 tests) runs in about 100 s
-on the development host. The unit module (`tests/test_onboarding.py`, 53 tests) runs in under a second.
+on the development host. The unit module (`tests/test_onboarding.py`, 55 tests) runs in under a second.
 
 ## 3. Fault-injection phase matrix
 
