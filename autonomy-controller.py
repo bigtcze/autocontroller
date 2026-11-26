@@ -28,6 +28,7 @@ from typing import Any
 import release_policy as releases
 import memory as learning
 import bootstrap_policy as bootstrap
+import followup
 
 LOG = logging.getLogger("autonomous-dev")
 DEFAULT_HOME = Path.home()
@@ -113,7 +114,8 @@ def normalize_project_item(obj: dict, repo: str) -> dict | None:
     match = ISSUE_URL.match(url)
     if not match or f"{match.group(1)}/{match.group(2)}".lower() != repo.lower():
         return None
-    status = str(obj.get("status") or "").strip() or "Backlog"
+    # Blank stays blank: an unset status is non-authorizing and never offered to the selector.
+    status = str(obj.get("status") or "").strip()
     return {"item_id":obj.get("id"), "number":int(match.group(3)),
             "title":str(content.get("title") or obj.get("title") or ""),
             "url":url, "status":status,
@@ -131,9 +133,22 @@ def is_renovate(pr: dict, repo: str) -> bool:
             and releases.same_repository_pr(pr, repo))
 
 
-# Only objective project membership and terminal state are scheduler concerns.
-# Backlog priority, ticket dependencies and work order belong to OMO.
+# Objective Project status is the scheduler's only admission signal (rule: .agents/SECURITY.md
+# "Work authorization"). Terminal statuses never admit work. Backlog priority, ticket
+# dependencies and work order belong to OMO.
 TERMINAL_PROJECT_STATUSES = {"done", "completed", "closed", "cancelled", "canceled", "archived"}
+# New ordinary work is selected only from Todo; In Progress/Review are recovery of already-started work.
+READY_PROJECT_STATUSES = {"todo", "to do"}
+ACTIVE_PROJECT_STATUSES = {"in progress", "review", "doing", "active", "started"}
+
+
+def normalize_status(status) -> str:
+    return re.sub(r"\s+", " ", str(status or "").strip().lower().replace("to-do", "to do"))
+
+
+def schedulable_status(status) -> bool:
+    """Pure predicate: may an Issue in this Project status be offered to the selector?"""
+    return normalize_status(status) in READY_PROJECT_STATUSES | ACTIVE_PROJECT_STATUSES
 SELECT_ISSUE = re.compile(r"^AUTOCONTROLLER_SELECT_ISSUE\s+#?(\d+)\s*$", re.M)
 SELECT_NONE = re.compile(r"^AUTOCONTROLLER_NO_ACTION\s*$", re.M)
 
@@ -162,6 +177,8 @@ and the actual code/CI to infer the best NEXT independently actionable task.
 
 Project board candidates (the only Issues you may select):
 {json.dumps(summary, ensure_ascii=False, indent=2)}
+Candidates In Progress or Review are interrupted admitted work; Todo candidates are new work.
+The controller does not sort them; ordering and dependency reasoning are yours.
 
 Choose based on engineering judgment, not issue numbers, hardcoded statuses,
 priority labels or a particular dependencies format. Prioritize finishing
@@ -244,7 +261,7 @@ class GitHubProject:
         if not self.project_id or not entry or not entry.get("id"):
             raise ControllerError(f"Project {self.owner}/{self.number}: missing ID or Status field")
         self.status_field_id = entry["id"]
-        self.options = {str(o["name"]).lower():o["id"] for o in entry.get("options",[]) if o.get("name") and o.get("id")}
+        self.options = {normalize_status(o["name"]):o["id"] for o in entry.get("options",[]) if o.get("name") and o.get("id")}
         # Project workflows differ. Only field identity is essential; do not
         # require exact status vocabulary merely to schedule engineering work.
 
@@ -267,13 +284,18 @@ class GitHubProject:
             raise ControllerError(f"Project item #{item['number']} has no item ID")
         if not self.project_id:
             self.ensure_metadata()
-        option = self.options.get(status.lower())
-        if not option and status.lower() == "in progress":
+        wanted = normalize_status(status)
+        option = self.options.get(wanted)
+        if not option and wanted == "in progress":
             option = next((self.options[x] for x in ("in progress", "doing", "active", "started") if x in self.options), None)
-        if not option and status.lower() == "done":
+        if not option and wanted == "done":
             option = next((self.options[x] for x in ("done", "completed", "closed") if x in self.options), None)
-        if not option and status.lower()=="backlog":
+        if not option and wanted in ("backlog", "todo", "to do"):
             option = self.options.get("todo") or self.options.get("to do")
+        if not option and wanted in ("todo", "to do"):
+            # Admission into Todo is the only way new work becomes schedulable: never skip silently.
+            raise ControllerError(f"{self.repo}: Project {self.owner}/{self.number} has no Todo or To do Status option; "
+                                  "owner action required before work can be admitted")
         if not option and status.lower()=="blocked":
             # Default GitHub Projects often have only Todo/In Progress/Done.
             LOG.debug("%s #%s blocked; no optional Blocked column", self.repo,item["number"])
@@ -762,6 +784,34 @@ class ProjectWorker:
         if key in val:
             del val[key];json_atomic(self.retries_file,val)
 
+    def followup_gate(self)->bool:
+        """Complete unfinished follow-up admissions without AI. True defers new selection.
+
+        Each unfinished journal entry has its own retry key so one stuck follow-up
+        does not starve the rest. Failures are surfaced once per message via notice.
+        """
+        retries=self.retry_map()
+        try:
+            results=followup.reconcile(self.pdir,self.repo,self.project.owner,self.project.number,
+                                       due=lambda parent,key: float(retries.get(f"followup:{parent}:{key}",{}).get("until",0))<=time.time())
+        except followup.FollowupError as exc:
+            # Unreadable journal state: fail closed, defer selection, and say so once.
+            self.notice("followup-blocked",f"follow-up journal unreadable; new selection deferred ({str(exc)[:200]})")
+            return True
+        blocked=False
+        for result in results:
+            key=f"followup:{result['parent']}:{result['key']}"
+            if result["ok"]:
+                self.clear_retry(key)
+                continue
+            blocked=True
+            if result["waiting"]:
+                continue
+            self.retry(key,result["error"] or "follow-up admission incomplete")
+            self.notice("followup-blocked",
+                        f"follow-up {result['key']} of #{result['parent']} is not admitted yet: {(result['error'] or '')[:200]}")
+        return blocked
+
     def quota_until(self)->float:
         with self.quota_lock:
             return float((json_read(self.state_home/SHARED_QUOTA_FILE,{}) or {}).get("until",0))
@@ -893,6 +943,20 @@ class ProjectWorker:
             instructions=learning.instruction(self.pdir,token)
             env["AUTOCONTROLLER_LEARNING_INSTRUCTIONS"]=instructions
             prompt+=instructions
+        if kind=="issue" and phase in ("code","repair"):
+            # Token-bound follow-up grant for the active Issue task. Selection, renovate
+            # and maintenance never receive one (see followup.py and .agents/SECURITY.md).
+            try:
+                token=followup.grant(self.state_home,self.pdir,self.repo,self.project.owner,self.project.number,
+                                     kind,number,self.pending.exists())
+            except followup.FollowupError as exc:
+                # Same fail-closed path as any other controller refusal (run() pauses the worker).
+                raise ControllerError(f"{self.name}: follow-up grant refused: {exc}") from exc
+            instructions=followup.instruction(self.pdir,token)
+            env["AUTOCONTROLLER_FOLLOWUP_INSTRUCTIONS"]=instructions
+            prompt+=instructions
+        else:
+            env.pop("AUTOCONTROLLER_FOLLOWUP_INSTRUCTIONS",None)
         with logfile.open("w",encoding="utf-8") as output:
             os.chmod(logfile,0o600)
             oc_args = [sys.executable,self.wrapper,"run","--auto"]
@@ -924,6 +988,8 @@ class ProjectWorker:
                 self.current=None
             if self.global_cfg.get("_memory_runtime") is not None and not self.pending.exists():
                 (self.pdir/"memory-grant.json").unlink(missing_ok=True)
+            if not self.pending.exists():
+                (self.pdir/followup.GRANT_FILE).unlink(missing_ok=True)
             if stopped:
                 self.prune_logs()
                 if self.stop.is_set() and self.global_cfg.get("_memory_runtime") is not None:
@@ -1022,7 +1088,7 @@ class ProjectWorker:
         chosen=checkpoint["chosen_issue"]
         live_board=self.project.items()
         selected=next((i for i in live_board if i["number"]==chosen),None)
-        if (selected is None or selected["status"].lower() in TERMINAL_PROJECT_STATUSES or
+        if (selected is None or not schedulable_status(selected["status"]) or
             (not self.release_enabled() and releases.release_issue_tag(selected.get("title",""))) or
             issue_state(self.repo,chosen)!="open" or
             float(self.retry_map().get(f"issue:{chosen}",{}).get("until",0))>time.time()):
@@ -1234,7 +1300,7 @@ class ProjectWorker:
             # An active feature-release ticket suppresses maintenance, including
             # one waiting on explicit human approval.
             active=any(releases.release_issue_tag(item.get("title",""))
-                       and item.get("status","").lower() in ("in progress","review")
+                       and normalize_status(item.get("status")) in ACTIVE_PROJECT_STATUSES
                        for item in items)
             if not active:
                 prs=releases.merged_since(self.repo,self.base_branch,current["published_at"],
@@ -1243,9 +1309,12 @@ class ProjectWorker:
                      days=int(self.release_cfg.get("maintenance_days",14)),
                      minimum=int(self.release_cfg.get("maintenance_min_renovate_prs",3))):
                     tag=releases.next_patch_tag(current["tag_name"])
-                    # A release Issue already owning this version takes
-                    # precedence, even if it is still in Backlog.
-                    if not any(releases.release_issue_tag(x.get("title",""))==tag for x in items):
+                    # A release Issue already owning this version takes precedence only while
+                    # it can still be scheduled (Todo, To do, In Progress, Review). A Backlog or
+                    # blank release Issue is non-authorizing and must not suppress maintenance forever.
+                    if not any(releases.release_issue_tag(x.get("title",""))==tag
+                               and schedulable_status(x.get("status"))
+                               for x in items):
                         decision={"tag":tag,"previous":current["tag_name"],
                                   "renovate_count":sum(releases.renovate_pr(p,self.repo) for p in prs)}
         # Low-frequency GitHub API discovery even if the normal issue poll is 5m.
@@ -1688,8 +1757,10 @@ class ProjectWorker:
             until=float(self.retry_map().get(key,{}).get("until",0))
             if until>time.time():
                 return max(5,min(self.interval,until-time.time()))
+            if self.followup_gate():
+                return self.interval
             project_items=self.project.items()
-            eligible=[i for i in project_items if i["status"].lower() not in TERMINAL_PROJECT_STATUSES
+            eligible=[i for i in project_items if schedulable_status(i["status"])
                       and (self.release_enabled() or not releases.release_issue_tag(i.get("title","")))
                       and float(self.retry_map().get(f"issue:{i['number']}",{}).get("until",0))<=time.time()]
             self.select_next_issue(eligible,checkpoint=checkpoint)
@@ -1739,6 +1810,8 @@ class ProjectWorker:
             if float(retries.get(key,{}).get("until",0))<=time.time():
                 self._cycle("renovate",int(pr["number"]),pr["html_url"],None)
                 return self.next_cycle_delay()
+        if self.followup_gate():
+            return self.interval
         project_items=self.project.items()
         maintenance=self.check_maintenance(project_items)
         if maintenance:
@@ -1752,7 +1825,7 @@ class ProjectWorker:
                 return self.next_cycle_delay()
         # OMO owns backlog ordering and dependency reasoning. Python only
         # screens out objective terminal, release-disabled and retrying items.
-        eligible=[i for i in project_items if i["status"].lower() not in TERMINAL_PROJECT_STATUSES
+        eligible=[i for i in project_items if schedulable_status(i["status"])
                   and (self.release_enabled() or not releases.release_issue_tag(i.get("title","")))
                   and float(retries.get(f"issue:{i['number']}",{}).get("until",0))<=time.time()]
         if eligible:

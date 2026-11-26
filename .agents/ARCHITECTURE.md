@@ -12,6 +12,7 @@
 | `release_policy.py` | Pure release decisions (SemVer, approvals, maintenance eligibility, Renovate identity, release-blocker and evidence validation) |
 | `release_artifacts.py` | Reproducible `autocontroller-<tag>.tar.gz` and `SHA256SUMS` from a git commit; validated extraction and verification; `qualify` CLI for the release workflow |
 | `lifecycle.py` | Installed-controller lifecycle: agent guard, locks, drain handshake, verified update and rollback, remove, uninstall, status, doctor and memory inspect helpers |
+| `followup.py` | Controller-authorized follow-up Issue admission: token-bound grant, `create` CLI, journal `followups.json`, idempotent steps (Issue, Project item, Todo, native dependencies), controller reconciliation without AI; the only `project item-add` writer outside onboarding. State: `followup-grant.json` (per-task token, removed when the task ends), `followups.json` (journal, each entry bound to repo, owner, project and the controller's numeric id), `followups.lock`. Identity and live-target checks run before journaling |
 | `bootstrap_policy.py` | Golden Standard prompt and exact-commit contract verification |
 | `memory.py` | Engram runtime manager and agent-facing learning adapter |
 | `standards/`, `skills/` | Packaged trusted prompts/contracts |
@@ -58,7 +59,10 @@ instance.
 - **GitHub content** (Issues, PRs, comments, branch names, fork PRs): untrusted.
   Renovate work requires the verified `renovate[bot]` Bot identity and a
   same-repository head; linked/repair/release PRs from forks are ignored.
-  Project membership plus a nonterminal status authorizes scheduling.
+  Scheduling authority is the Project Status: `Todo`/`To do` for new work,
+  `In Progress`/`Review` for recovery (see `.agents/SECURITY.md` "Work
+  authorization"). The only post-onboarding addition the controller makes to the
+  Project is bounded follow-up admission through `followup.py`.
 - **Agents**: run with the controller user's privileges; not sandboxed. The
   controller independently verifies GitHub state rather than trusting agent
   claims.

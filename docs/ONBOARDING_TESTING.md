@@ -113,10 +113,17 @@ Other recovery and duplicate tests:
 Controller-side admission and authority tests (`tests/test_admission_and_authority.py`)
 use the same fixture as the bootstrap config. They cover failed bootstrap PR or
 merged-main CI, `remote_errors` refusal, closed or terminal bootstrap without
-proof, bootstrap priority, admission without Ready, empty boards, unlisted
+proof, bootstrap priority, admission by Todo status (blank, Backlog, Blocked,
+custom and terminal statuses are never offered), empty boards, unlisted
 selections, outsider approval text, fork Renovate impersonation, fork closing
 references, outsider comments not waking the selector, and a static check that
-the controller never calls `item-add`.
+no executable program file other than `followup.py` and `onboarding.py` contains an `item-add` literal (the AST check covers every program file in `release_artifacts.EXECUTABLE_PROGRAM_FILES` except those two and `install.sh`). Follow-up admission
+(`tests/test_followup_admission.py` and `tests/test_followup_controller.py`) is covered
+separately: grant token binding, the active-checkpoint check, journal idempotency and
+project matching, numeric-id authorship, the `item-add` writer being `followup.py` only,
+controller reconciliation with per-entry backoff, and the Todo edit on import. Those
+fakes do not use `tests/fake_gh.py`; the dependency endpoint is not in that fake and is
+not verified against live GitHub.
 
 ## 5. Defects found and fixed by this work
 
