@@ -29,7 +29,8 @@ ISSUE_URL = re.compile(r'^https://github\.com/([^/]+)/([^/]+)/issues/(\d+)$')
 DEFAULT_STATUS = ['Todo', 'In Progress', 'Done']
 VALUE_OPTIONS = {'--method', '-X', '-f', '-F', '-H', '--owner', '--format', '--limit',
                  '--title', '--repo', '--url', '--scopes', '--hostname', '--git-protocol',
-                 '--id', '--project-id', '--field-id', '--single-select-option-id'}
+                 '--id', '--project-id', '--field-id', '--single-select-option-id',
+                 '--dir', '--pattern'}
 BOOL_OPTIONS = {'-i', '--paginate', '--slurp', '--closed', '--web'}
 
 
@@ -280,15 +281,68 @@ def project(args: list[str], state: dict) -> str:
     raise Unsupported('project ' + sub)
 
 
+def release_api(path: str, state: dict) -> str:
+    """Read-only release and tag endpoints. Only published releases are visible unless a test adds drafts."""
+    releases = state.get('releases', {})
+    if path == 'latest':
+        published = [r for r in releases.values() if not r.get('draft') and not r.get('prerelease')]
+        if not published:
+            raise Fail(1, 'HTTP 404: Not Found (https://api.github.com/repos/releases/latest)')
+        return json.dumps(max(published, key=lambda r: r['published_at'])) + '\n'
+    if path.startswith('tags/'):
+        tag = path[len('tags/'):]
+        if tag not in releases:
+            raise Fail(1, 'HTTP 404: Not Found (https://api.github.com/repos/releases/tags)')
+        return json.dumps(releases[tag]) + '\n'
+    raise Unsupported('release api ' + path)
+
+
+def git_ref_api(path: str, state: dict) -> str:
+    """git/ref/tags/<tag>: an annotated or lightweight tag object pointing at a commit."""
+    tag = path[len('tags/'):]
+    sha = state.get('tags', {}).get(tag)
+    if sha is None:
+        raise Fail(1, 'HTTP 404: Not Found (https://api.github.com/repos/git/ref)')
+    return json.dumps({'ref': f'refs/tags/{tag}', 'object': {'type': 'commit', 'sha': sha}}) + '\n'
+
+
+def release_cmd(args: list[str], state: dict) -> str:
+    """`gh release download <tag> --repo R --dir D --pattern NAME`: copy the named asset file."""
+    if not args or args[0] != 'download':
+        raise Unsupported('release ' + ' '.join(args))
+    positional, opts, _, _ = parse(args[1:])
+    if len(positional) != 1 or '--dir' not in opts or '--pattern' not in opts:
+        raise Unsupported('release download ' + ' '.join(args))
+    tag, name = positional[0], opts['--pattern']
+    release = state.get('releases', {}).get(tag)
+    if release is None:
+        raise Fail(1, f'release not found: {tag}')
+    asset = next((a for a in release.get('assets', []) if a['name'] == name), None)
+    if asset is None:
+        raise Fail(1, f'no assets match the file pattern {name}')
+    source = Path(state['asset_dir']) / tag / name
+    target = Path(opts['--dir']) / name
+    target.write_bytes(source.read_bytes())
+    return ''
+
+
 def handle(argv: list[str], state: dict) -> str:
     if not argv:
         raise Unsupported('(no arguments)')
     if argv[0] == 'auth' and len(argv) > 1:
         return auth(argv, state)
     if argv[0] == 'api':
+        if len(argv) == 2 and argv[1].startswith('repos/') and '/releases/' in argv[1]:
+            return release_api(argv[1].split('/releases/', 1)[1], state)
+        if len(argv) == 2 and argv[1].startswith('repos/') and '/git/ref/' in argv[1]:
+            return git_ref_api(argv[1].split('/git/ref/', 1)[1], state)
+        if len(argv) == 4 and argv[1:3] == ['--method', 'GET'] and '/releases/' in argv[3]:
+            return release_api(argv[3].split('/releases/', 1)[1], state)
         return api(argv[1:], state)
     if argv[0] == 'project' and len(argv) > 1:
         return project(argv[1:], state)
+    if argv[0] == 'release' and len(argv) > 1:
+        return release_cmd(argv[1:], state)
     raise Unsupported(' '.join(argv))
 
 

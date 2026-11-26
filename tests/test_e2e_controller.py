@@ -1095,6 +1095,50 @@ class ReleaseGateTests(E2EBase):
         self.assertEqual(self._phase(), 'release-approval')
         self.assertIsNone(self.gh.tag(R, 'v1.1.0'))
 
+    def test_open_release_blocker_prevents_tag_and_never_starts_ai(self):
+        issue = self._release_candidate('v1.1.0', self.SHA)
+        blocker = self.gh.add_issue(R, title='Crash on upgrade', labels=('release-blocker',))
+        self._checkpoint_at('release-publish', issue, 'v1.1.0', self.SHA)
+        worker = self.world.worker('alpha')
+        worker.one_iteration()
+        worker.one_iteration()
+        self.assertEqual(self._phase(), 'release-publish', 'the release stays in publish while blocked')
+        self.assertIsNone(self.gh.tag(R, 'v1.1.0'), 'no tag may exist while a blocker is open')
+        self.assertEqual(self.gh.mutation_argvs(['gh', 'api', '--method', 'POST']), [],
+                         'no tag or release write while blocked')
+        self.assertEqual(self.sessions(), [], 'a blocked release never starts an AI session')
+        self.assertEqual(self.gh.issue(R, blocker)['state'], 'open')
+
+    def test_closing_the_blocker_lets_publication_continue(self):
+        issue = self._release_candidate('v1.1.0', self.SHA)
+        blocker = self.gh.add_issue(R, title='Crash on upgrade', labels=('release-blocker',))
+        self._checkpoint_at('release-publish', issue, 'v1.1.0', self.SHA)
+        worker = self.world.worker('alpha')
+        worker.one_iteration()
+        self.assertIsNone(self.gh.tag(R, 'v1.1.0'))
+        self.gh.set_issue_state(R, blocker, 'closed')
+        worker.one_iteration()
+        self.assertEqual(self._phase(), 'release-verify')
+        self.assertEqual(ew.eg.ctl.tag_target(R, 'v1.1.0'), self.SHA)
+        self.assertEqual(self.sessions(), [])
+
+    def test_required_asset_template_substitutes_the_release_tag(self):
+        release = dict(self.RELEASE, required_assets=['autocontroller-{tag}.tar.gz', 'SHA256SUMS'])
+        self.world.add_project('alpha', R, 1, release=release)
+        self.gh.set_release(R, 'v1.0.0', days_ago=20)
+        issue = self.gh.add_issue(R, title='Release v1.1.0 feature', body='r',
+                                  project='example-owner/1', status='In Progress')
+        self.gh.add_push_run(R, self.SHA, 'completed', 'success')
+        self._checkpoint_at('release-verify', issue, 'v1.1.0', self.SHA)
+        self.gh.set_tag(R, 'v1.1.0', self.SHA)
+        self.gh.set_release(R, 'v1.1.0', assets=['SHA256SUMS'], days_ago=0)  # the archive is still missing
+        worker = self.world.worker('alpha')
+        worker.one_iteration()
+        self.assertEqual(self._phase(), 'release-verify', 'the literal {tag} name is never expected')
+        self.gh.set_release(R, 'v1.1.0', assets=['autocontroller-v1.1.0.tar.gz', 'SHA256SUMS'], days_ago=0)
+        worker.one_iteration()
+        self.assertIsNone(self.checkpoint(), 'the substituted per-tag asset completes verification')
+
     def test_existing_tag_at_other_sha_fails_closed_and_is_not_moved(self):
         other = 'd0' * 20
         self.world.add_project('alpha', R, 1, release=self.RELEASE)

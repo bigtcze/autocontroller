@@ -27,7 +27,8 @@ ORG = 'example-org'
 USER_ID = 1001
 BOT = {'login': 'renovate[bot]', 'type': 'Bot', 'id': 29139614}
 ROOT_FILES = ('onboarding.py', 'autonomy-controller.py', 'bootstrap_policy.py',
-              'release_policy.py', 'memory.py', 'config.example.json')
+              'release_policy.py', 'release_artifacts.py', 'lifecycle.py', 'memory.py',
+              'config.example.json')
 TIMEOUT = 120
 
 
@@ -69,6 +70,14 @@ class World:
         for name in ROOT_FILES:
             shutil.copy2(ROOT / name, self.install / name)
         shutil.copytree(ROOT / 'standards', self.install / 'standards')
+        # Same program set install.sh installs; tests/test_lifecycle_cli.py pins that equality.
+        import release_artifacts as ra
+        for name in ra.EXECUTABLE_PROGRAM_FILES + ra.DATA_PROGRAM_FILES:
+            if not (self.install / name).exists():
+                shutil.copy2(ROOT / name, self.install / name)
+        for name in ra.DATA_PROGRAM_DIRS:
+            if not (self.install / name).exists():
+                shutil.copytree(ROOT / name, self.install / name)
 
     def _write_shims(self):
         python = shlex.quote(sys.executable)

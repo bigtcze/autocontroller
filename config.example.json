@@ -9,6 +9,7 @@
   "log_max_bytes": 2147483648,
   "cycle_timeout_seconds": 14400,
   "drain_timeout_seconds": 600,
+  "update_repository": "bigtcze/autocontroller",
   "retry_max_seconds": 14400,
   "projects": []
 }

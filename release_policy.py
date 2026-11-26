@@ -5,6 +5,7 @@ All authorizations are bound to an exact release tag and main commit SHA.
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 import re
 from typing import Any, Callable
@@ -53,10 +54,11 @@ def released_since(release: dict, now: datetime) -> float:
     return (now-parse_date(release['published_at'])).total_seconds()/86400
 
 
-def latest_release(repo: str, pages: Callable) -> dict | None:
+def latest_release(repo: str, pages: Callable, *, exclude_tag: str | None = None) -> dict | None:
     releases=pages(f'repos/{repo}/releases?per_page=100')
     valid=[x for x in releases if isinstance(x,dict) and not x.get('draft')
-           and not x.get('prerelease') and version(x.get('tag_name')) and x.get('published_at')]
+           and not x.get('prerelease') and version(x.get('tag_name')) and x.get('published_at')
+           and x.get('tag_name') != exclude_tag]
     return max(valid,key=lambda x:(parse_date(x['published_at']),version(x['tag_name']))) if valid else None
 
 
@@ -163,3 +165,154 @@ def next_patch_tag(previous_tag: str) -> str:
     if not v:
         raise ValueError('No stable version for patch release')
     return f'v{v[0]}.{v[1]}.{v[2]+1}'
+
+
+
+RELEASE_BLOCKER_LABEL = 'release-blocker'
+LIVE_ACCEPTANCE = ('github', 'opencode_omo', 'engram')
+VM_LIFECYCLE_WORKFLOW = '.github/workflows/vm-lifecycle.yml'
+VM_JOBS = ('vm (debian-12)', 'vm (debian-13)', 'vm (ubuntu-24.04)', 'vm (ubuntu-26.04)')
+EVIDENCE_PATH = 'docs/releases/{tag}.evidence.json'
+RELEASE_DOCS_PREFIX = 'docs/releases/'
+HEX40 = re.compile(r'[0-9a-fA-F]{40}')
+HEX64 = re.compile(r'[0-9a-fA-F]{64}')
+
+
+def open_release_blockers(repo: str, pages: Callable, label: str = RELEASE_BLOCKER_LABEL) -> list[dict]:
+    """Open Issues (never PRs) carrying `label`. A non-list listing fails closed."""
+    rows = pages(f'repos/{repo}/issues?state=open&labels={label}&per_page=100')
+    if not isinstance(rows, list):
+        raise ValueError('Release blocker listing unavailable; refusing release')
+    return [x for x in rows if isinstance(x, dict) and not x.get('pull_request')
+            and str(x.get('state') or '').lower() == 'open']
+
+
+def _iso_date(value: Any) -> bool:
+    try:
+        datetime.strptime(str(value), '%Y-%m-%d')
+        return True
+    except ValueError:
+        return False
+
+
+def validate_evidence(doc: Any, tag: str) -> list[str]:
+    """Schema 1 evidence record for one feature release. Returns errors; empty means valid."""
+    if not isinstance(doc, dict):
+        return ['evidence is not a JSON object']
+    errors = []
+    if set(doc) != {'schema', 'tag', 'candidate_sha', 'vm_lifecycle_run', 'live_acceptance'}:
+        errors.append('evidence has missing or unexpected top-level keys')
+    if doc.get('schema') != 1:
+        errors.append('evidence schema must be 1')
+    if doc.get('tag') != tag:
+        errors.append(f'evidence tag must be {tag}')
+    if not HEX40.fullmatch(str(doc.get('candidate_sha') or '')):
+        errors.append('evidence candidate_sha must be 40 hex characters')
+    run = doc.get('vm_lifecycle_run')
+    if not isinstance(run, int) or isinstance(run, bool) or run <= 0:
+        errors.append('evidence vm_lifecycle_run must be a positive GitHub Actions run id')
+    live = doc.get('live_acceptance')
+    if not isinstance(live, dict) or set(live) != set(LIVE_ACCEPTANCE):
+        errors.append('evidence live_acceptance must contain exactly github, opencode_omo and engram')
+        return errors
+    for name in LIVE_ACCEPTANCE:
+        entry = live.get(name)
+        if not isinstance(entry, dict):
+            errors.append(f'live_acceptance.{name} must be an object')
+            continue
+        if entry.get('result') != 'passed':
+            errors.append(f'live_acceptance.{name}.result must be "passed"')
+        if not HEX64.fullmatch(str(entry.get('report_sha256') or '')):
+            errors.append(f'live_acceptance.{name}.report_sha256 must be 64 hex characters')
+        if not _iso_date(entry.get('date')):
+            errors.append(f'live_acceptance.{name}.date must be an ISO date (YYYY-MM-DD)')
+        summary = entry.get('summary')
+        if not isinstance(summary, str) or not summary.strip() or len(summary) > 500:
+            errors.append(f'live_acceptance.{name}.summary must be 1-500 characters')
+    return errors
+
+
+def qualify_release(repo: str, tag: str, sha: str, *, previous_tag: str | None, on_main: bool,
+                    gh_json: Callable, pages: Callable,
+                    is_ancestor: Callable[[str, str], bool],
+                    changed_paths: Callable[[str, str], list[str]],
+                    read_file: Callable[[str, str], str | None]) -> list[str]:
+    """Pure release qualification. Returns errors; an empty list means qualified.
+
+    Side effects are injected: `gh_json(*args)`, `pages(path)`, `is_ancestor(a, b)`,
+    `changed_paths(a, b)` and `read_file(commit, path)` (None when absent). `on_main` is the
+    caller's ancestry result for `sha` against origin/main. Any unreadable state is an error.
+    """
+    if not version(tag):
+        return [f'{tag!r} is not a stable SemVer tag']
+    if not HEX40.fullmatch(sha or ''):
+        return ['candidate sha must be 40 hex characters']
+    errors = []
+    if not on_main:
+        errors.append(f'{sha} is not on main')
+    try:
+        runs = gh_json('api', f'repos/{repo}/actions/workflows/required.yml/runs?head_sha={sha}&event=push&per_page=100')
+    except Exception as exc:
+        return errors + [f'cannot read required.yml push runs: {exc}']
+    rows = runs.get('workflow_runs') if isinstance(runs, dict) else None
+    if not isinstance(rows, list) or int(runs.get('total_count', len(rows)) or 0) > len(rows):
+        return errors + ['required.yml push run listing unavailable or truncated']
+    rows = [r for r in rows if isinstance(r, dict) and r.get('head_sha') == sha and r.get('event') == 'push']
+    if not rows:
+        errors.append(f'no required.yml push run for {sha}')
+    else:
+        newest = max(rows, key=lambda r: (int(r.get('run_number') or 0), int(r.get('run_attempt') or 0), int(r.get('id') or 0)))
+        if newest.get('status') != 'completed' or newest.get('conclusion') != 'success':
+            errors.append(f'newest required.yml push run for {sha} is not a completed success')
+    try:
+        blockers = open_release_blockers(repo, pages)
+    except ValueError as exc:
+        errors.append(str(exc))
+        blockers = []
+    if blockers:
+        errors.append('open release blockers: ' + ', '.join(f'#{x.get("number")}' for x in blockers))
+    if not is_feature_release(tag, previous_tag):
+        return errors  # Patch releases need no evidence; every other rule above still applies.
+    path = EVIDENCE_PATH.format(tag=tag)
+    text = read_file(sha, path)
+    if text is None:
+        return errors + [f'missing {path} at the tag commit {sha}']
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        return errors + [f'{path} is not valid JSON']
+    schema_errors = validate_evidence(doc, tag)
+    if schema_errors:
+        return errors + schema_errors
+    candidate = doc['candidate_sha']
+    if not is_ancestor(candidate, sha):
+        errors.append(f'evidence candidate {candidate} is not an ancestor of {sha}')
+    elif candidate != sha:
+        try:
+            changed = changed_paths(candidate, sha)
+        except Exception as exc:
+            return errors + [f'cannot diff {candidate}..{sha}: {exc}']
+        outside = [p for p in changed if not p.startswith(RELEASE_DOCS_PREFIX) or '..' in p.split('/')]
+        if outside:
+            errors.append(f'changes {candidate}..{sha} outside {RELEASE_DOCS_PREFIX}: {", ".join(outside[:5])}')
+    run_id = doc['vm_lifecycle_run']
+    try:
+        run = gh_json('api', f'repos/{repo}/actions/runs/{run_id}')
+        jobs = gh_json('api', f'repos/{repo}/actions/runs/{run_id}/jobs?per_page=100')
+    except Exception as exc:
+        return errors + [f'cannot read vm-lifecycle run {run_id}: {exc}']
+    run = run if isinstance(run, dict) else {}
+    if run.get('path') != VM_LIFECYCLE_WORKFLOW:
+        errors.append(f'run {run_id} is not {VM_LIFECYCLE_WORKFLOW}')
+    if run.get('head_sha') != candidate:
+        errors.append(f'vm-lifecycle run {run_id} head_sha is not candidate {candidate}')
+    if run.get('status') != 'completed' or run.get('conclusion') != 'success':
+        errors.append(f'vm-lifecycle run {run_id} is not a completed success')
+    job_rows = jobs.get('jobs') if isinstance(jobs, dict) else None
+    if not isinstance(job_rows, list) or int(jobs.get('total_count', len(job_rows)) or 0) > len(job_rows):
+        return errors + [f'vm-lifecycle run {run_id} job listing unavailable or truncated']
+    for name in VM_JOBS:
+        found = [j for j in job_rows if isinstance(j, dict) and j.get('name') == name]
+        if len(found) != 1 or found[0].get('conclusion') != 'success':
+            errors.append(f'vm-lifecycle run {run_id} job "{name}" is missing or not a success')
+    return errors

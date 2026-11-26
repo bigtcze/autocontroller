@@ -383,6 +383,38 @@ def cli():
         except (OSError,ValueError): LOG.exception('Cannot update memory operational counters')
         print(json.dumps(result,ensure_ascii=False))
 
+# Read-only operator inspection. Never calls register, save or probe: no write can reach Engram
+# from here. --query is one direct GET /search, validated with the same scope rule as Backend.search.
+INSPECT_LIMIT = 10
+
+def inspect(state, repo, *, query=None, shared=False, backend=None):
+    root=Path(state)/'memory'
+    version='unknown'
+    if (root/'active.json').exists():
+        try: version=str(read(root/'active.json')['version'])
+        except (ValueError,OSError,KeyError,TypeError): version='unreadable'
+    lines=[f'engram version: {version}']
+    if (root/'metrics.json').exists():
+        try: counters=read(root/'metrics.json')
+        except (ValueError,OSError): counters=None
+        if not isinstance(counters,dict): lines.append('operational counters: unreadable')
+        else: lines += [f'{k}: {counters[k]}' for k in sorted(counters) if isinstance(counters[k],int)]
+    else: lines.append('operational counters: none recorded')
+    if query is None: return lines
+    text=clean(query,200)
+    project=SHARED if shared else scope(repo)
+    api=backend or Backend(socket_path())
+    result=api.request('GET','/search',q=text,project=project,scope='project',type=TYPE,limit=INSPECT_LIMIT,match_mode='any')
+    if not isinstance(result,list): raise MemoryError('Invalid Engram search response')
+    if any(not isinstance(r,dict) or r.get('project')!=project or r.get('scope')!='project' for r in result):
+        raise MemoryError('Engram returned an unexpected observation scope')
+    for r in result[:INSPECT_LIMIT]:
+        try: status=json.loads(r.get('content') or '{}').get('status','unknown')
+        except (ValueError,AttributeError): status='unknown'
+        lines.append(f'- {r.get("title","")!s} | topic_key={r.get("topic_key","")!s} | status={status!s}')
+    if not result: lines.append('no matching observations')
+    return lines
+
 if __name__=='__main__':
     try:
         if sys.argv[1:]==['--health']:

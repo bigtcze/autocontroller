@@ -38,6 +38,9 @@ ISSUE_URL = re.compile(r"^https://github\.com/([^/]+)/([^/]+)/issues/(\d+)(?:$|[
 PR_URL = re.compile(r"^https://github\.com/([^/]+)/([^/]+)/pull/(\d+)(?:$|[?#])")
 QUOTA_ERROR = re.compile(r"(?:\b429\b|quota(?:\s|_)*(?:exhausted|exceeded|reached)|usage limit|too many requests|rate.?limit exceeded)", re.I)
 SHARED_QUOTA_FILE = "ai-cooldown.json"
+# Graceful drain handshake, written by the user-invoked updater (request) and the main loop (ready).
+DRAIN_REQUEST = "drain.request"
+DRAIN_READY = "drain.ready"
 
 
 class ControllerError(Exception):
@@ -573,6 +576,32 @@ do not select another task. No controller/runtime edits.
 
 
 
+def read_drain_request(state_home: Path) -> dict | None:
+    """None: no drain requested. {"nonce": None}: unreadable request, which still drains (fail closed)."""
+    path = state_home / DRAIN_REQUEST
+    # lexists, not exists: a dangling symlink is a request we cannot read, never an absent one.
+    if not os.path.lexists(path):
+        return None
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        nonce = doc.get("nonce") if isinstance(doc, dict) else None
+        if not isinstance(nonce, str) or not nonce:
+            raise ValueError("missing nonce")
+        return {"nonce": nonce, "requested_at": float(doc.get("requested_at", 0))}
+    except (OSError, ValueError, TypeError):
+        return {"nonce": None, "requested_at": 0.0}
+
+
+def sync_drain_ready(state_home: Path, workers: list) -> None:
+    """Main-loop side: publish drain.ready only for a valid request while every worker is parked."""
+    ready = state_home / DRAIN_READY
+    request = read_drain_request(state_home)
+    if request is None or request["nonce"] is None or not all(w.parked.is_set() for w in workers):
+        ready.unlink(missing_ok=True)
+        return
+    json_atomic(ready, {"nonce": request["nonce"], "pid": os.getpid(), "at": time.time()})
+
+
 class ProjectWorker:
     def __init__(self,cfg:dict,global_cfg:dict,stop:threading.Event,quota_lock:threading.Lock):
         self.name=str(cfg["name"])
@@ -603,6 +632,8 @@ class ProjectWorker:
         self.bootstrap_issue=int(cfg.get("bootstrap_issue",0))
         self.standard_version=str(cfg.get("standard_version",bootstrap.VERSION))
         self.bootstrap_done=self.pdir/"bootstrap-complete.json"
+        # Set only while this worker is idle because of a drain request (never inside an iteration).
+        self.parked=threading.Event()
 
     def notice(self, key: str, message: str, *, warning=True, period=3600):
         """Suppress repeated journal messages, including across service reboots."""
@@ -1112,6 +1143,13 @@ class ProjectWorker:
                 note_file=gh_json("api",f"repos/{self.repo}/contents/{notes_path}?ref={sha}")
                 if note_file.get("type")!="file" or int(note_file.get("size",0))<=0:
                     raise ControllerError(f"Release note {notes_path} missing/empty at candidate {sha}")
+            # Open release-blocker Issues stop publication before any tag exists. No AI session runs here.
+            label=str(self.release_cfg.get("blocker_label",releases.RELEASE_BLOCKER_LABEL))
+            blockers=releases.open_release_blockers(self.repo,gh_api_pages,label)
+            if blockers:
+                numbers=", ".join(f"#{x.get('number')}" for x in blockers)
+                self.notice(f"release-blocked:{tag}",f"release {tag} blocked by open {label} Issues {numbers}",warning=False)
+                return
             # Never recreate/move a pre-existing release tag on retry.
             self.memory_gate()
             push_annotated_tag(self.repo,tag,sha)
@@ -1125,7 +1163,8 @@ class ProjectWorker:
             if not published:
                 self.notice(f"release-publishing:{tag}",f"native GitHub release pipeline still publishing {tag}",warning=False)
                 return
-            expected=set(self.release_cfg.get("required_assets",[]))
+            # `{tag}` lets one configuration name per-version assets (for example the archive).
+            expected={a.replace("{tag}",tag) for a in self.release_cfg.get("required_assets",[])}
             found={a.get("name") for a in (published.get("assets") or [])}
             if not expected.issubset(found):
                 self.notice(f"release-assets:{tag}",f"waiting for required release assets {sorted(expected-found)}")
@@ -1687,13 +1726,30 @@ class ProjectWorker:
         self.notice("idle",f"idle, polling every {self.interval}s",warning=False)
         return self.interval
 
+    def _idle_wait(self, seconds: float):
+        """Sleep up to `seconds`, waking every 5s so a drain request is noticed promptly."""
+        deadline=time.monotonic()+max(1,seconds)
+        while not self.stop.is_set():
+            left=deadline-time.monotonic()
+            if left<=0 or read_drain_request(self.state_home) is not None: return
+            self.stop.wait(min(5,left))
+
     def run(self):
         """Continuous worker; recover from temporary errors instead of exiting."""
         while not self.stop.is_set():
             try:
+                # Clear first, then check: a request that appears mid-check is caught on the next pass.
+                was_parked=self.parked.is_set()
+                self.parked.clear()
+                if read_drain_request(self.state_home) is not None:
+                    # Drain: start no iteration. The main loop publishes drain.ready once all workers park.
+                    self.parked.set()
+                    if not was_parked: self.notice("drain","drain requested; no new work",warning=False)
+                    self.stop.wait(5)
+                    continue
                 remaining=self.worker_ready()
                 if remaining>0:
-                    self.stop.wait(min(remaining,self.interval))
+                    self._idle_wait(min(remaining,self.interval))
                     continue
                 # At startup or after transient validation failure: retry the
                 # metadata / auth check, never permanently disable the worker.
@@ -1709,12 +1765,16 @@ class ProjectWorker:
                 seconds=self.worker_pause(exc)
             except Exception as exc:
                 seconds=self.worker_pause(exc)
-            self.stop.wait(max(1,seconds))
+            self._idle_wait(seconds)
 
 
 def validate_config(config:dict):
     if not isinstance(config,dict) or not isinstance(config.get("projects"),list):
         raise ControllerError("config.json must contain 'projects' array")
+    # Release source for `autocontroller update`; owner/repo only, never a URL or a flag.
+    update_repo=config.get("update_repository","bigtcze/autocontroller")
+    if not isinstance(update_repo,str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*",update_repo):
+        raise ControllerError("update_repository must be OWNER/REPOSITORY")
     names=set(); repos=set(); dirs=set(); projects=set()
     for p in config["projects"]:
         if not p.get("enabled",True): continue
@@ -1738,8 +1798,10 @@ def validate_config(config:dict):
                     raise ControllerError(f"Invalid release.{f}")
             if rc.get("strategy","tag_workflow")!="tag_workflow":
                 raise ControllerError("Only GitHub native tag-triggered release workflow is supported")
-            if not isinstance(rc.get("required_assets",[]),list):
-                raise ControllerError("Release required_assets must be a list")
+            if not isinstance(rc.get("required_assets",[]),list) or not all(isinstance(a,str) for a in rc.get("required_assets",[])):
+                raise ControllerError("Release required_assets must be a list of strings")
+            if not re.fullmatch(r"[A-Za-z0-9 _.:-]{1,50}",str(rc.get("blocker_label",releases.RELEASE_BLOCKER_LABEL))):
+                raise ControllerError("Invalid release.blocker_label")
         if p.get("bootstrap_issue") and (int(p["bootstrap_issue"])<1 or str(p.get("standard_version"))!=bootstrap.VERSION):
             raise ControllerError("Invalid bootstrap issue or unsupported standard version")
         project_id=(str(p["project_owner"]).lower(),int(p["project_number"]))
@@ -1788,6 +1850,7 @@ def main():
     signal.signal(signal.SIGINT,stop_signal);signal.signal(signal.SIGTERM,stop_signal)
     runtime=learning.Runtime(state_dir)
     threads=[]
+    running=[]
     failed=False
     try:
         runtime.metric(False)
@@ -1796,12 +1859,15 @@ def main():
         config["_memory_runtime"]=runtime
         for project in workers:
             worker=ProjectWorker(project,config,stop,quota_lock)
+            running.append(worker)
             thread=threading.Thread(target=worker.run,name=worker.name,daemon=False)
             threads.append(thread);thread.start()
         next_probe=time.monotonic()+30
         while not stop.is_set():
             stop.wait(5)
             if stop.is_set(): break
+            # Publish drain.ready only after every worker has parked (see ProjectWorker.run).
+            sync_drain_ready(state_dir,running)
             full=time.monotonic()>=next_probe
             runtime.check(full=full)
             if full: next_probe=time.monotonic()+30

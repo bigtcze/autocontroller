@@ -10,11 +10,16 @@ AutoController coordinates existing OpenCode V2 and Oh My OpenCode Slim agents a
 
 Target platforms: Debian 12/13 and Ubuntu 24.04/26.04 LTS on an amd64 or arm64 VM with systemd. These are the intended support matrix, not yet a certified clean-VM test matrix. Use a normal, sudo-capable account with OpenCode V2, OMO Slim (`orchestrator`, `fixer`, `oracle`) and a working, persistent provider configuration. The controller does not install, modify or upgrade OpenCode or OMO.
 
-From an extracted source package:
+From a published release archive (`autocontroller-vX.Y.Z.tar.gz` and `SHA256SUMS`, built by `release.yml`; no public release has been published yet):
 
 ```sh
+sha256sum -c SHA256SUMS
+tar -xzf autocontroller-vX.Y.Z.tar.gz
+cd autocontroller-vX.Y.Z
 bash install.sh
 ```
+
+From a source checkout or an extracted source package, the same `bash install.sh` applies.
 
 The installer provisions missing system tools (Git, Python, GitHub CLI, mise), enables user lingering, installs the user service and starts guided onboarding. GitHub authorization uses the official CLI device flow; follow its on-screen browser instruction. Enter the URL of a repository you control and confirm autonomous changes. You authorize the controller to create and merge reviewed PRs under the account's permissions, including for existing open issues. It cannot bypass required GitHub checks or rules using administrative merge flags. Existing branch protection is not removed. An empty repository gets a minimal initial commit to establish a base branch.
 
@@ -30,13 +35,33 @@ After setup, open the displayed GitHub Project to create or add **real repositor
 autocontroller status
 autocontroller logs
 autocontroller doctor
-autocontroller memory     # Engram health check
-autocontroller add       # enroll another repository
+autocontroller memory                     # Engram health check
+autocontroller memory inspect OWNER/REPO [--query TEXT] [--shared]
+autocontroller add                        # enroll another repository
+autocontroller remove <repo> [--force] [--delete-local-data]
+autocontroller update [--tag vX.Y.Z] [--yes] [--health-seconds N]
+autocontroller rollback [--yes] [--health-seconds N]
+autocontroller uninstall [--purge]
 autocontroller stop
 autocontroller start
 ```
 
-If `~/.local/bin` is not on your interactive PATH, use `~/.local/bin/autocontroller`. Each repository has a separate Project, checkout, checkpoint, retry state and local memory. Adding a repository restarts the service gracefully to load configuration. The software is installed under `~/scripts/autocontroller`; `config.json`, `state/` and logs are private runtime data and must never be committed to the source repository. A service `--install-only` update does not change existing configuration or auto-start work: stop the running controller, run `bash install.sh --install-only`, then start it again. Existing in-flight projects are not automatically re-bootstrapped.
+If `~/.local/bin` is not on your interactive PATH, use `~/.local/bin/autocontroller`. Each repository has a separate Project, checkout, checkpoint, retry state and local memory. Adding a repository restarts the service gracefully to load configuration. The software is installed under `~/scripts/autocontroller`; `config.json`, `state/` and logs are private runtime data and must never be committed to the source repository.
+
+`status` shows the installed version, service state, the kept previous release, each project's cycle phase, drain and memory-failure markers, and the last update result. `doctor` verifies the installed program files against `MANIFEST.sha256` (release installs), the unit and CLI links, and leftover interrupted operations. It reports problems and exits nonzero; it does not repair anything.
+
+### Managed update, rollback and removal
+
+- `update` takes the latest stable release from `update_repository` (or `--tag vX.Y.Z`). It asks for confirmation unless `--yes` is given. It refuses downgrades. Before anything is stopped, it downloads the archive and `SHA256SUMS`, and checks each against the digest GitHub reports for the asset and against the archive's `MANIFEST.sha256`.
+- Then it drains the workers (they park at a safe point; the drain timeout is 3600 seconds by default; if they do not park in time, the service is left running and nothing is replaced), stops the service, and swaps in the new program files. The config, `state/` and checkouts are not touched.
+- The service must pass `--check` and stay active for `--health-seconds` (30 by default). If it fails, the controller stops the new code, restores the previous release, and starts it again. The update exits with an error.
+- A successful update keeps exactly one previous release in `rollback/previous/`. `rollback` swaps back to it under the same drain and health checks, and that swap can itself be rolled back.
+- `remove <repo>` deletes one project's entry from `config.json` and restarts the service (or disables it when no project remains). It refuses while that project has an unfinished cycle unless `--force` is given. The checkout, GitHub state and memory are kept. `--delete-local-data` also deletes the checkout, but only when it is a clean, fully pushed managed clone directly under `~/repositories`. Memory is never deleted by `remove`.
+- `uninstall` stops the service, removes the unit and CLI links, and removes the program files. It keeps `config.json`, `state/` and the checkouts. `--purge` also deletes `config.json` and `state/`, and asks you to type `purge`. Checkouts under `~/repositories` are never deleted.
+
+The controller never updates itself. Its own lifecycle commands refuse to run inside an agent session (any `AUTONOMY_*` variable or `AUTOCONTROLLER_LEARNING_INSTRUCTIONS` set). This refusal is a logical guard for the controller's own sessions, not a sandbox: it does not stop an agent that can run arbitrary shell commands as your user. Run these commands from your own shell.
+
+`--install-only` applies to source installs only: it copies the program files from a source checkout or extracted source package without changing configuration or starting work. Stop the controller, run `bash install.sh --install-only`, then start it again. Release archives are updated with `autocontroller update`, not with `--install-only`. Existing in-flight projects are not automatically re-bootstrapped.
 
 ## Operating model
 

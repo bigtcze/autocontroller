@@ -13,8 +13,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-VERBS = {'enable', 'disable', 'restart', 'start', 'stop', 'is-active', 'status'}
+VERBS = {'enable', 'disable', 'restart', 'start', 'stop', 'is-active', 'status', 'daemon-reload'}
 UNIT = 'autocontroller.service'
+# Stateful unit: start/restart make it active, stop/disable --now make it inactive.
+# is-active --quiet exits 0 only while active, 3 otherwise (systemd's convention).
+ACTIVATES = {'start', 'restart'}
+DEACTIVATES = {'stop'}
 
 
 def in_order(tokens, argv):
@@ -34,9 +38,13 @@ def main(argv):
         fcntl.flock(lock, fcntl.LOCK_EX)
         state = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {'calls': [], 'faults': []}
         rc = 0
-        if len(argv) < 3 or argv[0] != '--user' or argv[1] not in VERBS or argv[-1] != UNIT:
+        verb = argv[1] if len(argv) >= 2 else ''
+        valid = verb in VERBS and (verb == 'daemon-reload' and len(argv) == 2 or argv[-1] == UNIT)
+        if len(argv) < 2 or argv[0] != '--user' or not valid:
             rc, message = 4, f'fake systemctl: unsupported invocation: {" ".join(argv)}'
             sys.stderr.write(message + '\n')
+        elif verb == 'daemon-reload':
+            pass
         else:
             for fault in state['faults']:
                 if not in_order(fault['match'], argv):
@@ -48,6 +56,13 @@ def main(argv):
                 rc = int(fault['rc'])
                 sys.stderr.write(f'fake systemctl: injected failure for {" ".join(argv)}\n')
                 break
+            if rc == 0:
+                if verb in ACTIVATES or verb == 'enable' and '--now' in argv:
+                    state['active'] = True
+                elif verb in DEACTIVATES or verb == 'disable' and '--now' in argv:
+                    state['active'] = False
+                elif verb == 'is-active':
+                    rc = 0 if state.get('active') else 3
         state['calls'].append({'argv': argv, 'rc': rc})
         fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix='.fake-systemctl-')
         with os.fdopen(fd, 'w', encoding='utf-8') as stream:
