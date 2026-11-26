@@ -17,10 +17,39 @@ repositories. Relevant threats:
 
 ## Required controls
 
-- Work authorization: an Issue is schedulable only as a native Issue of the
-  configured repository and a member of its configured GitHub Project with a
-  nonterminal status. Onboarding imports only open Issues authored by
-  `OWNER`/`MEMBER`/`COLLABORATOR`; nothing is auto-added later.
+- Work authorization (single authoritative rule): an Issue may be offered to
+  the selector only when it is a native Issue of the configured repository, is
+  a member of its configured GitHub Project, and its Project Status is `Todo`
+  or `To do` (new work), or `In Progress` or `Review` (recovery of work the
+  controller already admitted). Blank, `Backlog`, `Blocked`, custom and terminal
+  (`Done`, `Completed`, `Closed`, `Cancelled`, `Archived`) statuses are
+  non-authorizing. Python never sorts candidates; ordering and dependencies are
+  OMO's. Onboarding imports only open Issues authored by
+  `OWNER`/`MEMBER`/`COLLABORATOR`, sets each imported blank row to `Todo` and
+  never overrides a status a maintainer set. Nothing else is added to the
+  Project by the controller except through `followup.py`, the only permitted
+  `project item-add` writer outside onboarding (see the follow-up rule below).
+- Follow-up admission: an admitted Issue task may create at most 5 NECESSARY
+  follow-up Issues per parent, only through `followup.py create`, authorized by a
+  token-bound `followup-grant.json` that the controller issues only for `kind=issue`
+  phases `code` and `repair`. Each follow-up carries the marker
+  `<!-- autocontroller-followup parent=<P> key=<K> -->`, is created by the
+  controller account, is admitted to Todo, and is journaled in `followups.json`.
+  The CLI acts only while the granted parent is the live pending Issue checkpoint
+  of the same project directory (`cycle.pending` and `cycle.json` with `kind=issue`
+  and `number` equal to the grant's parent). Before journaling, the parent and every
+  `blocks`/`blocked_by` target must be live, open, non-pull-request Issues of the
+  granted repository, members of the granted Project, with a nonterminal Status.
+  Authorship of an adopted or created follow-up is decided by the controller
+  account's **numeric id** recorded at intent time, never by login text. The
+  controller reconciles journal entries without AI, refuses any entry whose
+  repository or Project differs from its worker's (case-insensitive owner and
+  repository, exact project number) before any `gh` call, and defers selection
+  and maintenance while a follow-up is blocked.
+- Logical control, not a sandbox: an agent holding the controller account's
+  credentials could call `gh` directly. This rule governs what the controller
+  schedules, and an Issue outside `Todo` is never scheduled, but it does not stop
+  a process that has the credentials from creating an Issue.
 - Renovate identity: login `renovate[bot]`, type `Bot` and the GitHub.com
   Renovate App user id, **and** head repository equal to the configured
   repository. Branch prefix or login text alone is never sufficient; the live

@@ -31,6 +31,23 @@ Status: unreleased; under development. No public release has been published.
   and `SHA256SUMS` built from a git commit; the tag commit is qualified (green push
   CI, no open `release-blocker` Issues, evidence for feature releases), built in the
   four supported containers, and published only after asset digest verification.
+- **Follow-up admission** (`followup.py`; offline-tested, never run against real
+  GitHub): an admitted Issue task may create at most 5 necessary follow-up Issues
+  per parent through a token-bound CLI, admitted to `Todo` with native dependencies.
+  Before anything is journaled, the parent and every link target must be a live
+  open Issue of the repository in the Project with a nonterminal Status. Authorship
+  is by the controller account's numeric id recorded at intent time; adoption of an
+  interrupted attempt searches the creator's recent Issues (REST, paginated) rather
+  than a truncated list. The controller completes unfinished follow-ups without AI
+  before new selection and also defers maintenance while one is blocked. Each
+  journal entry must match its worker's repository and Project or it is refused.
+  Authority rule: `.agents/SECURITY.md` ("Work authorization"); this is a logical
+  control, not a sandbox.
+- **Known unknown:** the native dependency endpoint
+  (`repos/{repo}/issues/{n}/dependencies/blocked_by`, POST with the database `id`)
+  is modelled offline only. It has not been exercised against live GitHub, so a
+  real `blocks`/`blocked_by` link may behave differently. Live acceptance is required
+  before this is relied on.
 - **Lifecycle CLI** (`lifecycle.py`; offline-tested, never run against a real
   release): `update` and `rollback` (verified release, drain, one kept previous
   release, health check, automatic rollback), `remove`, `uninstall`, `status`,

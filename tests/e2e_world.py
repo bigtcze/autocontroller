@@ -245,7 +245,7 @@ class World:
 
     # ----- world construction ------------------------------------------------
     def add_project(self, name: str, repo: str, number: int, *, release: dict | None = None,
-                    statuses=('Backlog', 'In Progress', 'Review', 'Done')) -> dict:
+                    statuses=('Todo', 'In Progress', 'Review', 'Done')) -> dict:
         owner = repo.split('/')[0]
         self.gh.add_repo(repo)
         self.gh.add_project(repo, owner, number, statuses=statuses)

@@ -83,8 +83,13 @@ class OnboardingTests(unittest.TestCase):
                 {'number':2,'pull_request':{'url':'x'},'html_url':'https://github.com/org/demo/pull/2','author_association':'OWNER'},
                 {'number':3,'user':bot,'author_association':'NONE'},
                 {'number':4,'html_url':'https://github.com/org/demo/issues/4','author_association':'MEMBER'}]
-        with patch.object(o.c,'gh_api_pages',return_value=issues),patch.object(o,'run') as run:
+        def add(*args):
+            rows.append({'number':4,'item_id':'I4','status':''})
+        rows=[{'number':1,'item_id':'I1','status':'Todo'}]
+        project.items.side_effect=lambda:list(rows)
+        with patch.object(o.c,'gh_api_pages',return_value=issues),patch.object(o,'run',side_effect=add) as run:
             o.import_issues(project);run.assert_called_once_with('gh','project','item-add','1','--owner','org','--url','https://github.com/org/demo/issues/4')
+        project.set_status.assert_called_once_with({'number':4,'item_id':'I4','status':''},'Todo')
     def test_import_never_adds_outsider_or_unverified_issues(self):
         project=Mock(repo='org/demo',number=1,owner='org');project.items.return_value=[]
         fake_bot={'login':'renovate[bot]','type':'User','id':1}
@@ -95,9 +100,43 @@ class OnboardingTests(unittest.TestCase):
                 # Not a verified Renovate identity (type User), so it is judged by association only.
                 {'number':14,'html_url':'https://github.com/org/demo/issues/14','user':fake_bot,'author_association':'NONE'},
                 {'number':15,'html_url':'https://github.com/org/demo/issues/15','author_association':'COLLABORATOR'}]
-        with patch.object(o.c,'gh_api_pages',return_value=issues),patch.object(o,'run') as run:
+        rows=[]
+        def add(*args):
+            rows.append({'number':int(args[-1].rsplit('/',1)[1]),'item_id':'I15','status':''})
+        project.items.side_effect=lambda:list(rows)
+        with patch.object(o.c,'gh_api_pages',return_value=issues),patch.object(o,'run',side_effect=add) as run:
             o.import_issues(project)
         self.assertEqual([c.args[-1] for c in run.call_args_list],['https://github.com/org/demo/issues/15'])
+        project.set_status.assert_called_once_with({'number':15,'item_id':'I15','status':''},'Todo')
+    def test_import_sets_todo_only_for_blank_trusted_rows_and_never_overrides(self):
+        # Maintainer-set statuses (Backlog, In Progress) are never overwritten; only blank rows move to Todo.
+        project=Mock(repo='org/demo',number=1,owner='org')
+        issues=[{'number':20,'html_url':'https://github.com/org/demo/issues/20','author_association':'OWNER'},
+                {'number':21,'html_url':'https://github.com/org/demo/issues/21','author_association':'MEMBER'},
+                {'number':22,'html_url':'https://github.com/org/demo/issues/22','author_association':'MEMBER'}]
+        rows=[{'number':20,'item_id':'I20','status':''},{'number':21,'item_id':'I21','status':'Backlog'},
+              {'number':22,'item_id':'I22','status':'In Progress'}]
+        project.items.return_value=rows
+        with patch.object(o.c,'gh_api_pages',return_value=issues),patch.object(o,'run') as run:
+            o.import_issues(project)
+        run.assert_not_called()  # all three already present, so no item-add
+        project.set_status.assert_called_once_with(rows[0],'Todo')
+    def test_import_without_todo_option_is_an_owner_action_value_error(self):
+        project=Mock(repo='org/demo',number=1,owner='org')
+        project.set_status.side_effect=o.c.ControllerError('org/demo: Project org/1 has no Todo or To do Status option')
+        rows=[{'number':40,'item_id':'I40','status':''}]
+        project.items.side_effect=lambda:list(rows)
+        issues=[{'number':40,'html_url':'https://github.com/org/demo/issues/40','author_association':'OWNER'}]
+        with patch.object(o.c,'gh_api_pages',return_value=issues),patch.object(o,'run'):
+            with self.assertRaises(ValueError) as ctx:o.import_issues(project)
+        self.assertIn('Todo', str(ctx.exception))
+        self.assertIn('owner action', str(ctx.exception))
+    def test_import_refuses_when_trusted_issue_absent_after_add(self):
+        project=Mock(repo='org/demo',number=1,owner='org');project.items.return_value=[]
+        issues=[{'number':30,'html_url':'https://github.com/org/demo/issues/30','author_association':'OWNER'}]
+        with patch.object(o.c,'gh_api_pages',return_value=issues),patch.object(o,'run'):
+            with self.assertRaises(ValueError):o.import_issues(project)
+        project.set_status.assert_not_called()
     def test_project_refuses_shared_config(self):
         data={'projects':[{'title':'AutoController · org/demo','number':5}]}
         with patch.object(o,'gh',return_value=data),patch.object(o,'run') as run,self.assertRaises(ValueError):

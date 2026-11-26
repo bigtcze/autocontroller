@@ -88,7 +88,7 @@ class FakeGitHub:
                                 'release_workflow_ok': True}
         self._txn(change)
 
-    def add_project(self, repo: str, owner: str, number: int, statuses=('Backlog', 'In Progress', 'Review', 'Done')):
+    def add_project(self, repo: str, owner: str, number: int, statuses=('Todo', 'In Progress', 'Review', 'Done')):
         def change(d):
             d['projects'][f'{owner}/{number}'] = {'repo': repo, 'id': f'PVT_{owner}_{number}', 'owner': owner,
                                                   'number': number, 'field_id': f'FLD_{number}',
@@ -97,7 +97,7 @@ class FakeGitHub:
         self._txn(change)
 
     def add_issue(self, repo: str, *, title: str, body: str = '', state: str = 'open',
-                  project: str | None = None, status: str = 'Backlog',
+                  project: str | None = None, status: str = 'Todo',
                   association: str = 'OWNER', author: dict | None = None,
                   labels: tuple = ()) -> int:
         def change(d):

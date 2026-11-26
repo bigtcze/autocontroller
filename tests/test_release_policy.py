@@ -220,7 +220,7 @@ class ControllerReleaseTests(unittest.TestCase):
     def test_disabled_release_ticket_does_not_block_other_issues(self):
         self.w.cycle_state.unlink(missing_ok=True)
         self.w.release_cfg={'enabled':False}
-        cards=[self.item, {'number':11,'title':'Fix UI regression','status':'Backlog',
+        cards=[self.item, {'number':11,'title':'Fix UI regression','status':'Todo',
                            'item_id':'y','url':'https://github.com/org/demo/issues/11'}]
         with patch.object(self.w,'ensure_unsafe_group_gone'),patch.object(self.w,'quota_until',return_value=0), \
              patch.object(self.w,'checkout_neutral',return_value=True), \

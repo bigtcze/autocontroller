@@ -36,7 +36,7 @@ class RealWrapperHappyPathTests(RealWrapperBase):
     def test_backlog_issue_through_the_real_wrapper_resumes_once_and_merges_exact_sha(self):
         self.world.add_project('alpha', R, 1)
         issue = self.gh.add_issue(R, title='Feature A', body='Implement A', project='example-owner/1',
-                                  status='Backlog')
+                                  status='Todo')
         self.world.script('alpha', [
             {'output': 'AUTOCONTROLLER_SELECT_ISSUE #%d' % issue},
             {'actions': [{'gh': ['gh', 'pr', 'create', '--repo', R, '--title', 'Feature A',
@@ -79,7 +79,7 @@ class RealWrapperHappyPathTests(RealWrapperBase):
 
     def test_learning_instructions_reach_the_coding_env_and_recovery_prompt_but_never_selection(self):
         self.world.add_project('alpha', R, 1)
-        issue = self.gh.add_issue(R, title='Feature L', body='l', project='example-owner/1', status='Backlog')
+        issue = self.gh.add_issue(R, title='Feature L', body='l', project='example-owner/1', status='Todo')
         self.world.script('alpha', [
             {'output': 'AUTOCONTROLLER_SELECT_ISSUE #%d' % issue},
             {'output': 'coding done'},
@@ -106,7 +106,7 @@ class RealWrapperHappyPathTests(RealWrapperBase):
 class RealWrapperUnstartedQuotaTests(RealWrapperBase):
     def test_unstarted_quota_is_cleared_by_the_real_wrapper_and_the_same_task_resumes_once(self):
         self.world.add_project('alpha', R, 1)
-        issue = self.gh.add_issue(R, title='Feature Q', body='q', project='example-owner/1', status='Backlog')
+        issue = self.gh.add_issue(R, title='Feature Q', body='q', project='example-owner/1', status='Todo')
         self.world.script('alpha', [
             {'output': 'AUTOCONTROLLER_SELECT_ISSUE #%d' % issue},
             # Quota before any OpenCode session exists: exit 1, no session record, marker left "starting".

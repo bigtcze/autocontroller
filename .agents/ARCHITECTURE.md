@@ -12,6 +12,7 @@
 | `release_policy.py` | Pure release decisions (SemVer, approvals, maintenance eligibility, Renovate identity, release-blocker and evidence validation) |
 | `release_artifacts.py` | Reproducible `autocontroller-<tag>.tar.gz` and `SHA256SUMS` from a git commit; validated extraction and verification; `qualify` CLI for the release workflow |
 | `lifecycle.py` | Installed-controller lifecycle: agent guard, locks, drain handshake, verified update and rollback, remove, uninstall, status, doctor and memory inspect helpers |
+| `followup.py` | Controller-authorized follow-up Issue admission: token-bound grant, `create` CLI, journal `followups.json`, idempotent steps (Issue, Project item, Todo, native dependencies), controller reconciliation without AI; the only `project item-add` writer outside onboarding. State: `followup-grant.json` (per-task token, removed when the task ends), `followups.json` (journal, each entry bound to repo, owner, project and the controller's numeric id), `followups.lock`. Identity and live-target checks run before journaling |
 | `bootstrap_policy.py` | Golden Standard prompt and exact-commit contract verification |
 | `memory.py` | Engram runtime manager and agent-facing learning adapter |
 | `standards/`, `skills/` | Packaged trusted prompts/contracts |

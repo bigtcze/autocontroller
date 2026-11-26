@@ -549,6 +549,26 @@ class AdmissionIsolationTests(OnboardingCase):
         self.assertEqual(urls, set(trusted) | {bootstrap})
         for label, number in refused.items():
             self.assertNotIn(number, urls, label)
+        # Imported trusted issues are schedulable only once Status is Todo.
+        status = {int(i['url'].rsplit('/', 1)[1]): i['status'] for i in titled['items']}
+        for number in trusted:
+            self.assertEqual(status[number], 'Todo', number)
+
+    def test_import_leaves_maintainer_set_status_untouched_and_todo_is_idempotent(self):
+        repo = self.w.add_repo(OWNER, 'demo', default_branch='trunk')
+        kept = self.w.add_issue(repo, 'kept', association='OWNER')
+        self.w.add_project(OWNER, f'AutoController · {repo}',
+                           items=[(f'https://github.com/{repo}/issues/{kept}', 'In Progress')])
+        self.assertEqual(self.onboard(repo).rc, 0)
+        titled = self.project_titled(repo)[0]
+        status = {int(i['url'].rsplit('/', 1)[1]): i['status'] for i in titled['items']}
+        self.assertEqual(status[kept], 'In Progress')
+        # Resume: no further item-edit for an already Todo or maintainer-set row.
+        snapshot = len(self.w.gh_calls())
+        self.w.config_path().unlink()
+        self.assertEqual(self.onboard(repo).rc, 0)
+        later = self.w.gh_calls()[snapshot:]
+        self.assertFalse([c for c in later if c['argv'][:2] == ['project', 'item-edit']])
 
     def test_existing_project_with_foreign_repo_issue_refused_before_linking(self):
         repo = self.w.add_repo(OWNER, 'demo', default_branch='trunk')

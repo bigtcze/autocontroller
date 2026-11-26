@@ -76,7 +76,7 @@ class Continuity(unittest.TestCase):
              patch.object(m,'renovate_prs',return_value=[]), \
              patch.object(self.w.project,'items',return_value=[
                   {'number':19,'status':'In Progress','url':url,'item_id':'X'},
-                  {'number':20,'status':'Backlog','url':'https://github.com/org/app/issues/20','item_id':'Y'}]), \
+                  {'number':20,'status':'Todo','url':'https://github.com/org/app/issues/20','item_id':'Y'}]), \
              patch.object(self.w,'select_next_issue') as select:
             self.w.one_iteration()
             select.assert_called_once()

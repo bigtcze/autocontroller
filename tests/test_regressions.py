@@ -36,9 +36,10 @@ class Regressions(unittest.TestCase):
         self.w=m.ProjectWorker(cfg,global_cfg,threading.Event(),threading.Lock())
         self.w.pdir.mkdir(parents=True)
 
-    def test_unset_project_status_is_automatic_backlog(self):
+    def test_unset_project_status_stays_blank_and_non_authorizing(self):
         item=m.normalize_project_item({'content':{'type':'Issue','url':'https://github.com/own/repo/issues/1'}},'own/repo')
-        self.assertEqual(item['status'],'Backlog')
+        self.assertEqual(item['status'],'')
+        self.assertFalse(m.schedulable_status(item['status']))
 
     def test_pagination_fail_closed(self):
         with patch.object(m,'gh_json',return_value={'items':[{'status':'Backlog','content':{'type':'Issue','url':'https://github.com/own/repo/issues/1'}}],'totalCount':2}):
