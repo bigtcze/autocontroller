@@ -1897,7 +1897,7 @@ class ProjectWorker:
                 # must not hold startup readiness for hours. A failure goes through the except path below.
                 # Trade-off, accepted: each process start runs one validate() even when a previous process
                 # saved a backoff, so a still-failing GitHub check increments the saved backoff once per start.
-                # The backoff gates only later iterations. No behavior change beyond readiness.
+                # The backoff gates only later iterations. Bounded: one extra validate() per process start.
                 if not self._init_attempted and not getattr(self,"_validated",False):
                     self._init_attempted=True
                     self.validate(ignore_conflicts=True)
