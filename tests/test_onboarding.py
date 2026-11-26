@@ -37,12 +37,28 @@ class OnboardingTests(unittest.TestCase):
     def test_read_only_repo_rejected(self):
         with patch.object(o,'gh',return_value={'permissions':{'push':False}}), self.assertRaises(ValueError):o.repo_details('org/demo')
     def test_bootstrap_issue_reuse(self):
-        issue={'number':7,'body':'<!-- autocontroller-bootstrap:v1 -->','state':'open'}
+        issue={'number':7,'body':'<!-- autocontroller-bootstrap:v1 -->','state':'open','author_association':'OWNER'}
         with patch.object(o.c,'gh_api_pages',return_value=[issue]),patch.object(o,'gh') as gh:
             self.assertEqual(o.find_or_create_bootstrap('org/demo',1),7);gh.assert_not_called()
     def test_closed_bootstrap_refuses(self):
-        issue={'number':7,'body':'<!-- autocontroller-bootstrap:v1 -->','state':'closed'}
+        issue={'number':7,'body':'<!-- autocontroller-bootstrap:v1 -->','state':'closed','author_association':'MEMBER'}
         with patch.object(o.c,'gh_api_pages',return_value=[issue]),self.assertRaises(ValueError):o.find_or_create_bootstrap('org/demo',1)
+    def test_outsider_marker_issue_is_not_adopted_as_bootstrap(self):
+        # B1 regression: an outsider's copy of the marker must not be adopted (it
+        # would then never be imported and onboarding would fail forever).
+        outsider={'number':7,'body':'<!-- autocontroller-bootstrap:v1 -->','state':'open','author_association':'NONE'}
+        created={'number':8}
+        with patch.object(o.c,'gh_api_pages',return_value=[outsider]),patch.object(o,'gh',return_value=created) as gh:
+            self.assertEqual(o.find_or_create_bootstrap('org/demo',1),8)
+        gh.assert_called_once()
+        self.assertEqual(gh.call_args.args[0:2],('api','--method'))
+    def test_outsider_marker_does_not_cause_multiple_bootstrap_refusal(self):
+        issues=[{'number':7,'body':'<!-- autocontroller-bootstrap:v1 -->','state':'open','author_association':'NONE'},
+                {'number':9,'body':'<!-- autocontroller-bootstrap:v1 -->','state':'closed','author_association':'CONTRIBUTOR'},
+                {'number':11,'body':'<!-- autocontroller-bootstrap:v1 -->','state':'open','author_association':'OWNER'}]
+        with patch.object(o.c,'gh_api_pages',return_value=issues),patch.object(o,'gh') as gh:
+            self.assertEqual(o.find_or_create_bootstrap('org/demo',1),11)
+        gh.assert_not_called()
     def test_import_skips_pr_and_existing_and_renovate(self):
         project=Mock(repo='org/demo',number=1,owner='org');project.items.return_value=[{'number':1}]
         bot={'login':'renovate[bot]','type':'Bot','id':29139614}

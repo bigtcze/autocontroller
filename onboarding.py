@@ -106,7 +106,10 @@ def create_checkout(repo, branch, directory, user):
     expected=f'https://github.com/{repo}.git'
     if directory.exists():
         if not (directory/'.git').is_dir() or directory.is_symlink(): raise ValueError('Existing checkout path is not a managed Git repository')
-        remote=c.command(['git','-C',str(directory),'remote','get-url','origin']).strip()
+        # Read the stored origin, not `remote get-url`: a global insteadOf rewrite
+        # (mirror/proxy) would make get-url return the rewritten address and refuse
+        # a checkout that onboarding itself cloned.
+        remote=c.command(['git','-C',str(directory),'config','--get','remote.origin.url']).strip()
         if repo_url(remote).lower()!=repo.lower(): raise ValueError('Checkout origin does not match repository')
         if c.command(['git','-C',str(directory),'status','--porcelain']).strip(): raise ValueError('Existing checkout has local work; refusing to overwrite it')
     else:
@@ -152,10 +155,10 @@ def project_for(repo, owner, config):
     number=int(p['number'])
     if any(str(x.get('project_owner','')).lower()==owner.lower() and x.get('project_number')==number for x in config['projects']):
         raise ValueError('Project is already assigned to another repository')
-    run('gh','project','link',str(number),'--owner',owner,'--repo',repo)
-    project=c.GitHubProject(repo,owner,number); project.ensure_metadata()
-    # Reject contamination by another repository (ordinary controller filters
-    # foreign issues but onboarding never adopts a shared project).
+    project=c.GitHubProject(repo,owner,number)
+    # Reject contamination by another repository BEFORE linking or any other
+    # mutation (ordinary controller filters foreign issues but onboarding never
+    # adopts a shared project).
     raw=gh('project','item-list',str(number),'--owner',owner,'--format','json','--limit','1000')
     rows=raw.get('items')
     if not isinstance(rows,list) or raw.get('totalCount',len(rows))>len(rows): raise ValueError('Project item list incomplete')
@@ -163,23 +166,28 @@ def project_for(repo, owner, config):
         content=item.get('content') or {}
         if content.get('type','').lower()=='issue' and not c.normalize_project_item(item,repo):
             raise ValueError('Existing Project contains issues from another repository')
+    run('gh','project','link',str(number),'--owner',owner,'--repo',repo)
+    project.ensure_metadata()
     return project,p.get('url') or gh('project','view',str(number),'--owner',owner,'--format','json')['url']
+
+
+TRUSTED_ASSOCIATIONS={'OWNER','MEMBER','COLLABORATOR'}
 
 
 def find_or_create_bootstrap(repo, number):
     title='Repository bootstrap: Golden Standard v'+VERSION
     marker=f'<!-- autocontroller-bootstrap:v{VERSION} -->'
     issues=c.gh_api_pages(f'repos/{repo}/issues?state=all&per_page=100',max_items=10000)
-    matches=[i for i in issues if not i.get('pull_request') and marker in (i.get('body') or '')]
+    # Marker text is attacker-controlled on a public repository. Only issues written
+    # by trusted members may be adopted as the bootstrap; outsider copies are ignored.
+    matches=[i for i in issues if not i.get('pull_request') and marker in (i.get('body') or '')
+             and str(i.get('author_association') or '').upper() in TRUSTED_ASSOCIATIONS]
     if len(matches)>1 or (matches and matches[0].get('state')!='open'):
         raise ValueError('Multiple or closed bootstrap issues found; refusing to assume a previous bootstrap was verified')
     if matches: return int(matches[0]['number'])
     body=(marker+'\n\nFirst required engineering task for this repository. Adapt repository-specific agent contracts, reproducible mise tooling, required PR/default-branch CI, native release qualification and Renovate to the packaged golden standard. Preserve existing features and protections. No unrelated changes, direct merges, release publication or fabricated evidence. Finish through one independently reviewed PR with genuine tests. The controller supplies the authoritative versioned standard in its work prompt.')
     i=gh('api','--method','POST',f'repos/{repo}/issues','-f',f'title={title}','-f',f'body={body}')
     return int(i['number'])
-
-
-TRUSTED_ASSOCIATIONS={'OWNER','MEMBER','COLLABORATOR'}
 
 
 def import_issues(project):
@@ -215,6 +223,10 @@ def onboard(url=None):
     owner=info['owner']['login']
     project,project_url=project_for(repo,owner,config)
     bootstrap=find_or_create_bootstrap(repo,project.number)
+    # Onboarding created or verified this issue itself, so it admits it explicitly
+    # instead of depending on the author_association import rule. Idempotent on resume.
+    if not any(i['number']==bootstrap for i in project.items()):
+        run('gh','project','item-add',str(project.number),'--owner',project.owner,'--url',f'https://github.com/{repo}/issues/{bootstrap}')
     import_issues(project)
     if not any(i['number']==bootstrap for i in project.items()): raise ValueError('Bootstrap is not present in the dedicated Project')
     cfg={'name':name,'enabled':True,'repo':repo,'directory':str(directory),'base_branch':branch,
