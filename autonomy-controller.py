@@ -604,6 +604,7 @@ Rules:
 - Push a reviewable PR and preserve all repository-defined tests and required CI gates.
 - Evidence: never claim a test, Docker image, E2E suite or gate was run or exists unless it actually did.
 - Keep the PR DRAFT (or mark it draft) while independent review is incomplete or serious findings remain, and report the blocker. Mark ready only after completed independent review. Record a concise review summary and verification evidence on the PR; no separate report. Do not create custom review-verdict tokens.
+- The controller verifies from OpenCode session metadata that a completed native `oracle` subagent review's snapshot equals the exact final PR head tree; so run the final `oracle` review on a clean checkout of the final pushed head, after the last commit (PR description edits are fine), and never invent verdict text.
 - Controller owns exact-SHA CI verification, merge, Issue closure and release publication. Do NOT merge or close the Issue; never bypass branch protection, required checks or approvals; NEVER run gh release create, push release tags, or skip a requested feature release approval.
 - Red main after a merge: fix through a new PR, never a direct push to main.
 Follow-up Issues (only for this authorized task; you own them, including needs found by subagents or oracle review):
@@ -1414,6 +1415,7 @@ class ProjectWorker:
             "Reconcile the new diff, obtain an independent OMO `oracle` "
             "review and return only after fixing blockers."))
         checkpoint.pop("ready_sha",None)
+        checkpoint.pop("review_evidence",None)
         self.save_checkpoint(checkpoint)
 
     def route_divergence(self, checkpoint: dict, pr: dict, key: str) -> bool:
@@ -1444,6 +1446,7 @@ class ProjectWorker:
             "conflicting files as an explicit blocker."))
         checkpoint.pop("ready_sha",None)
         checkpoint.pop("reviewed_sha",None)
+        checkpoint.pop("review_evidence",None)
         repeated=bool(head) and checkpoint.get("diverged_head")==head
         checkpoint["diverged_head"]=head
         self.save_checkpoint(checkpoint)
@@ -1457,6 +1460,89 @@ class ProjectWorker:
             self.notice(f"diverged:{key}",
                         f"PR #{number} is {state} relative to {base}; returning to the agent to reconcile",
                         warning=True)
+        return True
+
+    def review_evidence(self, kind: str, number: int, head_sha: str) -> tuple[dict | None, str]:
+        """Return (evidence, reason). Evidence proves a completed native oracle reviewed the head TREE.
+
+        Structure only: the wrapper lists oracle candidates from OpenCode session metadata; this accepts
+        the latest one that succeeded, is idle, is not active, has a complete snapshot, and whose every
+        snapshot equals the PR head's git tree. Review outcome and content are never inspected.
+        Infrastructure failures raise (backoff, checkpoint kept); only absence/mismatch returns None.
+        """
+        if not re.fullmatch(r"[a-fA-F0-9]{40}", head_sha or ""):
+            raise ControllerError("Cannot verify review evidence for an invalid PR head SHA")
+        commit = gh_json("api", f"repos/{self.repo}/git/commits/{head_sha}")
+        tree = str((commit.get("tree") or {}).get("sha") or "") if isinstance(commit, dict) else ""
+        if not re.fullmatch(r"[a-fA-F0-9]{40}", tree):
+            raise ControllerError(f"Cannot read git tree of PR head {head_sha[:12]}")
+        try:
+            proc = subprocess.run([sys.executable, self.wrapper, "--oracle-reviews", kind, str(number)],
+                                  cwd=self.directory, env=self.env(), capture_output=True, text=True,
+                                  timeout=240, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ControllerError(f"OpenCode review listing failed: {exc}") from exc
+        if proc.returncode:
+            raise ControllerError("OpenCode review listing unavailable: " + (proc.stderr or proc.stdout).strip()[:300])
+        try:
+            listing = json.loads(proc.stdout)
+        except json.JSONDecodeError as exc:
+            raise ControllerError("OpenCode review listing is not valid JSON") from exc
+        candidates = listing.get("candidates") if isinstance(listing, dict) else None
+        if not isinstance(candidates, list):
+            raise ControllerError("OpenCode review listing has no candidates list")
+
+        def number_of(value) -> float:
+            return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+
+        accepted = [c for c in candidates if isinstance(c, dict)
+                    and c.get("outcome") == "succeeded" and number_of(c.get("idle")) > 0
+                    and c.get("active") is False and c.get("snapshot_complete") is True
+                    and c.get("trees") == [tree]
+                    and isinstance(c.get("session"), str) and isinstance(c.get("root"), str)]
+        if not accepted:
+            return None, (f"no completed, idle, inactive oracle session with a complete snapshot "
+                          f"where every snapshot equals tree {tree[:12]} ({len(candidates)} candidate(s) inspected)")
+        latest = max(accepted, key=lambda c: (number_of(c.get("idle")), number_of(c.get("created"))))
+        return {"sha": head_sha, "tree": tree, "session": latest["session"], "root": latest["root"]}, ""
+
+    def route_missing_review(self, checkpoint: dict, key: str, head: str, reason: str):
+        """Return to the agent for the final oracle review. A repeat at the same head is a BLOCKER."""
+        repeated = bool(head) and checkpoint.get("review_missing_head") == head
+        checkpoint.update(phase="code", review_missing_head=head, review_feedback=(
+            f"Independent review evidence is missing for PR head {head[:12]} ({reason}). The controller "
+            "accepts only a completed native OMO `oracle` subagent session whose OpenCode snapshot equals "
+            "the git tree of the exact final PR head. Run the final `oracle` review on a clean checkout of "
+            "the exact pushed head after the last commit (PR description edits are fine), route its findings "
+            "to `fixer`, and do not request repeated reviews of an unchanged tree merely to satisfy this check."))
+        checkpoint.pop("ready_sha", None)
+        checkpoint.pop("review_evidence", None)
+        self.save_checkpoint(checkpoint)
+        if repeated:
+            self.notice(f"review-missing:{key}",
+                        f"BLOCKER: {key} still has no independent oracle review evidence for head {head[:12]} "
+                        f"after an agent pass ({reason}). Actionable: run the final oracle review on the exact "
+                        "pushed head; retrying in one hour", warning=True)
+            self.retry(key, f"No independent oracle review evidence for head {head[:12]} after agent pass",
+                       min_seconds=3600)
+        else:
+            self.retry(key, f"Independent oracle review evidence missing for head {head[:12]}", min_seconds=600)
+
+    def review_gate(self, kind: str, number: int, checkpoint: dict, key: str, pr: dict) -> bool:
+        """Before CI and before ready_sha: stored evidence for this head is trusted; else look it up.
+
+        Returns True when the task was routed back to the agent (caller must return).
+        """
+        head = str((pr.get("head") or {}).get("sha") or "")
+        if head and (checkpoint.get("review_evidence") or {}).get("sha") == head:
+            return False
+        evidence, reason = self.review_evidence(kind, number, head)
+        if evidence:
+            checkpoint["review_evidence"] = evidence
+            checkpoint.pop("review_missing_head", None)
+            self.save_checkpoint(checkpoint)
+            return False
+        self.route_missing_review(checkpoint, key, head, reason)
         return True
 
     def _cycle(self, kind: str, number: int, url: str, item: dict | None):
@@ -1623,6 +1709,8 @@ class ProjectWorker:
                 self.save_checkpoint(checkpoint)
                 self.retry(key,"Dirty checkout before CI verification",min_seconds=600)
                 return
+            if self.review_gate(kind,number,checkpoint,key,pr):
+                return
             if self.is_bootstrap(kind,number):
                 candidate_sha=str((pr.get("head") or {}).get("sha") or "")
                 if not re.fullmatch(r"[a-fA-F0-9]{40}",candidate_sha):
@@ -1673,6 +1761,11 @@ class ProjectWorker:
                 raise ControllerError("No verified ready-to-merge PR SHA")
             if sha != ready:
                 self.route_new_head(checkpoint)
+                return
+            # Cheap, no-AI assertion: the merge may only use evidence stored for this exact ready SHA.
+            # Covers legacy checkpoints that reached merge before review evidence existed.
+            if (checkpoint.get("review_evidence") or {}).get("sha") != ready:
+                self.route_missing_review(checkpoint,key,ready,"no stored review evidence for the ready SHA")
                 return
             if self.is_bootstrap(kind,number):
                 candidate_sha=str((pr.get("head") or {}).get("sha") or "")
@@ -1815,6 +1908,7 @@ class ProjectWorker:
             checkpoint.update(phase="ci",pr_number=candidate["number"],repairing=True)
             checkpoint.pop("ready_sha",None)
             checkpoint.pop("reviewed_sha",None)
+            checkpoint.pop("review_evidence",None)
             self.save_checkpoint(checkpoint)
             return
         raise ControllerError(f"Unsupported checkpoint phase {phase!r}")

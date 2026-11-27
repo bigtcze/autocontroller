@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -23,10 +24,11 @@ def log(message):
     print("[autonomy-guard]", message, flush=True)
 
 
-def opencode_api(method, path):
+def opencode_api(method, path, *, envelope=False):
     """
     Use OpenCode V2's own CLI for service discovery/authentication.
-    Returns the unwrapped `data` payload when present.
+    Returns the unwrapped `data` payload when present, or the whole
+    envelope (needed for `cursor` pagination) when envelope=True.
     """
     result = subprocess.run(
         [REAL, "api", method, path],
@@ -48,6 +50,9 @@ def opencode_api(method, path):
         raise RuntimeError(
             f"Invalid JSON from OpenCode API: {method} {path}"
         ) from exc
+
+    if envelope:
+        return payload
 
     if isinstance(payload, dict) and "data" in payload:
         return payload["data"]
@@ -1063,7 +1068,123 @@ def interrupt_owned():
         time.sleep(1)
 
 
+ORACLE_PAGE_CAP = 20
+
+
+def _paged_sessions(query):
+    """All session rows for one list query; fails closed on malformed pages or the page cap."""
+    rows = []
+    cursor = None
+    for _ in range(ORACLE_PAGE_CAP):
+        path = "/api/session?" + query + (f"&cursor={urllib.parse.quote(cursor, safe='')}" if cursor else "")
+        envelope = opencode_api("GET", path, envelope=True)
+        if not isinstance(envelope, dict) or not isinstance(envelope.get("data"), list):
+            raise RuntimeError("Invalid /api/session page")
+        for item in envelope["data"]:
+            if not isinstance(item, dict):
+                raise RuntimeError("Invalid session row")
+            rows.append(item)
+        cursor_info = envelope.get("cursor") or {}
+        nxt = cursor_info.get("next") if isinstance(cursor_info, dict) else None
+        if not nxt:
+            return rows
+        if not isinstance(nxt, str) or nxt == cursor:
+            raise RuntimeError("Invalid session cursor")
+        cursor = nxt
+    raise RuntimeError("Session list page cap reached; refusing truncated review evidence")
+
+
+def _root_title_pattern(kind, number):
+    return re.compile(
+        r"^" + re.escape(PROJECT_NAME) + " " + re.escape(kind) + " #" + str(int(number))
+        + r" \[guard:\d+-\d+\]$"
+    )
+
+
+def oracle_reviews(kind, number):
+    """Read-only evidence listing: candidate completed-or-running oracle children per exact root.
+
+    Emits structure only; the controller decides whether a candidate proves review of a head tree.
+    """
+    verify_v2_service()
+    pattern = _root_title_pattern(kind, number)
+    search = urllib.parse.quote(f"{PROJECT_NAME} {kind} #{int(number)}", safe="")
+    roots = []
+    for item in _paged_sessions(f"parentID=null&directory={urllib.parse.quote(str(ROOT), safe='')}&search={search}&limit=100"):
+        if not isinstance(item.get("title"), str) or not pattern.fullmatch(item["title"]):
+            continue
+        if item.get("parentID"):
+            continue
+        root_id = item.get("id")
+        if not isinstance(root_id, str) or not root_id:
+            raise RuntimeError("Invalid root session id")
+        directory = session_directory(get_session(root_id))
+        if not isinstance(directory, str) or str(Path(directory).resolve()) != str(ROOT):
+            continue
+        roots.append(root_id)
+
+    active = opencode_api("GET", "/api/session/active")
+    if not isinstance(active, dict):
+        raise RuntimeError("Invalid /api/session/active response")
+
+    candidates = []
+    for root_id in sorted(set(roots)):
+        children = _paged_sessions(f"parentID={urllib.parse.quote(root_id, safe='')}&limit=100")
+        for child in children:
+            if child.get("agent") != "oracle" or not isinstance(child.get("id"), str):
+                continue
+            trees = set()
+            complete = True
+            messages = []
+            cursor = None
+            for _ in range(ORACLE_PAGE_CAP):
+                path = f"/api/session/{urllib.parse.quote(child['id'], safe='')}/message"
+                if cursor:
+                    path += f"?cursor={urllib.parse.quote(cursor, safe='')}"
+                page = opencode_api("GET", path, envelope=True)
+                if not isinstance(page, dict) or not isinstance(page.get("data"), list):
+                    raise RuntimeError("Invalid message page")
+                messages.extend(page["data"])
+                nxt = (page.get("cursor") or {}).get("next") if isinstance(page.get("cursor"), dict) else None
+                if not nxt:
+                    break
+                if nxt == cursor:
+                    raise RuntimeError("Invalid message cursor")
+                cursor = nxt
+            else:
+                raise RuntimeError("Message page cap reached; refusing truncated review evidence")
+            for message in messages:
+                if not isinstance(message, dict) or message.get("type") != "assistant":
+                    continue
+                snapshot = message.get("snapshot")
+                start = snapshot.get("start") if isinstance(snapshot, dict) else None
+                end = snapshot.get("end") if isinstance(snapshot, dict) else None
+                if not start or not end:
+                    complete = False
+                    continue
+                trees.update({str(start), str(end)})
+            candidates.append({
+                "root": root_id,
+                "session": child["id"],
+                "created": (child.get("time") or {}).get("created"),
+                "idle": (child.get("time") or {}).get("idle"),
+                "outcome": child.get("outcome"),
+                "active": child["id"] in active,
+                "trees": sorted(trees),
+                "snapshot_complete": complete and bool(messages),
+            })
+    return {"kind": kind, "number": int(number), "candidates": candidates}
+
+
 def main():
+    if sys.argv[1:2] == ["--oracle-reviews"] and len(sys.argv) == 4:
+        try:
+            print(json.dumps(oracle_reviews(sys.argv[2], sys.argv[3]), sort_keys=True))
+            sys.exit(0)
+        except Exception as exc:
+            print("ORACLE REVIEWS UNAVAILABLE:", exc, file=sys.stderr)
+            sys.exit(2)
+
     if sys.argv[1:] == ["--check"]:
         try:
             sys.exit(guard_check())
