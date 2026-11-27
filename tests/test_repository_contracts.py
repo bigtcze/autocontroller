@@ -280,6 +280,19 @@ class RepositoryContractTests(unittest.TestCase):
                      for dep, tag, _digest in re.findall(pattern, workflow_text(name))}
             self.assertEqual(found, set(IMAGES))
 
+    def test_renovate_disables_distro_tag_bumps_but_keeps_digests(self):
+        # Each pinned distro tag is an owner support-matrix decision; only digests may be maintained.
+        config = json.loads((ROOT / 'renovate.json').read_text(encoding='utf-8'))
+        rules = [r for r in config.get('packageRules', [])
+                 if 'custom.regex' in r.get('matchManagers', [])
+                 and {'debian', 'ubuntu'} <= set(r.get('matchDepNames', []))]
+        disabled = set()
+        for rule in rules:
+            if rule.get('enabled') is False:
+                disabled |= set(rule.get('matchUpdateTypes', ['*']))  # no matchUpdateTypes = every type
+        self.assertTrue({'major', 'minor'} <= disabled, 'distro tag major/minor updates must be disabled')
+        self.assertFalse({'digest', '*'} & disabled, 'distro digest updates must stay enabled')
+
     def test_mise_pins_ruff_exactly_and_ci_runs_lint_syntax_and_test(self):
         mise = tomllib.loads((ROOT / 'mise.toml').read_text(encoding='utf-8'))
         self.assertRegex(mise['tools']['ruff'], r'^\d+\.\d+\.\d+$')
