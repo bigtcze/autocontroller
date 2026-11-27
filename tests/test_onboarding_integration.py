@@ -7,13 +7,11 @@ contract and its limits are documented in docs/ONBOARDING_TESTING.md.
 """
 import fcntl
 import json
-import re
 import sys
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import onboarding_harness  # noqa: E402
 from onboarding_harness import World, OWNER, ORG, classic_protection  # noqa: E402
 from onboarded_fixture import onboarded_project_entry  # noqa: E402
 

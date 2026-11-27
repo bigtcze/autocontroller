@@ -9,7 +9,8 @@
   only).
 - `THIRD_PARTY.md`: provenance and license notices of adapted third-party
   material; `LICENSE`: MIT.
-- `config.example.json`: every supported config key default.
+- `config.example.json`: every supported global config key default; the README
+  configuration reference covers per-project and internal keys.
 
 Update documentation in the same PR as the behavior change. Never document
 planned features as implemented; mark unknowns explicitly. No personal paths,

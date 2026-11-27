@@ -3,7 +3,8 @@
 ## Commands
 
 ```sh
-mise run ci                       # = syntax + test
+mise run ci                       # = syntax + lint (Ruff, pinned) + test
+mise run lint                     # ruff check (config: ruff.toml)
 bash scripts/check-syntax.sh      # py_compile all Python, bash -n, JSON validation
 bash scripts/offline-tests.sh     # full unittest suite, hermetic
 ```
@@ -25,11 +26,14 @@ Git config, removes GitHub/provider tokens, and puts failing shims for `gh`,
   SQLite stores and a private temporary socket.
 - **Repository contracts**: `tests/test_repository_contracts.py` checks this
   repository's own bootstrap contract files, workflow safety properties
-  (no `pull_request_target`, no secrets, pinned actions, aggregate `required`)
-  and absence of personal paths/tokens.
+  (no `pull_request_target`, no secrets, pinned actions, aggregate `required`),
+  `config.example.json` globals matching the controller's defaults, CI/release
+  images digest-pinned with a Renovate docker manager, and `mise.toml` pinning
+  ruff with `ci` running lint, and absence of personal paths/tokens.
 - **CI matrix**: `.github/workflows/regression.yml` runs syntax checks, the
   suite as an unprivileged user in clean `debian:12`, `debian:13`,
-  `ubuntu:24.04`, `ubuntu:26.04` containers, and `mise run ci`. Containers
+  `ubuntu:24.04`, `ubuntu:26.04` containers (digest-pinned; Renovate maintains
+  the digests), and `mise run ci`. Containers
   prove OS/Python compatibility of the code and tests only; they are **not** a
   systemd/VM installation test.
 

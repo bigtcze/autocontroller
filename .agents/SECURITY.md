@@ -37,7 +37,8 @@ repositories. Relevant threats:
 - Least privilege: workflows default to `contents: read`; only the release
   `publish` job has `contents: write`. No `pull_request_target`, no secrets in
   PR workflows, `persist-credentials: false`, third-party actions pinned to
-  full commit SHAs (Renovate maintains digests).
+  full commit SHAs (Renovate maintains digests). CI and release container
+  images are pinned to image digests, which Renovate also maintains.
 - Runtime files 0600/0700, `UMask=0077`, `NoNewPrivileges=true`; the memory
   socket directory must be private; Engram downloads are checksum-verified and
   size-bounded.

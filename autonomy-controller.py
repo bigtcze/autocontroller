@@ -918,8 +918,8 @@ class ProjectWorker:
             return
         try:
             boot=Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-        except OSError:
-            raise FatalWorkerError("Cannot determine boot ID for unsafe process group")
+        except OSError as exc:
+            raise FatalWorkerError("Cannot determine boot ID for unsafe process group") from exc
         if state.get("boot_id")==boot and self.group_alive(int(state["pgid"])):
             raise FatalWorkerError(f"Process group {state['pgid']} still alive; no new task allowed")
         self.unsafe_file.unlink(missing_ok=True)
@@ -2067,7 +2067,7 @@ def main():
     lock=state_dir/"controller.lock"
     lockfile=lock.open("a+")
     try: fcntl.flock(lockfile.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
-    except BlockingIOError: raise ControllerError("Another autonomous-dev controller is already running")
+    except BlockingIOError: raise ControllerError("Another autonomous-dev controller is already running") from None
     stop=threading.Event(); quota_lock=threading.Lock()
     def stop_signal(signum,frame):
         LOG.warning("received signal %s; stopping workers and preserving checkpoints",signum)

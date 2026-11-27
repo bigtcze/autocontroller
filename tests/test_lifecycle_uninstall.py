@@ -5,7 +5,6 @@ daemon-reload are replaced by recorders, so no real service, unit or HOME is tou
 """
 from __future__ import annotations
 
-import json
 import sys
 import tempfile
 import unittest

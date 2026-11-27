@@ -128,7 +128,7 @@ class BuildDeterminismTests(ArchiveFixture):
     def test_generated_files_describe_the_release(self):
         files = ra.verify(self.build()['archive'].parent, TAG, self.commit)
         self.assertEqual(files['VERSION'], f'{{"commit": "{self.commit}", "tag": "{TAG}"}}\n'.encode())
-        self.assertIn(f'  tool.py\n'.encode(), files['MANIFEST.sha256'])
+        self.assertIn('  tool.py\n'.encode(), files['MANIFEST.sha256'])
         self.assertNotIn(b'  MANIFEST.sha256', files['MANIFEST.sha256'])
 
 

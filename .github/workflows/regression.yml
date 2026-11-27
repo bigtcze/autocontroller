@@ -23,13 +23,22 @@ jobs:
         run: bash scripts/check-syntax.sh
 
   distro:
-    name: distro (${{ matrix.image }})
+    name: distro (${{ matrix.distro }})
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
+      # Images are pinned to multi-arch index digests (each contains linux/amd64); Renovate maintains them.
       matrix:
-        image: [debian:12, debian:13, ubuntu:24.04, ubuntu:26.04]
+        include:
+          - distro: debian:12
+            image: debian:12@sha256:1d04200c2ece1d4d75a2a6f8e11ebce7d86a2ae28b34bb2c9cbb3ee9f4953e75
+          - distro: debian:13
+            image: debian:13@sha256:3cda3ca472ce45507a5109c6a3907093e24d9ae67d55954c9a07a45665dafba2
+          - distro: ubuntu:24.04
+            image: ubuntu:24.04@sha256:562111b88caa79c71391c0c4d3c2114a7d5c35915c20561fd893cb1e07929e6b
+          - distro: ubuntu:26.04
+            image: ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db
     container:
       image: ${{ matrix.image }}
     steps:
@@ -64,6 +73,6 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5
         with:
-          install: false
+          install: true
       - name: mise run ci
         run: mise run ci

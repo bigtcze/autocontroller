@@ -3,11 +3,19 @@
 # Python is deliberately NOT pinned by mise: the product targets the
 # distribution python3 (>= 3.11) that the supported OS images provide, and the
 # offline runner refuses anything older. Do not add a [tools] python entry.
+# ruff is a dev/CI-only lint tool, pinned exactly; it is never a runtime dependency.
 min_version = "2026.1.0"
+
+[tools]
+ruff = "0.17.6"
 
 [tasks.syntax]
 description = "Byte-compile, shell-syntax and JSON checks"
 run = "bash scripts/check-syntax.sh"
+
+[tasks.lint]
+description = "Ruff lint (pinned; development/CI only, not a runtime dependency)"
+run = "ruff check"
 
 [tasks.test]
 description = "Full offline regression suite in an isolated HOME with blocking shims"
@@ -15,4 +23,4 @@ run = "bash scripts/offline-tests.sh"
 
 [tasks.ci]
 description = "Everything the required PR check runs"
-depends = ["syntax", "test"]
+depends = ["syntax", "lint", "test"]

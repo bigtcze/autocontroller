@@ -3,12 +3,11 @@ step j (log collection, always runs). Companion of scenario.py / scenario_persis
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import time
 
 from .runner import ScenarioAbort
-from .scenario import (GUEST_HOME, INSTALL, REPO_SRC, SERVICE, require, root_run, save, ssh_out,
+from .scenario import (GUEST_HOME, INSTALL, REPO_SRC, SERVICE, require, save, ssh_out,
                        sudo_out)
 from .scenario_persist import (MEMORY, _hosts_blackhole, _hosts_restore, _service_show)
 

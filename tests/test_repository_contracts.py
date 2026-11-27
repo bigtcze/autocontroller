@@ -3,11 +3,13 @@
 Deliberately simple: workflows are checked by text patterns rather than a YAML
 parser so the suite stays dependency-free.
 """
+import ast
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
+import tomllib
 import unittest
 
 import bootstrap_policy
@@ -20,6 +22,31 @@ TOKEN = re.compile(r'\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}')
 USES = re.compile(r'^\s*(?:-\s*)?uses:\s*(\S+)', re.M)
 SHA_PIN = re.compile(r'@[0-9a-f]{40}$')
 IMAGES = ('debian:12', 'debian:13', 'ubuntu:24.04', 'ubuntu:26.04')
+# An image reference without its digest. `distro:` labels in regression.yml name the distribution
+# and are exempt; only image references must be digest-pinned.
+UNPINNED_IMAGE = re.compile(r'(?<!distro: )\b(?:debian|ubuntu):[0-9.]+(?![0-9.])(?!@sha256:[a-f0-9]{64})')
+
+
+def global_cfg_defaults():
+    """Literal defaults of every `global_cfg.get("key", default)` in autonomy-controller.py (no import)."""
+    def value(node):
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+            return value(node.left) * value(node.right)  # e.g. 2*1024*1024*1024
+        return ast.literal_eval(node)
+
+    def is_global_cfg(node):
+        return (isinstance(node, ast.Name) and node.id == 'global_cfg') or \
+               (isinstance(node, ast.Attribute) and node.attr == 'global_cfg')
+
+    tree = ast.parse((ROOT / 'autonomy-controller.py').read_text(encoding='utf-8'))
+    defaults = {}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == 'get'
+                and is_global_cfg(node.func.value) and len(node.args) == 2
+                and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)
+                and not node.args[0].value.startswith('_')):
+            defaults[node.args[0].value] = value(node.args[1])
+    return defaults
 
 
 def tracked_like_files():
@@ -133,10 +160,26 @@ class RepositoryContractTests(unittest.TestCase):
                     self.assertRegex(ref, SHA_PIN)
 
     def test_regression_covers_all_support_images(self):
-        text = workflow_text('regression.yml')
-        for image in IMAGES:
-            with self.subTest(image=image):
-                self.assertIn(image, text)
+        # Every image is digest-pinned in both the CI matrix and the release artifacts loop.
+        for name in ('regression.yml', 'release.yml'):
+            text = workflow_text(name)
+            with self.subTest(workflow=name):
+                self.assertEqual(UNPINNED_IMAGE.findall(text), [])
+            for image in IMAGES:
+                with self.subTest(workflow=name, image=image):
+                    self.assertIn(image, text)
+                    self.assertRegex(text, re.escape(image) + r'@sha256:[a-f0-9]{64}(?![a-f0-9])')
+
+    def test_example_config_matches_controller_global_defaults(self):
+        # Every global key the controller reads with a literal default is in config.example.json with
+        # that default, and the example holds nothing else (update_repository and projects are read
+        # by validate_config, not by a global_cfg.get call).
+        defaults = global_cfg_defaults()
+        example = json.loads((ROOT / 'config.example.json').read_text(encoding='utf-8'))
+        self.assertEqual(set(defaults) | {'update_repository', 'projects'}, set(example))
+        for key, default in defaults.items():
+            with self.subTest(key=key):
+                self.assertEqual(example[key], default)
 
     def test_top_level_permissions_are_read_only(self):
         for path in WORKFLOWS.glob('*.yml'):
@@ -225,6 +268,22 @@ class RepositoryContractTests(unittest.TestCase):
             dashboard = dashboard.get('enabled')
         self.assertIs(dashboard, True, 'dependency dashboard must be enabled')
         self.assertIsNot(config.get('automerge'), True, 'blanket automerge bypasses controller review')
+        # Digest-pinned workflow images are maintained by a regex manager (Renovate syntax: /re/ and (?<name>)).
+        managers = [m for m in config.get('customManagers', []) if m.get('datasourceTemplate') == 'docker']
+        self.assertTrue(managers, 'no docker regex custom manager for workflow image digests')
+        for manager in managers:
+            self.assertEqual(manager.get('customType'), 'regex')
+            self.assertTrue(any(re.search(p.strip('/'), '.github/workflows/regression.yml')
+                                for p in manager['managerFilePatterns']))
+            pattern = re.sub(r'\(\?<(?![=!])', '(?P<', manager['matchStrings'][0])
+            found = {f'{dep}:{tag}' for name in ('regression.yml', 'release.yml')
+                     for dep, tag, _digest in re.findall(pattern, workflow_text(name))}
+            self.assertEqual(found, set(IMAGES))
+
+    def test_mise_pins_ruff_exactly_and_ci_runs_lint_syntax_and_test(self):
+        mise = tomllib.loads((ROOT / 'mise.toml').read_text(encoding='utf-8'))
+        self.assertRegex(mise['tools']['ruff'], r'^\d+\.\d+\.\d+$')
+        self.assertTrue({'lint', 'syntax', 'test'} <= set(mise['tasks']['ci']['depends']))
 
 
 if __name__ == '__main__':

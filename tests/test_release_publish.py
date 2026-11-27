@@ -7,7 +7,6 @@ file. No network, no real gh, no real GitHub.
 import hashlib
 import json
 import os
-import shutil
 import stat
 import subprocess
 import sys

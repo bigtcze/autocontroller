@@ -20,6 +20,8 @@
   `release_policy.py`, `bootstrap_policy.py`).
 - Preserve external interfaces listed in `.agents/PRODUCT_SCOPE.md`.
 - Static analysis: `scripts/check-syntax.sh` (byte-compile, `bash -n`, JSON
-  validation). No linter is configured yet; do not introduce one without an
-  Issue, and do not reformat unrelated code.
+  validation). Ruff (version pinned in `mise.toml`, config in `ruff.toml`,
+  correctness rule set) runs via `mise run lint` and in `mise run ci`. Do not
+  add other linters, or widen Ruff rules into style churn, without an Issue;
+  do not reformat unrelated code.
 - Comments explain safety reasons and invariants, not history.

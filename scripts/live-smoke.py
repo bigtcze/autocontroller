@@ -391,7 +391,7 @@ def run_session(argv: list[str], report: Report, env: dict, *, timeout: int, cwd
             for pipe in (proc.stdout, proc.stderr):
                 if pipe is not None:
                     pipe.close()
-        raise SmokeFailed(f'opencode session exceeded {timeout}s and its process group was terminated')
+        raise SmokeFailed(f'opencode session exceeded {timeout}s and its process group was terminated') from None
     except BaseException:
         # Interrupted (or any other unexpected error) while the session may still be running.
         # m4: the record and the pipe close run in `finally`, so they happen even if
