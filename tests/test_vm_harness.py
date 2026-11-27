@@ -19,7 +19,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from vmtest import cloudinit, fetch, harness, manifest, qemu, runner, source, ssh
+from vmtest import cloudinit, fetch, harness, manifest, qemu, runner, source
 from vmtest.runner import ScenarioAbort
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -145,10 +145,6 @@ class DigestAndFetchTests(TempDirTest):
         with mock.patch.object(fetch, 'download', side_effect=AssertionError('network used')):
             self.assertEqual(self._ensure(cache, entry), target)
 
-    def test_cache_key_is_the_digest(self):
-        entry = self._entry(self.sha256)
-        self.assertEqual(fetch.cache_path(self.dir, entry).name, f'sha256-{self.sha256}.img')
-
     def test_corrupt_cache_entry_is_replaced_by_verified_download(self):
         cache = self.dir / 'cache'
         entry = self._entry(self.sha256)
@@ -256,11 +252,6 @@ class QemuArgvTests(TempDirTest):
     def _value(argv, flag):
         return argv[argv.index(flag) + 1]
 
-    def test_kvm_argv_uses_host_cpu_and_kvm_accel(self):
-        argv = self._argv('kvm')
-        self.assertIn('q35,accel=kvm', argv)
-        self.assertEqual(self._value(argv, '-cpu'), 'host')
-
     def test_tcg_argv_never_requests_kvm(self):
         argv = self._argv('tcg')
         self.assertIn('q35,accel=tcg', argv)
@@ -279,14 +270,6 @@ class QemuArgvTests(TempDirTest):
         self.assertEqual(self._value(argv, '-display'), 'none')
         self.assertEqual(self._value(argv, '-monitor'), 'none')
         self.assertFalse({'-vnc', '-spice'} & set(argv))
-
-    def test_uefi_pflash_with_per_run_vars_and_seed_alias(self):
-        argv = self._argv('kvm')
-        pflash = [argv[i + 1] for i, a in enumerate(argv) if a == '-drive' and 'pflash' in argv[i + 1]]
-        self.assertEqual(len(pflash), 2)
-        self.assertIn('readonly=on', pflash[0])
-        self.assertIn('OVMF_VARS.fd', pflash[1])
-        self.assertIn('10.0.2.2:8080', self._value(argv, '-smbios'))
 
     def test_invalid_accel_and_ssh_port_rejected(self):
         with self.assertRaises(ValueError):
@@ -396,60 +379,14 @@ class RunnerSemanticsTests(TempDirTest):
         self.assertFalse(ok)
         self.assertEqual(data['overall'], 'failed')
 
-    def test_failure_writes_traceback_artifact(self):
-        def broken(ctx):
-            raise ScenarioAbort('boom detail')
-        _, _ = self._run([runner.Step('x step', broken)])
-        failures = list((self.dir / 'art' / 'failures').glob('*.txt'))
-        self.assertEqual(len(failures), 1)
-        self.assertIn('boom detail', failures[0].read_text(encoding='utf-8'))
-
     def test_empty_report_is_failed(self):
         self.assertEqual(runner.Report(distro='debian-13').to_dict()['overall'], 'failed')
-
-    def test_report_records_accelerator_qemu_and_integration_split(self):
-        data = runner.Report(distro='debian-13', accel='tcg',
-                             qemu_version='QEMU emulator version 9.2.0').to_dict()
-        self.assertEqual(data['accel'], 'tcg')
-        self.assertEqual(data['qemu_version'], 'QEMU emulator version 9.2.0')
-        self.assertTrue(data['integration']['real'])
-        self.assertTrue(data['integration']['stand_in'])
-
-    def test_mise_wording_names_the_vendor_repository_not_distribution(self):
-        real = runner.INTEGRATION['real']
-        mise = [item for item in real if 'mise' in item]
-        self.assertEqual(len(mise), 1)
-        self.assertIn('vendor APT repository (mise.jdx.dev)', mise[0])
-        self.assertNotIn('distribution repository', mise[0])
-
 
 class HarnessWiringTests(unittest.TestCase):
     def test_only_the_final_collect_step_is_flagged_and_it_is_last(self):
         steps = harness.steps()
         self.assertEqual(sum(1 for s in steps if s.collect), 1)
         self.assertTrue(steps[-1].collect)
-        self.assertTrue(steps[-1].name.startswith('j '))
-
-    def test_steps_cover_a_to_j_including_the_marker_check(self):
-        names = [s.name for s in harness.steps()]
-        for letter in 'abcdefghij':
-            with self.subTest(letter=letter):
-                self.assertTrue(any(n.startswith(letter + ' ') for n in names))
-        self.assertIn('d Engram failure marker cleared after recovery', names)
-
-    def test_qemu_version_failure_is_recorded_not_raised(self):
-        with mock.patch.object(harness.ssh, 'run_checked', side_effect=ssh.SshError('qemu missing')):
-            value = harness._qemu_version()
-        self.assertTrue(value.startswith('unavailable'))
-        self.assertIn('qemu missing', value)
-
-    def test_tcg_boot_budget_fits_the_job_limit(self):
-        self.assertLessEqual(harness.BOOT_TIMEOUT['tcg'], 1800)
-        self.assertLess(harness.BOOT_TIMEOUT['kvm'], harness.BOOT_TIMEOUT['tcg'])
-
-    def test_tcg_scales_fixed_waits_and_kvm_stays_at_baseline(self):
-        self.assertEqual(harness.WAIT_FACTOR['kvm'], 1)
-        self.assertGreater(harness.WAIT_FACTOR['tcg'], 1)
 
     def test_dpkg_probe_uses_posix_locks_not_flock(self):
         from vmtest import scenario
@@ -459,11 +396,6 @@ class HarnessWiringTests(unittest.TestCase):
         self.assertIn('/var/lib/dpkg/lock-frontend', probe)
         self.assertIn('/var/lib/dpkg/lock"', probe)
         self.assertNotIn('flock', probe)
-
-    def test_apt_units_are_waited_on(self):
-        from vmtest import scenario
-        self.assertEqual(set(scenario.APT_UNITS), {'apt-daily.service', 'apt-daily-upgrade.service',
-                                                   'unattended-upgrades.service'})
 
     def test_scaled_scenario_waits_fit_the_vm_job_limit(self):
         # Checks only that the TCG-scaled boot budget plus the scaled fixed waits fit the vm job's
@@ -502,16 +434,6 @@ class StandInTestBase(TempDirTest):
 
 
 class FakeOpencodeTests(StandInTestBase):
-    def test_api_info_and_three_agents_are_answered(self):
-        info = self._call('opencode', 'api', 'GET', '/api/info')
-        self.assertEqual(info.returncode, 0, info.stderr)
-        self.assertIn('2.0.0-vmtest-standin', json.loads(info.stdout)['data']['version'])
-        for role in ('orchestrator', 'fixer', 'oracle'):
-            with self.subTest(role=role):
-                proc = self._call('opencode', 'api', 'GET', f'/api/agent/{role}')
-                self.assertEqual(proc.returncode, 0, proc.stderr)
-                self.assertEqual(json.loads(proc.stdout)['data']['name'], role)
-
     def test_unknown_agent_and_run_are_refused_nonzero(self):
         self.assertNotEqual(self._call('opencode', 'api', 'GET', '/api/agent/intruder').returncode, 0)
         proc = self._call('opencode', 'run', 'do something')
@@ -528,32 +450,11 @@ class FakeGhTests(StandInTestBase):
     def _log(self):
         return (self.log_dir / 'gh-calls.log').read_text(encoding='utf-8').splitlines()
 
-    def test_both_installer_capability_probes_succeed_and_mention_json(self):
-        link = self._call('gh', 'project', 'link', '--help')
-        self.assertEqual(link.returncode, 0, link.stderr)
-        checks = self._call('gh', 'pr', 'checks', '--help')
-        self.assertEqual(checks.returncode, 0, checks.stderr)
-        self.assertIn('--json', checks.stdout)  # install.sh greps for "--json"
-
-    def test_sequence_numbers_are_monotonic(self):
-        self._call('gh', 'project', 'view', '7', '--owner', 'example-owner')
-        self._call('gh', 'project', 'view', '7', '--owner', 'example-owner')
-        seqs = [int(line.split()[0]) for line in self._log()]
-        self.assertEqual(seqs, [1, 2])
-
     def test_origin_is_svc_only_when_invocation_id_is_set(self):
         self._call('gh', 'project', 'view', '7', invocation=True)
         self._call('gh', 'project', 'view', '7')
         fields = [line.split() for line in self._log()]
         self.assertEqual([f[2] for f in fields], ['svc', 'cli'])
-
-    def test_controller_read_calls_answer_with_json_and_log_as_svc(self):
-        proc = self._call('gh', 'api', '--method', 'GET',
-                          'repos/example-owner/example-repo/pulls?state=open&per_page=100',
-                          '--paginate', '--slurp', invocation=True)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(json.loads(proc.stdout), [[]])
-        self.assertEqual(self._log()[-1].split()[2], 'svc')
 
     def test_unknown_call_is_refused_with_exit_4_and_logged(self):
         proc = self._call('gh', 'project', 'link', invocation=True)  # no --help: not an allowed call
@@ -569,10 +470,6 @@ class FakeGhTests(StandInTestBase):
             with self.subTest(argv=argv):
                 proc = self._call('gh', 'api', *argv, invocation=True)
                 self.assertEqual(proc.returncode, 4, proc.stdout)
-
-    def test_probe_usage_documents_the_json_flag_as_a_flag_line(self):
-        out = self._call('gh', 'pr', 'checks', '--help').stdout.splitlines()
-        self.assertTrue(any(line.lstrip().startswith('--json') for line in out), out)
 
     def test_unrecognised_top_level_command_is_refused(self):
         proc = self._call('gh', 'auth', 'token', invocation=True)

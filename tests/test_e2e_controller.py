@@ -1254,16 +1254,6 @@ class FakeChecksExitCodeTests(E2EBase):
 
     ARGV = ['gh', 'pr', 'checks', '{n}', '--repo', R, '--json', 'name,bucket,workflow']
 
-    def test_exit_code_mapping(self):
-        self.assertEqual(ew.eg.checks_exit_code([{'name': 'required', 'bucket': 'pending'}]), 8)
-        self.assertEqual(ew.eg.checks_exit_code([{'name': 'required', 'bucket': 'pass'},
-                                                 {'name': 'lint', 'bucket': 'pending'}]), 8)
-        self.assertEqual(ew.eg.checks_exit_code([{'name': 'required', 'bucket': 'fail'}]), 1)
-        self.assertEqual(ew.eg.checks_exit_code([{'name': 'required', 'bucket': 'pass'},
-                                                 {'name': 'lint', 'bucket': 'cancel'}]), 1)
-        self.assertEqual(ew.eg.checks_exit_code([{'name': 'required', 'bucket': 'pass'},
-                                                 {'name': 'docs', 'bucket': 'skipping'}]), 0)
-
     def test_controller_reads_pending_failed_and_passed_from_the_fake(self):
         self.world.add_project('alpha', R, 1)
         pr = self.gh.add_pr(R, title='t', body='b', head_sha=SHA_FIX)

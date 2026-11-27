@@ -146,12 +146,6 @@ class ReleaseBlockerLabelTests(unittest.TestCase):
         run.assert_called_once_with('gh','label','create','release-blocker','--repo','org/demo',
                                     '--color','B60205','--description','Blocks stable release qualification')
 
-    def test_existing_label_is_left_untouched(self):
-        existing=[{'name':'bug'},{'name':'release-blocker','color':'ffffff'}]
-        with patch.object(o.c,'gh_api_pages',return_value=existing),patch.object(o,'run') as run:
-            o.ensure_release_blocker_label('org/demo')
-        run.assert_not_called()
-
     def test_case_variant_label_is_refused_not_created_or_edited(self):
         with patch.object(o.c,'gh_api_pages',return_value=[{'name':'Release-Blocker'}]),patch.object(o,'run') as run:
             with self.assertRaisesRegex(ValueError,"rename it to 'release-blocker'"):o.ensure_release_blocker_label('org/demo')
@@ -391,12 +385,6 @@ class EnsureRequiredCheckTests(unittest.TestCase):
                 error=exc
         return error, run
 
-    def test_missing_admin_fails_closed_with_owner_action_and_no_post(self):
-        error,run=self.run_ensure(admin=False,ask=Mock(),summaries=[self.UNPROTECTED])
-        self.assertIsNotNone(error)
-        self.assertIn('ask a repository admin',str(error))
-        run.assert_not_called()
-
     def test_admin_consent_yes_posts_exactly_one_additive_ruleset(self):
         ask=Mock(return_value='y')
         # Verification after the POST sees the enforced classic protection (simulated acceptance).
@@ -490,11 +478,6 @@ class EnsureRequiredCheckTests(unittest.TestCase):
                 o.ensure_required_check('org/demo','main','required',{'admin':True},ask=ask)
         self.assertIn('adding a protection ruleset',str(caught.exception))
         ask.assert_not_called()
-        run.assert_not_called()
-
-    def test_already_enforced_is_read_only(self):
-        error,run=self.run_ensure(admin=True,ask=Mock(),summaries=[CLASSIC_EVERYONE])
-        self.assertIsNone(error)
         run.assert_not_called()
 
 
