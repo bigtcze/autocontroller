@@ -108,7 +108,8 @@ class SelectionTests(unittest.TestCase):
     def test_pr_completion_url_validation(self):
         self.assertTrue(m.PR_URL.match("https://github.com/example-owner/example-project/pull/14"))
     def test_prompt_no_clone_or_new_worktree(self):
-        prompt=m.work_prompt("example-owner/example-project","renovate",4,"https://github.com/example-owner/example-project/pull/4")
+        prompt=m.work_prompt("example-owner/example-project","renovate",4,"https://github.com/example-owner/example-project/pull/4",
+                             project_owner="example-owner",project_number=1)
         self.assertIn("Do not clone",prompt)
         self.assertIn("git worktrees",prompt)
     def test_state_write_is_atomic_and_private(self):

@@ -237,7 +237,7 @@ class ControllerReleaseTests(unittest.TestCase):
     def test_release_skill_is_outside_repo(self):
         skill=DIR/'skills/github-release/SKILL.md'
         self.assertTrue(skill.exists())
-        prompt=ctl.work_prompt('org/demo','maintenance',0,'v1.2.5',release_tag='v1.2.5')
+        prompt=ctl.work_prompt('org/demo','maintenance',0,'v1.2.5',release_tag='v1.2.5',project_owner='org',project_number=1)
         self.assertIn(str(ctl.INSTALL_ROOT/'skills/github-release/SKILL.md'),prompt)
         self.assertIn('NEVER tag or publish releases',prompt)
 

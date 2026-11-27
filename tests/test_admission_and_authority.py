@@ -49,16 +49,25 @@ def executable_strings_containing(tree, needle):
 
     A docstring is the first statement of a module/class/function body that is a
     bare string expression; it is excluded. Comments never reach the AST.
+
+    Every string inside a function named `work_prompt` is agent instruction text, not
+    controller argv (the coding agent is told to run `gh project item-add`), so that
+    whole function body is excluded. Controller argv is still checked everywhere else.
     """
     docstrings = set()
+    agent_text = set()
     for node in ast.walk(tree):
         if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             body = node.body
             if body and isinstance(body[0], ast.Expr) and isinstance(getattr(body[0], 'value', None), ast.Constant) \
                     and isinstance(body[0].value.value, str):
                 docstrings.add(id(body[0].value))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == 'work_prompt':
+            agent_text.update(id(inner) for inner in ast.walk(node))
     hits = []
     for node in ast.walk(tree):
+        if id(node) in agent_text:
+            continue
         if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings \
                 and needle in node.value:
             hits.append(node.lineno)
@@ -427,6 +436,12 @@ class NoAutoAdmission(ControllerCase):
         # Negative: the same words only in a comment or docstring are not code.
         benign = ast.parse('"""Never call item-add here."""\n# item-add is forbidden\ny = "project item-list"')
         self.assertEqual(executable_strings_containing(benign, 'item-add'), [])
+        # Outside work_prompt, an argv-like literal inside a function is still caught.
+        outside = ast.parse("def helper(x):\n    return ['gh', 'project', 'item-add', x]\n")
+        self.assertEqual(len(executable_strings_containing(outside, 'item-add')), 1)
+        # Inside a function named work_prompt, the same text is agent instruction and is not flagged.
+        inside = ast.parse("def work_prompt(x):\n    return f'Run gh project item-add {x}'\n")
+        self.assertEqual(executable_strings_containing(inside, 'item-add'), [])
 
     def test_no_cycle_invokes_project_item_add_at_runtime(self):
         gh = self.p(m, 'gh_json', return_value={})

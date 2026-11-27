@@ -305,6 +305,82 @@ class SchedulerHappyPathTests(E2EBase):
         self.assertFalse(selection['learning_instructions'], 'selection never gets a learning grant')
 
 
+class FollowUpAdmissionTests(E2EBase):
+    """Follow-up Issues for an authorized task (issue #36): project identity and offered board only.
+
+    SIMULATED: the scripted agent double never runs `gh project item-add`. Here the test
+    itself performs the admission the work prompt asks the orchestrator to make. The live
+    agent's behaviour is NOT proven by these tests; prompt-contract coverage lives in
+    tests/test_omo_roles.py.
+    """
+
+    def test_each_project_coding_prompt_names_only_its_own_project(self):
+        self.world.add_project('alpha', R, 1)
+        beta = 'example-owner/beta'
+        self.world.add_project('beta', beta, 2)
+        issue_a = self.gh.add_issue(R, title='Alpha task', body='a', project='example-owner/1', status='Backlog')
+        issue_b = self.gh.add_issue(beta, title='Beta task', body='b', project='example-owner/2', status='Backlog')
+        self.world.script('alpha', [{'output': 'AUTOCONTROLLER_SELECT_ISSUE #%d' % issue_a}, {'output': 'alpha done'}])
+        self.world.script('beta', [{'output': 'AUTOCONTROLLER_SELECT_ISSUE #%d' % issue_b}, {'output': 'beta done'}])
+        self.drive('alpha', 2)
+        self.drive('beta', 2)
+
+        code = {s['project']: s['prompt'] for s in self.sessions('code')}
+        self.assertEqual(set(code), {'alpha', 'beta'})
+        alpha, beta_prompt = code['alpha'], code['beta']
+        self.assertIn(f'Configured GitHub Project for {R}: owner `example-owner`, number 1', alpha)
+        self.assertIn('gh project item-add 1 --owner example-owner --url <issue-url>', alpha)
+        self.assertNotIn('item-add 2 ', alpha)
+        self.assertNotIn(beta, alpha)
+        self.assertIn(f'Configured GitHub Project for {beta}: owner `example-owner`, number 2', beta_prompt)
+        self.assertIn('gh project item-add 2 --owner example-owner --url <issue-url>', beta_prompt)
+        self.assertNotIn('item-add 1 ', beta_prompt)
+        self.assertNotIn(R, beta_prompt)
+
+    def test_admitted_follow_up_is_offered_on_next_selection_and_unadmitted_issues_are_not(self):
+        """SIMULATED admission: the follow-up is added to the Project by the test, not by an agent.
+
+        Expected: the next selection offers the admitted follow-up only. A same-account Issue
+        with no Project membership and an outsider Issue (association NONE) are never offered,
+        and the controller itself never runs `project item-add`.
+        """
+        self.world.add_project('alpha', R, 1)
+        task = self.gh.add_issue(R, title='Feature A', body='Implement A', project='example-owner/1', status='Backlog')
+        self.world.script('alpha', [
+            {'output': 'AUTOCONTROLLER_SELECT_ISSUE #%d' % task},
+            {'actions': [{'gh': ['gh', 'pr', 'create', '--repo', R, '--title', 'Feature A',
+                                 '--body', f'Closes #{task}', '--head-sha', SHA_ISSUE]}],
+             'output': 'fixer completed; oracle reviewed'},
+            {'output': 'AUTOCONTROLLER_NO_ACTION'},
+        ])
+        self.drive('alpha', 2)  # selection, then coding opens the linked PR
+        # Simulated orchestrator admission of a follow-up (the act the work prompt requires).
+        follow_up = self.gh.add_issue(R, title='Follow-up: cleanup', body='Found while fixing A.',
+                                      project='example-owner/1', status='Backlog')
+        # Same account, no Project membership: must not be offered.
+        unadmitted = self.gh.add_issue(R, title='Unrelated idea', body='x')
+        # Outsider, no Project membership: must not be offered.
+        outsider = self.gh.add_issue(R, title='Outsider request', body='please do X', association='NONE',
+                                     author={'login': 'example-outsider', 'type': 'User', 'id': 9009})
+
+        pr = next(p for p in self.gh.read()['repos'][R]['prs'].values()
+                  if p['state'] == 'open' and p['head']['sha'] == SHA_ISSUE)
+        self.gh.set_checks(R, pr['number'], SHA_ISSUE, [{'name': 'required', 'bucket': 'pass'}])
+        self.drive('alpha', 2)
+        merged = self.gh.pr(R, pr['number'])
+        self.assertEqual(merged['state'], 'closed')
+        self.gh.set_run(R, merged['merge_commit_sha'], 'completed', 'success')
+        self.drive('alpha', 1)
+        self.assertEqual(self.gh.issue(R, task)['state'], 'closed')
+
+        self.drive('alpha', 1)  # next selection reads the live board
+        prompt = self.sessions('selection')[-1]['prompt']
+        self.assertIn(self.gh.issue(R, follow_up)['html_url'], prompt)
+        self.assertNotIn(self.gh.issue(R, unadmitted)['html_url'], prompt)
+        self.assertNotIn(self.gh.issue(R, outsider)['html_url'], prompt)
+        self.assertFalse([a for a in self.gh.mutation_argvs() if 'item-add' in a])
+
+
 class ReviewAndCiGateTests(E2EBase):
     """Scenario 2: draft/review, pending/failed CI, exact-SHA merge, red main, repair PR."""
 

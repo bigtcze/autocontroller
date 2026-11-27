@@ -20,7 +20,11 @@ repositories. Relevant threats:
 - Work authorization: an Issue is schedulable only as a native Issue of the
   configured repository and a member of its configured GitHub Project with a
   nonterminal status. Onboarding imports only open Issues authored by
-  `OWNER`/`MEMBER`/`COLLABORATOR`; nothing is auto-added later.
+  `OWNER`/`MEMBER`/`COLLABORATOR`. The controller itself never adds Issues to the
+  Project after onboarding. The orchestrator, per the work prompt, adds the
+  necessary follow-up Issues it creates for an already-authorized task to the same
+  repository's configured Project and verifies them; it never admits unrelated or
+  external Issues.
 - Renovate identity: login `renovate[bot]`, type `Bot` and the GitHub.com
   Renovate App user id, **and** head repository equal to the configured
   repository. Branch prefix or login text alone is never sufficient; the live
