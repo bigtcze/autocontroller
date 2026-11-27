@@ -94,8 +94,12 @@ class FakeGitHub:
             d['repos'][repo] = {'default_branch': default_branch, 'issues': {}, 'prs': {}, 'tags': {},
                                 'tag_objects': {}, 'comments': {}, 'runs': [], 'releases': {},
                                 'main_sha': _sha('main', repo, '0'), 'workflows': ['required.yml', 'release.yml'],
-                                'release_workflow_ok': True}
+                                'release_workflow_ok': True, 'labels': ['release-blocker']}
         self._txn(change)
+
+    def set_labels(self, repo: str, names: tuple):
+        """Test-side: the repository's label catalog (GitHub lists no Issues for a label that is absent)."""
+        self._txn(lambda d: d['repos'][repo].__setitem__('labels', list(names)))
 
     def add_project(self, repo: str, owner: str, number: int, statuses=('Backlog', 'In Progress', 'Review', 'Done')):
         def change(d):
@@ -112,6 +116,8 @@ class FakeGitHub:
         def change(d):
             r = d['repos'][repo]
             n = max([int(k) for k in r['issues']] + [0]) + 1
+            # Like GitHub, applying a label creates it in the repository's catalog when absent.
+            r['labels'] = sorted(set(r.get('labels', [])) | set(labels))
             r['issues'][str(n)] = {'number': n, 'title': title, 'body': body, 'state': state,
                                    'author_association': association,
                                    'user': author or {'login': 'example-author', 'type': 'User', 'id': 2002},
@@ -468,6 +474,9 @@ class FakeGitHub:
             if pr is None:
                 raise _not_found(argv)
             return self._public_pr(pr)
+        if rest == ['labels']:
+            rows = [{'name': x} for x in r.get('labels', [])]
+            return [rows] if slurp else rows
         if rest == ['issues'] and parts[-1].startswith('issues'):
             rows = [self._public_issue(i) for i in r['issues'].values()]
             rows += [self._public_pr(p) | {'pull_request': {'url': 'x'}} for p in r['prs'].values()]

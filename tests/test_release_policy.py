@@ -20,6 +20,12 @@ PREV={'tag_name':'v1.2.4','published_at':'2026-11-01T14:00:00Z'}
 RENOVATE_BOT={'login':'renovate[bot]','type':'Bot','id':29139614}
 REPO='org/repo'
 
+def blocker_pages(issues, labels=({'name':'release-blocker'},)):
+    """Fake gh_api_pages: the release-blocker label listing, then the open-issue listing."""
+    def pages(path,*args,**kw):
+        return list(labels) if path.endswith('/labels?per_page=100') else issues
+    return pages
+
 def pr(n, user='renovate[bot]', labels=None, merged='2026-11-15T00:00:00Z'):
     """Live-shaped merged PR: genuine Renovate bot user is the only Renovate identity."""
     account=RENOVATE_BOT if user=='renovate[bot]' else {'login':user,'type':'User','id':1000+n}
@@ -172,7 +178,7 @@ class ControllerReleaseTests(unittest.TestCase):
         cp={'kind':'maintenance','number':0,'url':'v1.2.5','phase':'release-publish',
             'release_tag':'v1.2.5','release_sha':SHA,'previous_release_tag':'v1.2.4'}
         self.w.save_checkpoint(cp)
-        with patch.object(self.w,'release_latest',return_value=PREV),patch.object(self.w,'ensure_release_pipeline'),patch.object(ctl,'main_ci_state',return_value='passed'),patch.object(rp,'compare_tag_to_sha',return_value=True),patch.object(ctl,'gh_api_pages',return_value=[]),patch.object(ctl,'push_annotated_tag') as tag,patch.object(self.w,'release_request') as approval:
+        with patch.object(self.w,'release_latest',return_value=PREV),patch.object(self.w,'ensure_release_pipeline'),patch.object(ctl,'main_ci_state',return_value='passed'),patch.object(rp,'compare_tag_to_sha',return_value=True),patch.object(ctl,'gh_api_pages',side_effect=blocker_pages([])),patch.object(ctl,'push_annotated_tag') as tag,patch.object(self.w,'release_request') as approval:
             self.w.publish_release_cycle(cp,'maintenance',0,None)
             approval.assert_not_called();tag.assert_called_once_with('org/demo','v1.2.5',SHA)
         self.assertEqual(ctl.json_read(self.w.cycle_state)['phase'],'release-verify')
@@ -181,10 +187,21 @@ class ControllerReleaseTests(unittest.TestCase):
             'release_tag':'v1.2.5','release_sha':SHA,'previous_release_tag':'v1.2.4'}
         self.w.save_checkpoint(cp)
         blocker=[{'number':7,'state':'open'}]
-        with patch.object(self.w,'release_latest',return_value=PREV),patch.object(self.w,'ensure_release_pipeline'),patch.object(ctl,'main_ci_state',return_value='passed'),patch.object(rp,'compare_tag_to_sha',return_value=True),patch.object(ctl,'gh_api_pages',return_value=blocker),patch.object(ctl,'push_annotated_tag') as tag:
+        with patch.object(self.w,'release_latest',return_value=PREV),patch.object(self.w,'ensure_release_pipeline'),patch.object(ctl,'main_ci_state',return_value='passed'),patch.object(rp,'compare_tag_to_sha',return_value=True),patch.object(ctl,'gh_api_pages',side_effect=blocker_pages(blocker)),patch.object(ctl,'push_annotated_tag') as tag:
             self.w.publish_release_cycle(cp,'maintenance',0,None)
             tag.assert_not_called()
         self.assertEqual(ctl.json_read(self.w.cycle_state)['phase'],'release-publish')
+    def test_missing_blocker_label_prevents_tag_with_notice_and_no_ai(self):
+        cp={'kind':'maintenance','number':0,'url':'v1.2.5','phase':'release-publish',
+            'release_tag':'v1.2.5','release_sha':SHA,'previous_release_tag':'v1.2.4'}
+        self.w.save_checkpoint(cp)
+        with patch.object(self.w,'release_latest',return_value=PREV),patch.object(self.w,'ensure_release_pipeline'),patch.object(ctl,'main_ci_state',return_value='passed'),patch.object(rp,'compare_tag_to_sha',return_value=True),patch.object(ctl,'gh_api_pages',side_effect=blocker_pages([],labels=[])),patch.object(ctl,'push_annotated_tag') as tag,patch.object(self.w,'run_wrapper') as agent:
+            self.w.publish_release_cycle(cp,'maintenance',0,None)
+            tag.assert_not_called()
+            agent.assert_not_called()
+        self.assertEqual(ctl.json_read(self.w.cycle_state)['phase'],'release-publish')
+        notices=ctl.json_read(self.w.notices_file)
+        self.assertIn("does not exist", notices['release-blocked:v1.2.5']['message'])
     def test_verify_waits_for_artifacts(self):
         cp={'kind':'maintenance','number':0,'url':'v1.2.5','phase':'release-verify',
             'release_tag':'v1.2.5','release_sha':SHA,'previous_release_tag':'v1.2.4'}

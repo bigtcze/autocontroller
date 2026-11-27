@@ -121,6 +121,25 @@ class HappyPathTests(OnboardingCase):
         self.assert_success_state(f'{ORG}/empty', ORG, 'trunk')
 
 
+class ReleaseBlockerLabelIntegrationTests(OnboardingCase):
+    def label_creates(self, repo):
+        return [c['argv'] for c in self.w.gh_calls() if c['argv'][:2] == ['label', 'create']]
+
+    def test_missing_release_blocker_label_is_created_once(self):
+        repo = self.w.add_repo(OWNER, 'demo', default_branch='trunk')
+        self.assertEqual(self.onboard(repo).rc, 0)
+        self.assertEqual(self.w.gh()['repos'][repo]['labels'], ['release-blocker'])
+        self.assertEqual(len(self.label_creates(repo)), 1)
+        self.assertEqual(self.entries(repo)[0]['release']['blocker_label'], 'release-blocker')
+
+    def test_existing_release_blocker_label_is_left_untouched(self):
+        repo = self.w.add_repo(OWNER, 'demo', default_branch='trunk')
+        self.w.mutate_gh(lambda s: s['repos'][repo].__setitem__('labels', ['release-blocker']))
+        self.assertEqual(self.onboard(repo).rc, 0)
+        self.assertEqual(self.label_creates(repo), [], 'an existing label must never be recreated or edited')
+        self.assertEqual(self.w.gh()['repos'][repo]['labels'], ['release-blocker'])
+
+
 class RefusalTests(OnboardingCase):
     def test_merge_modes_preferred_method_and_refusal_without_methods(self):
         cases = [(('squash', 'merge', 'rebase'), 'squash'), (('merge',), 'merge'), (('rebase',), 'rebase')]

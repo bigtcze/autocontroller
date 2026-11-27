@@ -159,7 +159,8 @@ class World:
             if call['rc'] != 0:
                 continue
             if argv[:2] == ['project', 'create'] or argv[:2] == ['project', 'link'] \
-                    or argv[:2] == ['project', 'item-add'] or argv[:2] == ['project', 'item-edit']:
+                    or argv[:2] == ['project', 'item-add'] or argv[:2] == ['project', 'item-edit'] \
+                    or argv[:2] == ['label', 'create']:
                 out.append(argv)
             elif argv[:1] == ['api'] and ('--method' in argv) and argv[argv.index('--method') + 1] in ('POST', 'PATCH', 'PUT', 'DELETE'):
                 out.append(argv)

@@ -138,6 +138,31 @@ def _rule(ruleset_id, context='required'):
     return {'type':'required_status_checks','ruleset_id':ruleset_id,'parameters':{'required_status_checks':[{'context':context}]}}
 
 
+class ReleaseBlockerLabelTests(unittest.TestCase):
+    def test_absent_label_is_created_with_the_fixed_definition(self):
+        with patch.object(o.c,'gh_api_pages',return_value=[{'name':'bug'}]) as pages,patch.object(o,'run') as run:
+            o.ensure_release_blocker_label('org/demo')
+        pages.assert_called_once_with('repos/org/demo/labels?per_page=100')
+        run.assert_called_once_with('gh','label','create','release-blocker','--repo','org/demo',
+                                    '--color','B60205','--description','Blocks stable release qualification')
+
+    def test_existing_label_is_left_untouched(self):
+        existing=[{'name':'bug'},{'name':'release-blocker','color':'ffffff'}]
+        with patch.object(o.c,'gh_api_pages',return_value=existing),patch.object(o,'run') as run:
+            o.ensure_release_blocker_label('org/demo')
+        run.assert_not_called()
+
+    def test_similar_label_name_does_not_count_as_existing(self):
+        with patch.object(o.c,'gh_api_pages',return_value=[{'name':'release-blockers'}]),patch.object(o,'run') as run:
+            o.ensure_release_blocker_label('org/demo')
+        run.assert_called_once()
+
+    def test_unreadable_listing_fails_closed_without_create(self):
+        with patch.object(o.c,'gh_api_pages',side_effect=o.c.ControllerError('rc=1: API error')),patch.object(o,'run') as run:
+            with self.assertRaises(o.c.ControllerError):o.ensure_release_blocker_label('org/demo')
+        run.assert_not_called()
+
+
 class ProtectionStateTests(unittest.TestCase):
     """Read-only classification of the default branch. Fake GitHub responses are deterministic dicts."""
 
