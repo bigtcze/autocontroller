@@ -20,7 +20,7 @@
       "matchManagers": ["custom.regex"],
       "matchDepNames": ["debian", "ubuntu"],
       "matchUpdateTypes": ["major", "minor"],
-      "dependencyDashboardApproval": true
+      "enabled": false
     }
   ]
 }
