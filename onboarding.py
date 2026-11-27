@@ -503,7 +503,7 @@ def _positive_seconds(text: str) -> float:
     try:
         value = float(text)
     except ValueError:
-        raise argparse.ArgumentTypeError(f'not a number of seconds: {text!r}')
+        raise argparse.ArgumentTypeError(f'not a number of seconds: {text!r}') from None
     if not (value == value and value not in (float('inf'), float('-inf'))) or value <= 0:
         raise argparse.ArgumentTypeError(f'must be finite and greater than 0: {text!r}')
     return value

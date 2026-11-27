@@ -182,7 +182,7 @@ class WorkerTests(unittest.TestCase):
             run.assert_not_called()
             setter.assert_not_called()
     def test_quota_error_doesnt_mark_task_done(self):
-        with patch.object(self.w,"related_pr",return_value=None),patch.object(self.w,"run_wrapper",return_value=(78,"HTTP 429 exceeded")),patch.object(self.w,"quota_pause") as quota,patch.object(m,"issue_state",return_value="open") as stat:
+        with patch.object(self.w,"related_pr",return_value=None),patch.object(self.w,"run_wrapper",return_value=(78,"HTTP 429 exceeded")),patch.object(self.w,"quota_pause") as quota,patch.object(m,"issue_state",return_value="open"):
             self.w._cycle("issue",7,"url",None)
             quota.assert_called_once()
 

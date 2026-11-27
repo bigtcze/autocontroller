@@ -88,12 +88,75 @@ Use a dedicated VM/account and trusted repositories. Agents execute application 
 
 Public repositories: membership in the configured GitHub Project (with a nonterminal status) is what authorizes an Issue; the controller never adds Issues to the Project by itself after onboarding. Agent follow-up Issues for an authorized task are added to that same Project by the orchestrator and verified (see [.agents/SECURITY.md](.agents/SECURITY.md)). Issue, PR and comment text is treated as untrusted data and cannot expand permissions or task scope. PRs from forks are never treated as Renovate, linked, repair or release PRs. A closing PR merged before its Issue's latest reopen is treated as historical, so a reopened Issue gets a fresh attempt; ambiguous chronology fails closed for manual reconciliation. Reopening is a lifecycle signal only; Project membership still authorizes work.
 
+## Configuration reference
+
+`config.json` lives in the installed controller directory and is written by onboarding; `config.example.json` in this repository is the template and lists every global key with its default. Edit the file only for the keys below. The controller validates the keys it checks at startup (for example `update_repository`, project identifiers, release settings) and refuses invalid values. Durations are seconds.
+
+**Global keys** (`config.example.json`; the default is used when a key is absent):
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `agent` | `orchestrator` | OpenCode agent name used for work sessions. |
+| `poll_seconds` | `300` | Idle interval between checks when there is nothing to do. |
+| `post_cycle_seconds` | `15` | Delay before the next cycle after a normal cycle. |
+| `ci_poll_seconds` | `90` | Delay between CI status checks while waiting on CI or a merge. Minimum 30 is enforced. |
+| `log_keep_days` | `30` | Per-project cycle logs older than this are deleted. |
+| `log_keep_count` | `200` | Maximum number of per-project cycle logs kept (the newest is always kept). |
+| `log_max_bytes` | `2147483648` | Total size cap (2 GiB) for per-project cycle logs. |
+| `cycle_timeout_seconds` | `14400` | Time limit for one agent session. On expiry the process group gets SIGTERM, then SIGKILL after 30 seconds. |
+| `selection_timeout_seconds` | `900` | Time limit for the backlog selection session. |
+| `drain_timeout_seconds` | `600` | How long a worker waits for its process group to end during a drain request before stopping descendants. Distinct from the `--drain-timeout` CLI option (default 3600) of `update`, `rollback`, `remove` and `uninstall`. |
+| `retry_max_seconds` | `14400` | Upper bound on the backoff between retries after a failure. |
+| `update_repository` | `bigtcze/autocontroller` | Release source for `autocontroller update` (`OWNER/REPOSITORY` only; never a URL). |
+| `projects` | `[]` | List of per-repository objects (below). Must contain at least one enabled project to run. |
+
+**Per-project keys** (`projects[]`). Onboarding writes every key except `conflicting_services`, `legacy_pending_markers` and `release.notes_path`; the default column shows what applies when a key is absent.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `name` | required | Simple identifier (letters, digits, `_`, `-`); unique per configuration. |
+| `enabled` | `true` | Disabled projects are ignored entirely. |
+| `repo` | required | GitHub repository, `OWNER/REPOSITORY`. |
+| `directory` | required | Local checkout path. |
+| `base_branch` | `main` | Branch the controller merges into. |
+| `project_owner` | required | Owner of the dedicated GitHub Project. |
+| `project_number` | required | Number of the dedicated GitHub Project. |
+| `required_check` | `required` | Status check that must pass before a PR merges. |
+| `required_workflow` | `required.yml` | Workflow file whose `main` run gates releases. |
+| `merge_method` | `squash` | `squash`, `merge` or `rebase`; any other value stops the merge. |
+| `bootstrap_issue` | written by onboarding | Issue that establishes the repository contract. |
+| `standard_version` | written by onboarding | Golden Standard version the bootstrap targets. |
+| `conflicting_services` | `[]` (optional) | systemd user units that must not be active while this project runs. |
+| `legacy_pending_markers` | `[]` (optional) | Paths of legacy checkpoints; work is deferred while any exists. |
+| `release` | disabled if absent | Release settings, below. Onboarding writes `enabled: true`. |
+
+**Release keys** (`projects[].release`):
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` (if absent) | Enables the release workflow for this project. Onboarding writes `true`. |
+| `approver` | required when enabled | GitHub login that must approve a feature release. |
+| `workflow` | `release.yml` | Tag-triggered release workflow file. |
+| `strategy` | `tag_workflow` | The only supported value. |
+| `maintenance_days` | `14` | Days since the last release after which a technical release may be due (1–1000). |
+| `maintenance_min_renovate_prs` | `3` | Merged Renovate PRs needed for a technical release (1–1000). |
+| `required_assets` | `[]` | Asset names the published release must contain; `{tag}` is replaced by the tag. |
+| `blocker_label` | `release-blocker` | Label whose open Issues block a release. Must be `release-blocker` for this repository's own release. |
+| `notes_path` | unset | Repository-relative release notes file at the candidate commit; `{tag}` is replaced. No leading `/` or `..`. |
+
+**Internal runtime fields** are written by the installer or the controller. Do not set them by hand:
+
+- `state_dir` and `wrapper` are fixed to the install root. The controller refuses any other value.
+- `opencode` is written by onboarding from the detected OpenCode binary. It defaults to `~/.opencode/bin/opencode`.
+- `_memory_runtime` (keys starting with `_`) exists only in memory while the controller runs and is never stored.
+
 ## Development and acceptance
 
 Contributor and agent rules live in [AGENTS.md](AGENTS.md) and `.agents/`. A source checkout is never the running controller: do not run the installer, onboarding or service commands from it on a host with a production installation.
 
 ```sh
-mise run ci                   # syntax checks + full offline regression suite
+mise run ci                   # syntax checks + Ruff lint + full offline regression suite
+mise run lint                 # Ruff only (version pinned in mise.toml; config in ruff.toml)
 bash scripts/check-syntax.sh  # same checks without mise
 bash scripts/offline-tests.sh
 ```

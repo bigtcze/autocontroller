@@ -9,7 +9,6 @@ learning grants exactly as in production.
 """
 import json
 
-import e2e_world as ew
 from test_e2e_controller import E2EBase, R, SHA_ISSUE
 
 

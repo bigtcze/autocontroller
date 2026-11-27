@@ -8,7 +8,6 @@ No network, no real credentials, no real HOME.
 import importlib.util
 import os
 import stat
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path

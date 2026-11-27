@@ -7,7 +7,6 @@ and doctor reports it as a failure with the removal command.
 import fcntl
 import importlib.util
 import json
-import os
 import sys
 import tempfile
 import time

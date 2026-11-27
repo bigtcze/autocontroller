@@ -6,10 +6,8 @@ Guest commands run through vmtest.ssh.GuestSsh as `tester` (controller user) or
 """
 from __future__ import annotations
 
-import json
 import re
 import time
-from pathlib import Path
 
 from .runner import ScenarioAbort
 

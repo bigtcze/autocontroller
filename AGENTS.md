@@ -46,7 +46,8 @@ owner (see `.agents/RELEASE_QUALITY.md`).
 Requires `python3` ≥ 3.11, `bash` and `git`. Fully offline.
 
 ```sh
-mise run ci                  # syntax + full offline regression suite
+mise run ci                  # syntax + Ruff lint + full offline regression suite
+mise run lint                # Ruff only (pinned in mise.toml; dev/CI only, not a runtime dependency)
 # equivalent without mise:
 bash scripts/check-syntax.sh
 bash scripts/offline-tests.sh
@@ -57,8 +58,9 @@ with an isolated temporary `HOME`, no GitHub/provider tokens and blocking shims
 for `gh`, `opencode`, `systemctl`, `loginctl`, `sudo`, `curl` and `engram`.
 CI (`.github/workflows/required.yml` → `regression.yml`) runs the syntax checks
 and `mise run ci` on the hosted runner and the offline suite in clean Debian
-12/13 and Ubuntu 24.04/26.04 containers; the aggregate check `required` must be
-green.
+12/13 and Ubuntu 24.04/26.04 containers; the containers are pinned to image
+digests that Renovate maintains. The aggregate check `required` must be green.
+The Ruff lint runs as part of `mise run ci`; its config is `ruff.toml`.
 
 ## Coding guidance
 

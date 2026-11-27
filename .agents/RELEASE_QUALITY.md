@@ -46,7 +46,7 @@ authorization.
   - `candidate` checks the tag is on `main`, then `release_artifacts.py qualify` requires a completed, successful `required.yml` push run on the exact tag commit, no open `release-blocker` Issues, and, for feature and initial releases, `docs/releases/<tag>.evidence.json` (see `docs/releases/README.md`).
   - Evidence must name a candidate commit that is an ancestor of the tag commit. Only `docs/releases/` may change between them.
   - The evidence must reference a completed, successful `vm-lifecycle.yml` run on that candidate, with all four `vm (<distro>)` jobs successful.
-  - `artifacts` builds `autocontroller-<tag>.tar.gz` and `SHA256SUMS` in `debian:12`, `debian:13`, `ubuntu:24.04` and `ubuntu:26.04` containers. The four builds must be byte-identical.
+  - `artifacts` builds `autocontroller-<tag>.tar.gz` and `SHA256SUMS` in `debian:12`, `debian:13`, `ubuntu:24.04` and `ubuntu:26.04` containers, all digest-pinned. The four builds must be byte-identical.
   - `publish` rebuilds on the runner, must match the artifact digest, creates a draft release with both assets, checks each asset's GitHub digest against the local SHA256 values, and only then publishes. It refuses to replace an existing published release.
   - The publish logic lives in `release_artifacts.py publish`; the workflow only calls it with `--notes-file` or `--generate-notes`. The blocker check is repeated just before publishing, so a blocker opened after qualification keeps the draft unpublished and deletes it.
 - Controller: blocks tag creation while `release-blocker` Issues are open (label from `release.blocker_label`). AutoController's own release must use the canonical `release-blocker` label.

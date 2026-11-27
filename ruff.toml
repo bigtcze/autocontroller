@@ -1,0 +1,9 @@
+# Ruff lint configuration (version pinned in mise.toml; run via `mise run lint`).
+#
+# Deliberately a correctness-focused rule set. The default E7/E4 style rules flag
+# roughly 500 intentional compact-style statements (E701/E702 semicolon and one-line
+# bodies); enforcing them would be repo-wide churn with no correctness gain.
+target-version = "py311"
+
+[lint]
+select = ["E9", "F", "B", "PLE"]

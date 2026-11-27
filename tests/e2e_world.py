@@ -7,7 +7,6 @@ Everything lives under one TemporaryDirectory. Nothing touches the real HOME,
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 from contextlib import contextmanager
@@ -16,7 +15,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 from unittest.mock import patch
 

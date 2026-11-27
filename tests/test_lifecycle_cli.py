@@ -21,7 +21,6 @@ ROOT = TESTS.parent
 sys.path.insert(0, str(TESTS))
 sys.path.insert(0, str(ROOT))
 import lifecycle as lc  # noqa: E402
-import onboarding_harness as harness  # noqa: E402
 import release_artifacts as ra  # noqa: E402
 from onboarding_harness import World  # noqa: E402
 
