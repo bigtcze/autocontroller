@@ -116,16 +116,31 @@ class RenovateCycleRefusalTests(unittest.TestCase):
         cycle.assert_not_called()
 
 
-class LinkedIssuePrTests(unittest.TestCase):
-    def _graph(self,nodes):
-        return {'data':{'repository':{'issue':{'closedByPullRequestsReferences':{
-            'nodes':nodes,'pageInfo':{'hasNextPage':False}}}}}}
+# Issue #19 / PR #26 / revert #27: PR #26 merged, then the Issue was reopened.
+MERGED_BEFORE_REOPEN='2026-11-26T21:11:46Z'
+REOPENED='2026-11-26T21:28:31Z'
+MERGED_AFTER_REOPEN='2026-11-26T22:05:00Z'
 
-    def _node(self,number,state='OPEN',cross=False,head=REPO):
+
+class LinkedIssuePrTests(unittest.TestCase):
+    def _graph(self,nodes,timeline=None):
+        issue={'closedByPullRequestsReferences':{'nodes':nodes,'pageInfo':{'hasNextPage':False}},
+               'timelineItems':timeline if timeline is not None else {'totalCount':0,'nodes':[]}}
+        return {'data':{'repository':{'issue':issue}}}
+
+    def _reopened(self,*stamps):
+        # Mirrors timelineItems(last:1): totalCount is the full count, one node is the newest reopen.
+        return {'totalCount':len(stamps),'nodes':[{'createdAt':stamps[-1]}] if stamps else []}
+
+    def _node(self,number,state='OPEN',cross=False,head=REPO,merged_at=None):
         return {'number':number,'url':f'https://github.com/own/repo/pull/{number}','state':state,
+                'mergedAt':merged_at or ('2026-11-20T10:00:00Z' if state=='MERGED' else None),
                 'headRefOid':SHA,'baseRefName':'main','isCrossRepository':cross,
                 'headRepository':{'nameWithOwner':head} if head else None,
                 'mergeCommit':None}
+
+    def _merged(self,number,merged_at,cross=False,head=REPO):
+        return self._node(number,'MERGED',cross,head,merged_at)
 
     def test_fork_closing_pr_ignored_and_same_repo_selected(self):
         nodes=[self._node(50,cross=True,head='attacker/repo'),self._node(51)]
@@ -151,6 +166,80 @@ class LinkedIssuePrTests(unittest.TestCase):
         nodes=[self._node(50,head=None),self._node(51)]
         with patch.object(m,'gh_json',return_value=self._graph(nodes)):
             self.assertEqual(m.linked_issue_pr(REPO,7)['number'],51)
+
+    def test_never_reopened_merged_pr_still_returned(self):
+        # Ordinary issue: the merged PR is the current attempt, so the code phase refuses it.
+        with patch.object(m,'gh_json',return_value=self._graph([self._merged(26,MERGED_BEFORE_REOPEN)])):
+            self.assertEqual(m.linked_issue_pr(REPO,7)['number'],26)
+
+    def test_reopened_issue_historical_merged_pr_ignored(self):
+        # Issue #19 / PR #26 / revert #27 sequence: #27 is not linked, so no current PR remains.
+        nodes=[self._merged(26,MERGED_BEFORE_REOPEN)]
+        with patch.object(m,'gh_json',return_value=self._graph(nodes,self._reopened(REOPENED))):
+            self.assertIsNone(m.linked_issue_pr(REPO,7))
+
+    def test_historical_merged_pr_replaced_by_new_open_pr(self):
+        nodes=[self._merged(26,MERGED_BEFORE_REOPEN),self._node(40)]
+        with patch.object(m,'gh_json',return_value=self._graph(nodes,self._reopened(REOPENED))):
+            self.assertEqual(m.linked_issue_pr(REPO,7)['number'],40)
+
+    def test_multiple_historical_merged_prs_across_reopen_cycles_ignored(self):
+        nodes=[self._merged(26,MERGED_BEFORE_REOPEN),self._merged(30,'2026-11-26T21:20:00Z')]
+        timeline=self._reopened('2026-11-26T21:19:00Z','2026-11-26T21:28:31Z')
+        with patch.object(m,'gh_json',return_value=self._graph(nodes,timeline)):
+            self.assertIsNone(m.linked_issue_pr(REPO,7))
+
+    def test_external_merge_after_reopen_is_current_attempt(self):
+        nodes=[self._merged(40,MERGED_AFTER_REOPEN)]
+        with patch.object(m,'gh_json',return_value=self._graph(nodes,self._reopened(REOPENED))):
+            self.assertEqual(m.linked_issue_pr(REPO,7)['number'],40)
+
+    def test_fork_merged_pr_after_reopen_still_ignored(self):
+        nodes=[self._merged(50,MERGED_AFTER_REOPEN,cross=True,head='attacker/repo'),self._node(51)]
+        with patch.object(m,'gh_json',return_value=self._graph(nodes,self._reopened(REOPENED))):
+            self.assertEqual(m.linked_issue_pr(REPO,7)['number'],51)
+
+    def test_merged_pr_missing_merged_at_fails_closed(self):
+        node=self._merged(26,None)
+        node['mergedAt']=None
+        with patch.object(m,'gh_json',return_value=self._graph([node],self._reopened(REOPENED))):
+            with self.assertRaisesRegex(m.ControllerError,'mergedAt'):m.linked_issue_pr(REPO,7)
+
+    def test_missing_timeline_fails_closed_when_merged_candidate_exists(self):
+        graph=self._graph([self._merged(26,MERGED_BEFORE_REOPEN)])
+        del graph['data']['repository']['issue']['timelineItems']
+        with patch.object(m,'gh_json',return_value=graph):
+            with self.assertRaisesRegex(m.ControllerError,'reopen history'):m.linked_issue_pr(REPO,7)
+
+    def test_malformed_timeline_count_fails_closed(self):
+        for bad in ({'totalCount':'1','nodes':[{'createdAt':REOPENED}]},{'totalCount':None,'nodes':[]}):
+            with self.subTest(bad=bad),patch.object(m,'gh_json',return_value=self._graph([self._merged(26,MERGED_BEFORE_REOPEN)],bad)):
+                with self.assertRaises(m.ControllerError):m.linked_issue_pr(REPO,7)
+
+    def test_reopen_count_without_node_fails_closed(self):
+        timeline={'totalCount':1,'nodes':[]}
+        with patch.object(m,'gh_json',return_value=self._graph([self._merged(26,MERGED_BEFORE_REOPEN)],timeline)):
+            with self.assertRaises(m.ControllerError):m.linked_issue_pr(REPO,7)
+
+    def test_unparsable_reopen_timestamp_fails_closed(self):
+        timeline={'totalCount':1,'nodes':[{'createdAt':'not-a-time'}]}
+        with patch.object(m,'gh_json',return_value=self._graph([self._merged(26,MERGED_BEFORE_REOPEN)],timeline)):
+            with self.assertRaises(m.ControllerError):m.linked_issue_pr(REPO,7)
+
+    def test_merged_at_equal_to_reopen_fails_closed(self):
+        nodes=[self._merged(26,REOPENED)]
+        with patch.object(m,'gh_json',return_value=self._graph(nodes,self._reopened(REOPENED))):
+            with self.assertRaisesRegex(m.ControllerError,'ambiguous|share one timestamp'):m.linked_issue_pr(REPO,7)
+
+    def test_open_plus_current_merged_pr_fails_closed(self):
+        nodes=[self._node(40),self._merged(41,MERGED_AFTER_REOPEN)]
+        with patch.object(m,'gh_json',return_value=self._graph(nodes,self._reopened(REOPENED))):
+            with self.assertRaisesRegex(m.ControllerError,'multiple current'):m.linked_issue_pr(REPO,7)
+
+    def test_two_current_merged_prs_fail_closed(self):
+        nodes=[self._merged(40,MERGED_AFTER_REOPEN),self._merged(41,'2026-11-26T23:00:00Z')]
+        with patch.object(m,'gh_json',return_value=self._graph(nodes,self._reopened(REOPENED))):
+            with self.assertRaisesRegex(m.ControllerError,'multiple current'):m.linked_issue_pr(REPO,7)
 
 
 class MarkerPrSelectionTests(unittest.TestCase):

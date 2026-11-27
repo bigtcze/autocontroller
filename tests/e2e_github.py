@@ -314,6 +314,9 @@ class FakeGitHub:
             repo = argv[argv.index('--repo') + 1]
             issue = d['repos'][repo]['issues'][argv[3]]
             issue['state'] = 'closed' if argv[2] == 'close' else 'open'
+            if argv[2] == 'reopen':
+                stamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+                d['repos'][repo].setdefault('reopens', {}).setdefault(argv[3], []).append(stamp)
             return ''
         if argv[1:3] == ['pr', 'merge']:
             return self._merge(d, argv)
@@ -591,11 +594,14 @@ class FakeGitHub:
             state = {'open': 'OPEN', 'closed': 'MERGED' if pr['merged_at'] else 'CLOSED'}[pr['state']]
             head_repo = pr['head']['repo']['full_name']
             nodes.append({'number': pr['number'], 'url': pr['html_url'], 'state': state,
+                          'mergedAt': pr['merged_at'],
                           'headRefOid': pr['head']['sha'], 'baseRefName': 'main',
                           'isCrossRepository': head_repo.lower() != full.lower(),
                           'headRepository': {'nameWithOwner': head_repo},
                           'mergeCommit': {'oid': pr['merge_commit_sha']} if pr['merge_commit_sha'] else None})
-        return {'data': {'repository': {'issue': {'closedByPullRequestsReferences': {
+        reopens = r.get('reopens', {}).get(str(number), [])
+        timeline = {'totalCount': len(reopens), 'nodes': [{'createdAt': reopens[-1]}] if reopens else []}
+        return {'data': {'repository': {'issue': {'timelineItems': timeline, 'closedByPullRequestsReferences': {
             'nodes': nodes, 'pageInfo': {'hasNextPage': False}}}}}}
 
     @staticmethod

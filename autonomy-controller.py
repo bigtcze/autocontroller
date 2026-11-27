@@ -325,13 +325,50 @@ def branch_divergence(pr: dict) -> str | None:
     return state if state in ("behind", "dirty") else None
 
 
+def _gh_timestamp(value) -> datetime | None:
+    """Parse GitHub's ISO-8601 UTC ('Z') timestamps; None when absent or unparsable."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else None
+
+
+def _latest_reopen(issue: dict, number: int) -> datetime | None:
+    """Time of the Issue's latest reopen, or None if it was never reopened.
+
+    Missing or malformed timeline metadata fails closed.
+    """
+    timeline = issue.get("timelineItems")
+    total = timeline.get("totalCount") if isinstance(timeline, dict) else None
+    if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+        raise ControllerError(f"Issue #{number} reopen history unavailable; reconcile its PR linkage manually")
+    if total == 0:
+        return None
+    nodes = timeline.get("nodes")
+    latest = nodes[-1] if isinstance(nodes, list) and nodes else None  # last:1 query
+    stamp = _gh_timestamp(latest.get("createdAt") if isinstance(latest, dict) else None)
+    if stamp is None:
+        raise ControllerError(f"Issue #{number} latest reopen has no parseable timestamp; reconcile its PR linkage manually")
+    return stamp
+
+
 def linked_issue_pr(repo: str, number: int) -> dict | None:
-    """Use GitHub's actual closing references, not textual PR search results."""
+    """Use GitHub's actual closing references, not textual PR search results.
+
+    A merged closing PR that predates the Issue's latest reopen is historical
+    (the Issue was reopened after it, for example after a revert) and is ignored.
+    A merged closing PR from the current attempt is still returned, so the code
+    phase refuses it instead of retrofitting an externally merged change.
+    """
     owner, name = repo.split("/", 1)
     query = """query($owner:String!,$repo:String!,$number:Int!){
       repository(owner:$owner,name:$repo){issue(number:$number){
+        timelineItems(last:1,itemTypes:[REOPENED_EVENT]){totalCount nodes{... on ReopenedEvent{createdAt}}}
         closedByPullRequestsReferences(first:100,includeClosedPrs:true){
-          nodes{number url state headRefOid baseRefName isCrossRepository headRepository{nameWithOwner} mergeCommit{oid}}
+          nodes{number url state mergedAt headRefOid baseRefName isCrossRepository headRepository{nameWithOwner} mergeCommit{oid}}
           pageInfo{hasNextPage}}}}}"""
     payload = gh_json("api", "graphql", "-f", f"query={query}",
                       "-F", f"owner={owner}", "-F", f"repo={name}",
@@ -362,10 +399,25 @@ def linked_issue_pr(repo: str, number: int) -> dict | None:
     active = [p for p in candidates if p.get("state") == "OPEN"]
     if len(active) > 1:
         raise ControllerError(f"Issue #{number} has multiple open closing PRs; refusing ambiguous merge")
-    if active:
-        return active[0]
     merged = [p for p in candidates if p.get("state") == "MERGED"]
-    return max(merged, key=lambda p: p["number"]) if merged else None
+    if not merged:
+        return active[0] if active else None
+    reopened_at = _latest_reopen(issue, number)
+    current = list(active)
+    for p in merged:
+        merged_at = _gh_timestamp(p.get("mergedAt"))
+        if merged_at is None:
+            raise ControllerError(f"Merged PR #{p.get('number')} for Issue #{number} has no parseable mergedAt; reconcile PR linkage manually")
+        if reopened_at is None or merged_at > reopened_at:
+            current.append(p)
+        elif merged_at == reopened_at:
+            raise ControllerError(f"Merged PR #{p.get('number')} and Issue #{number} reopen share one timestamp; chronology is ambiguous, reconcile PR linkage manually")
+        else:
+            LOG.info("Ignoring PR #%s merged before Issue #%s was reopened (historical)", p.get("number"), number)
+    if len(current) > 1:
+        numbers = ", ".join(f"#{p.get('number')}" for p in current)
+        raise ControllerError(f"Issue #{number} has multiple current closing PRs ({numbers}); reconcile PR linkage manually")
+    return current[0] if current else None
 
 
 def pr_ci_state(repo: str, number: int, required_check: str = "required", *, missing_is_failed=False) -> str:

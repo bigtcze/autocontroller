@@ -389,7 +389,8 @@ class ForkPullRequests(ControllerCase):
         self.assertEqual(self.merge_commands(), [])
 
     def test_fork_closing_reference_is_ignored_and_never_merged(self):
-        payload = {'data': {'repository': {'issue': {'closedByPullRequestsReferences': {
+        payload = {'data': {'repository': {'issue': {'timelineItems': {'totalCount': 0, 'nodes': []},
+                   'closedByPullRequestsReferences': {
             'pageInfo': {'hasNextPage': False},
             'nodes': [{'number': 77, 'url': 'https://github.com/example-fork/repo/pull/77',
                        'state': 'OPEN', 'headRefOid': SHA, 'baseRefName': 'main',
