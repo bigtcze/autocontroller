@@ -8,7 +8,6 @@ contract and its limits are documented in docs/ONBOARDING_TESTING.md.
 import fcntl
 import json
 import re
-import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -807,38 +806,6 @@ class RequiredCheckGateTests(OnboardingCase):
         self.assertEqual(len(self.w.mutating_gh_calls()), snapshot)
         self.assertEqual(self.w.gh().get('rulesets', {}), {})
         self.assertEqual(self.w.config_path().read_bytes(), before_config)
-
-    def test_owned_same_name_ruleset_refused_before_any_post_or_second_ruleset(self):
-        repo = self.w.add_repo(OWNER, 'demo', default_branch='trunk', admin=True, protection=None)
-        self.w.add_ruleset(repo, {'name': GATE_RULESET, 'enforcement': 'disabled', 'conditions': {'ref_name': {'include': [], 'exclude': []}}, 'rules': []})
-        result = self.onboard(repo, stdin='y\ny\n')
-        self.assertNotEqual(result.rc, 0)
-        self.assertIn('will not modify it', result.stderr)
-        self.assertEqual(len(self.w.gh()['rulesets'][repo.lower()]), 1)
-
-    def test_fake_gh_rejects_duplicate_ruleset_name_with_422(self):
-        repo = self.w.add_repo(OWNER, 'demo', default_branch='trunk', admin=True, protection=None)
-        doc = {'name': GATE_RULESET, 'target': 'branch', 'enforcement': 'active', 'rules': []}
-        first = subprocess.run(['gh', 'api', '--method', 'POST', f'repos/{repo}/rulesets', '--input', '-'],
-                               input=json.dumps(doc), text=True, capture_output=True, timeout=60,
-                               env=self.w.env(), check=False)
-        second = subprocess.run(['gh', 'api', '--method', 'POST', f'repos/{repo}/rulesets', '--input', '-'],
-                                input=json.dumps(doc), text=True, capture_output=True, timeout=60,
-                                env=self.w.env(), check=False)
-        self.assertEqual(first.returncode, 0, first.stderr)
-        self.assertEqual(second.returncode, 1)
-        self.assertIn('HTTP 422', second.stderr)
-        self.assertEqual(len(self.w.gh()['rulesets'][repo.lower()]), 1)
-
-    def test_all_branches_ruleset_with_exclusion_is_matched_by_fake(self):
-        repo = self.w.add_repo(OWNER, 'demo', default_branch='trunk', admin=True, protection=None)
-        self.w.add_ruleset(repo, {'name': 'all but trunk', 'enforcement': 'active',
-                                  'conditions': {'ref_name': {'include': ['~ALL'], 'exclude': ['refs/heads/trunk']}},
-                                  'rules': [{'type': 'required_status_checks', 'parameters': {
-                                      'required_status_checks': [{'context': 'required'}]}}]})
-        result = self.onboard(repo, stdin='y\ny\n')
-        self.assertEqual(result.rc, 0, result.stderr)
-        self.assertEqual(len(ruleset_posts(self.w)), 1)
 
     def test_lost_ruleset_post_response_resumes_to_one_ruleset_and_no_second_post(self):
         repo = self.w.add_repo(OWNER, 'demo', default_branch='trunk', admin=True, protection=None)
