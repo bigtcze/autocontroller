@@ -27,7 +27,9 @@
 4. A task cycle invokes the safe wrapper (`opencode run` as `orchestrator`),
    then polls GitHub for the linked PR, `required` checks on the exact head,
    merges without admin override, verifies push CI on the merge commit, closes
-   the Issue and updates the Project.
+   the Issue and updates the Project. An outdated or conflicting PR (GitHub
+   `behind`/`dirty`) is returned to the orchestrator to reconcile; the new head
+   gets a fresh OMO review and required CI before any merge.
 5. Releases: owner approval comment (feature) or cadence (maintenance) → tag at
    exact SHA → native `release.yml` publishes → controller verifies.
 

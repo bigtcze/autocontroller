@@ -312,6 +312,15 @@ def pr_data(repo: str, number: int) -> dict:
     return data
 
 
+def branch_divergence(pr: dict) -> str | None:
+    """Only GitHub's explicit 'behind' or 'dirty' states prove base divergence.
+
+    'unknown' (not computed yet) and every other state are NOT divergence.
+    """
+    state = str(pr.get("mergeable_state") or "").lower()
+    return state if state in ("behind", "dirty") else None
+
+
 def linked_issue_pr(repo: str, number: int) -> dict | None:
     """Use GitHub's actual closing references, not textual PR search results."""
     owner, name = repo.split("/", 1)
@@ -1315,6 +1324,59 @@ class ProjectWorker:
                     f"{kind} #{number} delivered: PR merged with required CI green on resulting main",
                     warning=False)
 
+    def route_new_head(self, checkpoint: dict):
+        # A new commit invalidates the orchestrator-led review and old CI
+        # verification; ask the orchestrator to review it again.
+        checkpoint.update(phase="code",review_feedback=(
+            "PR head changed after the last agent-led review and CI. "
+            "Reconcile the new diff, obtain an independent OMO `oracle` "
+            "review and return only after fixing blockers."))
+        checkpoint.pop("ready_sha",None)
+        self.save_checkpoint(checkpoint)
+
+    def route_divergence(self, checkpoint: dict, pr: dict, key: str) -> bool:
+        """Return an outdated or conflicting PR to the agent to reconcile.
+
+        GitHub refuses the merge of a branch that is behind a strict base or
+        conflicts with it, and that refusal persists until the branch changes.
+        Re-running the same merge, or waiting on CI that never starts, cannot
+        succeed, so the existing PR branch must be reconciled by the agent.
+        """
+        state=branch_divergence(pr)
+        if not state:
+            return False
+        number=pr["number"]
+        head=str((pr.get("head") or {}).get("sha") or "")
+        base=self.base_branch
+        reason=("behind the base branch (strict branch protection)" if state=="behind"
+                else "in a merge conflict with the base branch")
+        checkpoint.update(phase="code",review_feedback=(
+            f"PR #{number} is {reason}; GitHub refuses to merge head {head[:12]} "
+            f"into {base}. Reconcile the EXISTING PR branch with current origin/{base} "
+            f"using ordinary Git and GitHub CLI: `git fetch origin`, then merge "
+            f"origin/{base} into the PR branch (or `gh pr update-branch` when it is only "
+            "behind and clean), resolve conflicts preserving legitimate work, run the tests "
+            "and push normally. Never force-push, admin-merge, disable protection or create a "
+            "duplicate PR. The new head needs a fresh independent OMO `oracle` review. If a "
+            "conflict cannot be resolved safely, keep or mark the PR draft and report the "
+            "conflicting files as an explicit blocker."))
+        checkpoint.pop("ready_sha",None)
+        checkpoint.pop("reviewed_sha",None)
+        repeated=bool(head) and checkpoint.get("diverged_head")==head
+        checkpoint["diverged_head"]=head
+        self.save_checkpoint(checkpoint)
+        if repeated:
+            self.notice(f"diverged-unresolved:{key}",
+                        f"BLOCKER: PR #{number} is still {state} at {head[:12]} after an agent pass; "
+                        f"divergence unresolved. Actionable: reconcile origin/{base} into the PR branch "
+                        "without force-push or admin merge; retrying in one hour",warning=True)
+            self.retry(key,f"PR #{number} still {state} at {head[:12]} after agent pass",min_seconds=3600)
+        else:
+            self.notice(f"diverged:{key}",
+                        f"PR #{number} is {state} relative to {base}; returning to the agent to reconcile",
+                        warning=True)
+        return True
+
     def _cycle(self, kind: str, number: int, url: str, item: dict | None):
         self.memory_gate()
         key=f"{kind}:{number}"
@@ -1460,6 +1522,8 @@ class ProjectWorker:
                 self.save_checkpoint(checkpoint)
                 self.retry(key,"PR is draft / review not complete",min_seconds=600)
                 return
+            if self.route_divergence(checkpoint,pr,key):
+                return
             branch,dirty=self.checkout_state()
             if dirty or not branch:
                 checkpoint.update(phase="code",review_feedback=(
@@ -1517,14 +1581,7 @@ class ProjectWorker:
             if not re.fullmatch(r"[a-fA-F0-9]{40}",str(ready or "")):
                 raise ControllerError("No verified ready-to-merge PR SHA")
             if sha != ready:
-                # A new commit invalidates the orchestrator-led review and
-                # old CI verification; ask the orchestrator to review it again.
-                checkpoint.update(phase="code",review_feedback=(
-                    "PR head changed after the last agent-led review and CI. "
-                    "Reconcile the new diff, obtain an independent OMO `oracle` "
-                    "review and return only after fixing blockers."))
-                checkpoint.pop("ready_sha",None)
-                self.save_checkpoint(checkpoint)
+                self.route_new_head(checkpoint)
                 return
             if self.is_bootstrap(kind,number):
                 candidate_sha=str((pr.get("head") or {}).get("sha") or "")
@@ -1537,6 +1594,8 @@ class ProjectWorker:
                     self.save_checkpoint(checkpoint)
                     self.retry(key,"Bootstrap standard incomplete",min_seconds=600)
                     return
+            if self.route_divergence(checkpoint,pr,key):
+                return
             if self.is_bootstrap(kind,number):
                 sha_wait=str((pr.get("head") or {}).get("sha") or "")
                 if checkpoint.get("bootstrap_ci_sha")!=sha_wait:
@@ -1563,8 +1622,26 @@ class ProjectWorker:
                 raise ControllerError("Unsupported merge method")
             # GitHub enforces branch protection; no --admin or bypass flags.
             self.memory_gate()
-            command(["gh","pr","merge",str(pr["number"]),"--repo",self.repo,
-                     f"--{method}","--match-head-commit",sha],timeout=180)
+            try:
+                command(["gh","pr","merge",str(pr["number"]),"--repo",self.repo,
+                         f"--{method}","--match-head-commit",sha],timeout=180)
+            except ControllerError as exc:
+                # The base or head may have moved after the pre-merge read.
+                # Re-read before deciding; otherwise keep the ordinary backoff.
+                # A merge that GitHub actually applied (lost response) is left
+                # to the merged-PR recovery on the next cycle.
+                live=pr_data(self.repo,pr["number"])
+                if not live.get("merged_at"):
+                    if str((live.get("head") or {}).get("sha") or "") != sha:
+                        self.route_new_head(checkpoint)
+                        return
+                    if self.route_divergence(checkpoint,live,key):
+                        return
+                    if str(live.get("mergeable_state") or "").lower()=="blocked":
+                        raise ControllerError(
+                            f"PR #{pr['number']} merge blocked by review or branch protection, not branch divergence"
+                        ) from exc
+                raise
             merged=pr_data(self.repo,pr["number"])
             if not merged.get("merged_at") or not merged.get("merge_commit_sha"):
                 raise ControllerError("Merge command returned without a verified merged PR")
