@@ -101,6 +101,23 @@ class SelectionTests(unittest.TestCase):
             {"name":"pve","repo":"example-owner/example-exporter","directory":"/home/example/repositories/example-exporter","project_owner":"example-owner","project_number":1},
         ]}
         with self.assertRaises(m.ControllerError):m.validate_config(cfg)
+    def test_autocontroller_release_must_use_canonical_blocker_label(self):
+        def cfg(repo,label=None,**top):
+            rc={"enabled":True,"approver":"example-owner"}
+            if label is not None: rc["blocker_label"]=label
+            return {"projects":[{"name":"demo","repo":repo,"directory":"/home/example/repositories/demo",
+                                 "project_owner":"example-owner","project_number":1,"release":rc}],**top}
+        canonical=m.releases.RELEASE_BLOCKER_LABEL
+        with self.assertRaises(m.ControllerError):m.validate_config(cfg("bigtcze/autocontroller","ship-blocker"))
+        with self.assertRaises(m.ControllerError):m.validate_config(cfg("BigTCZE/AutoController","ship-blocker"))
+        m.validate_config(cfg("bigtcze/autocontroller",canonical))
+        m.validate_config(cfg("bigtcze/autocontroller"))
+        # Other repositories keep their configurable label.
+        m.validate_config(cfg("example-owner/demo","ship-blocker"))
+        # The conflict follows update_repository, the repository that really publishes the controller.
+        with self.assertRaises(m.ControllerError):m.validate_config(cfg("example-owner/demo","ship-blocker",update_repository="example-owner/demo"))
+        m.validate_config(cfg("example-owner/demo",canonical,update_repository="example-owner/demo"))
+        m.validate_config(cfg("example-owner/demo","ship-blocker",update_repository="bigtcze/autocontroller"))
     def test_project_list_fails_closed_on_truncation(self):
         gp=m.GitHubProject("example-owner/example-project","example-owner",1)
         with patch.object(m,"gh_json",return_value={"items":[],"totalCount":100}):

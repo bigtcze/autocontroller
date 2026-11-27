@@ -60,9 +60,14 @@ if argv[:1] == ['api'] and '--paginate' in argv and '--slurp' in argv and '--jq'
     # The Python side reads pagination itself: --slurp yields an array of pages.
     if state.get('listing_error'):
         fail('HTTP 500', 1)
-    if '/issues?' in path_arg():
+    if '/labels?' in path_arg():
+        pages = [[{'name': x} for x in state['labels']]]
+    elif '/issues?' in path_arg():
         hook('before_issues')
-        rows = [i for i in state['issues'] if i['state'] == 'open']
+        rows = [i for i in state['issues'] if i['state'] == 'open'
+                and any(x['name'] == 'release-blocker' for x in i.get('labels', []))]
+        # Pagination fixture: the first page is empty and the blocker sits on the second one.
+        pages = [[], rows] if state.get('split_issue_pages') else [rows]
     else:
         rows = state['releases']
         if state.get('list_lag', 0) > 0 and state.get('created_draft'):
@@ -71,7 +76,8 @@ if argv[:1] == ['api'] and '--paginate' in argv and '--slurp' in argv and '--jq'
             state['list_lag'] -= 1
             save()
             rows = [r for r in rows if r.get('draft') is not True]
-    print(json.dumps([rows]))
+        pages = [rows]
+    print(json.dumps(pages))
 elif argv[:1] == ['api'] and '--paginate' in argv and '--slurp' in argv:
     fail('gh: --slurp not supported with --jq', 1)
 elif argv[:1] == ['release'] and argv[1:2] == ['create']:
@@ -150,7 +156,8 @@ class PublishFixture(unittest.TestCase):
         }
         self.notes = base / 'notes.md'
         self.notes.write_text('notes\n', encoding='utf-8')
-        self.state = {'releases': [], 'issues': [], 'next_id': 100, 'digests': dict(self.digests), 'hooks': {}}
+        self.state = {'releases': [], 'issues': [], 'labels': ['release-blocker'], 'next_id': 100,
+                      'digests': dict(self.digests), 'hooks': {}}
         self.save()
         self.env = {'PATH': f'{self.bin}{os.pathsep}{os.environ.get("PATH", "/usr/bin:/bin")}',
                     'FAKE_GH_STATE': str(self.state_path), 'FAKE_GH_LOG': str(self.log),
@@ -278,6 +285,26 @@ class PublishRefusalTests(PublishFixture):
         self.assertFalse(any('PATCH' in a for a in self.calls()),
                          'blocker re-check must happen before un-drafting')
         self.assertEqual(self.load()['releases'], [], 'the draft must be deleted when a blocker is open')
+
+    def test_missing_blocker_label_refuses_and_deletes_the_draft(self):
+        # GitHub lists no Issues for a missing label, so the absence must be detected, not read as "clear".
+        self.state['labels'] = []
+        self.save()
+        proc = self.publish_cli()
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("label 'release-blocker' does not exist", proc.stderr)
+        self.assertFalse(any('PATCH' in a for a in self.calls()))
+        self.assertEqual(self.load()['releases'], [], 'the draft must be deleted when the label is missing')
+
+    def test_blocker_on_a_later_listing_page_is_refused(self):
+        self.state['issues'].append({'number': 98, 'state': 'open', 'labels': [{'name': 'release-blocker'}]})
+        self.state['split_issue_pages'] = True
+        self.save()
+        proc = self.publish_cli()
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn('open release-blocker Issues: #98', proc.stderr)
+        self.assertFalse(any('PATCH' in a for a in self.calls()))
+        self.assertEqual(self.load()['releases'], [])
 
     def test_failed_undraft_on_a_still_draft_release_deletes_it(self):
         # N5: the PATCH failed and the release is still a draft: it is ours to delete.

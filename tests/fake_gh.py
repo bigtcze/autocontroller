@@ -31,7 +31,7 @@ DEFAULT_STATUS = ['Todo', 'In Progress', 'Done']
 VALUE_OPTIONS = {'--method', '-X', '-f', '-F', '-H', '--owner', '--format', '--limit',
                  '--title', '--repo', '--url', '--scopes', '--hostname', '--git-protocol',
                  '--id', '--project-id', '--field-id', '--single-select-option-id',
-                 '--dir', '--pattern', '--input'}
+                 '--dir', '--pattern', '--input', '--color', '--description'}
 BOOL_OPTIONS = {'-i', '--paginate', '--slurp', '--closed', '--web'}
 
 
@@ -258,6 +258,9 @@ def api(args: list[str], state: dict, body: str | None = None) -> str:
                 raise Fail(1, 'HTTP 403: Must have admin rights to Repository.')
             repo['has_issues'] = True
             return json.dumps(repo) + '\n'
+        if len(parts) == 4 and parts[3] == 'labels' and method == 'GET':
+            rows = [{'name': x} for x in repo.get('labels', [])]
+            return json.dumps([rows] if '--slurp' in flags else rows) + '\n'
         if len(parts) == 4 and parts[3] == 'issues' and method == 'GET':
             wanted = params.get('state', 'open')
             rows = [i for i in state.get('issues', {}).get(key, []) if wanted == 'all' or i['state'] == wanted]
@@ -416,6 +419,14 @@ def handle(argv: list[str], state: dict, body: str | None = None) -> str:
         return api(argv[1:], state, body)
     if argv[0] == 'project' and len(argv) > 1:
         return project(argv[1:], state)
+    if argv[:2] == ['label', 'create']:
+        # Like `gh label create` without --force: an existing label is refused, never changed.
+        positional, opts, _, _ = parse(argv[2:])
+        repo = find_repo(state, *opts['--repo'].split('/', 1))
+        if positional[0] in repo.get('labels', []):
+            raise Fail(1, f'HTTP 422: label {positional[0]!r} already exists')
+        repo.setdefault('labels', []).append(positional[0])
+        return ''
     if argv[0] == 'release' and len(argv) > 1:
         return release_cmd(argv[1:], state)
     raise Unsupported(' '.join(argv))

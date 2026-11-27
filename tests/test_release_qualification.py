@@ -28,6 +28,7 @@ class Fakes:
                                         'conclusion': 'success', 'run_number': 7, 'run_attempt': 1, 'id': 1}],
                      'total_count': 1}
         self.blockers = []
+        self.labels = [{'name': 'release-blocker'}]
         self.vm_run = {'path': rp.VM_LIFECYCLE_WORKFLOW, 'head_sha': CANDIDATE,
                        'status': 'completed', 'conclusion': 'success'}
         self.jobs = {'total_count': 4, 'jobs': [{'name': n, 'conclusion': 'success'} for n in VM_JOBS]}
@@ -47,6 +48,8 @@ class Fakes:
         raise AssertionError(f'unexpected gh_json {path}')
 
     def pages(self, path):
+        if path == f'repos/{REPO}/labels?per_page=100':
+            return self.labels
         assert path.startswith(f'repos/{REPO}/issues?state=open&labels=release-blocker'), path
         return self.blockers
 
@@ -59,23 +62,56 @@ class Fakes:
         return rp.qualify_release(REPO, tag, sha, **kwargs)
 
 
+def listing_pages(issues, labels=('release-blocker',), seen=None):
+    """Fake `pages`: the labels listing and the issues listing, dispatched by path."""
+    def pages(path):
+        if seen is not None:
+            seen.append(path)
+        if path == f'repos/{REPO}/labels?per_page=100':
+            return [{'name': x} for x in labels] if isinstance(labels, tuple) else labels
+        return issues
+    return pages
+
+
 class BlockerListingTests(unittest.TestCase):
     def test_issues_are_listed_by_label_and_pull_requests_are_excluded(self):
         rows = [{'number': 1, 'state': 'open'}, {'number': 2, 'state': 'open', 'pull_request': {'url': 'x'}}]
-        got = rp.open_release_blockers(REPO, lambda path: rows, 'release-blocker')
+        got = rp.open_release_blockers(REPO, listing_pages(rows), 'release-blocker')
         self.assertEqual([x['number'] for x in got], [1])
 
-    def test_non_list_listing_fails_closed(self):
+    def test_closed_blockers_are_ignored_and_only_open_issues_are_queried(self):
+        seen = []
+        rows = [{'number': 1, 'state': 'closed'}, {'number': 2, 'state': 'open'}]
+        got = rp.open_release_blockers(REPO, listing_pages(rows, seen=seen), 'release-blocker')
+        self.assertEqual([x['number'] for x in got], [2])
+        self.assertIn('state=open&', seen[-1])
+
+    def test_missing_label_is_refused_even_when_no_issue_carries_it(self):
+        with self.assertRaisesRegex(ValueError, "label 'release-blocker' does not exist"):
+            rp.open_release_blockers(REPO, listing_pages([], labels=()), 'release-blocker')
+
+    def test_label_match_is_exact(self):
+        for name in ('Release-Blocker', 'release-blocker ', 'release-blockers'):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                rp.open_release_blockers(REPO, listing_pages([], labels=(name,)), 'release-blocker')
+
+    def test_non_list_label_listing_fails_closed(self):
         with self.assertRaises(ValueError):
-            rp.open_release_blockers(REPO, lambda path: {'message': 'Not Found'})
+            rp.open_release_blockers(REPO, listing_pages([], labels={'message': 'Not Found'}))
+
+    def test_non_list_issue_listing_fails_closed(self):
+        with self.assertRaises(ValueError):
+            rp.open_release_blockers(REPO, lambda path: {'message': 'Not Found'} if 'issues' in path else [{'name': 'release-blocker'}])
 
     # NIT: the blocker label is URL-encoded; the controller accepts spaces and ':' in it.
     def test_label_with_spaces_is_url_encoded_in_the_query(self):
         seen = []
-        rp.open_release_blockers(REPO, lambda path: seen.append(path) or [], 'release blocker: critical')
-        self.assertEqual(len(seen), 1)
-        self.assertIn('labels=release%20blocker%3A%20critical&', seen[0])
-        self.assertNotIn(' ', seen[0])
+        rp.open_release_blockers(REPO, listing_pages([], labels=('release blocker: critical',), seen=seen),
+                                 'release blocker: critical')
+        issue_queries = [p for p in seen if '/issues?' in p]
+        self.assertEqual(len(issue_queries), 1)
+        self.assertIn('labels=release%20blocker%3A%20critical&', issue_queries[0])
+        self.assertNotIn(' ', issue_queries[0])
 
 
 class EvidenceSchemaTests(unittest.TestCase):
@@ -177,6 +213,16 @@ class QualifyReleaseTests(unittest.TestCase):
         def broken(path):
             raise ValueError('unavailable')
         self.assertBlocked(fakes, 'unavailable', pages=broken)
+
+    def test_missing_blocker_label_is_refused_not_read_as_no_blockers(self):
+        fakes = Fakes()
+        fakes.labels = []
+        self.assertBlocked(fakes, "label 'release-blocker' does not exist")
+
+    def test_non_list_label_listing_is_refused(self):
+        fakes = Fakes()
+        fakes.labels = {'message': 'Not Found'}
+        self.assertBlocked(fakes, 'label listing unavailable')
 
     def test_feature_release_without_evidence_is_refused(self):
         fakes = Fakes()

@@ -33,7 +33,7 @@ repositories. Relevant threats:
   head is in the same repository; fork PRs are ignored.
 - Merges require the exact reviewed head SHA, green `required` and no admin
   bypass. Feature releases require an owner comment bound to tag and SHA.
-- Prompts label GitHub content as untrusted data.
+- Prompts label GitHub content as untrusted data. A follow-up Issue may carry the release-blocker label only when it is a genuine blocker found during authorized work; the label never authorizes work.
 - Least privilege: workflows default to `contents: read`; only the release
   `publish` job has `contents: write`. No `pull_request_target`, no secrets in
   PR workflows, `persist-credentials: false`, third-party actions pinned to
