@@ -342,6 +342,25 @@ class Gates(unittest.TestCase):
         self.assertIn('issue:11',self.w.retry_map())
         self.assertFalse(self.merge_calls)
 
+    def test_repair_agent_failure_keeps_main_is_red_checkpoint(self):
+        repair={'number':22,'state':'open','merged_at':None,'draft':False,
+                'head':{'sha':'e'*40,'repo':{'full_name':'org/demo'}},
+                'base':{'ref':'main'},'merge_commit_sha':None}
+        self.pr.update(state='closed',merged_at='2026-11-24T10:00:00Z',merge_commit_sha=MERGE)
+        self.w.save_checkpoint({'kind':'issue','number':11,'url':URL,'phase':'code',
+                                'pr_number':22,'repairing':True,'retry_same_task':True})
+        self.patches(real_related=True)
+        self.agent_output=(1,'boom')
+        with patch.object(m,'pr_data',side_effect=lambda repo,n:dict(repair if n==22 else self.pr)):
+            with patch.object(m,'linked_issue_pr',return_value={'number':21}):
+                self.w._cycle('issue',11,URL,None)
+        self.assertEqual(len(self.agent_calls),1)
+        cp=m.json_read(self.w.cycle_state)
+        self.assertIsNotNone(cp,'failed repair agent run must not discard the main-is-red obligation')
+        self.assertEqual((cp['pr_number'],cp['repairing']),(22,True))
+        self.assertIn('issue:11',self.w.retry_map())
+        self.assertFalse(self.merge_calls)
+
     def test_merge_race_reread_failure_reports_both_errors(self):
         def reject(pr):
             raise m.ControllerError('merge rejected by GitHub')

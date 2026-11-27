@@ -1478,7 +1478,8 @@ class ProjectWorker:
                     self.save_checkpoint(checkpoint)
                 else:
                     self.retry(key,f"OpenCode exit {rc}",min_seconds=900)
-                    if not self.pending.exists() and self.checkout_neutral():
+                    # A repair checkpoint carries the main-is-red obligation: never discard it.
+                    if not checkpoint.get("repairing") and not self.pending.exists() and self.checkout_neutral():
                         self.cycle_state.unlink(missing_ok=True)
                 return
             # A successful OpenCode process is NOT a provider quota failure.
