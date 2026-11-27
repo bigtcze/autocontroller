@@ -43,6 +43,20 @@ def _not_found(argv: list[str]) -> Exception:
     return ctl.ControllerError(f"Command rc=1: {' '.join(argv)}: gh: Not Found (HTTP 404)")
 
 
+def tree_of(sha: str) -> str:
+    """Deterministic git tree of a fake commit. Tests and the scripted oracle use the same value."""
+    return _sha('tree', sha)
+
+
+def _known_commit(d: dict, sha: str) -> bool:
+    """A commit the fake GitHub knows: a PR head, a merge commit or a default-branch head."""
+    for r in d['repos'].values():
+        if sha == r['main_sha'] or any(p['head']['sha'] == sha or p['merge_commit_sha'] == sha
+                                       for p in r['prs'].values()):
+            return True
+    return False
+
+
 class FakeGitHub:
     """File-backed, lock-guarded fake. Construct once per world; share the path with agents."""
 
@@ -515,6 +529,10 @@ class FakeGitHub:
         if rest == ['releases']:
             rows = list(r['releases'].values())
             return [rows] if slurp else rows
+        if rest[:2] == ['git', 'commits'] and len(rest) == 3:
+            if not _known_commit(d, rest[2]):
+                raise _not_found(argv)
+            return {'sha': rest[2], 'tree': {'sha': tree_of(rest[2])}}
         if rest[:2] == ['git', 'trees'] and len(rest) == 3:
             files = r.get('trees', {}).get(rest[2])
             if files is None:

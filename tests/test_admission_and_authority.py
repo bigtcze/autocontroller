@@ -171,6 +171,9 @@ class ControllerCase(unittest.TestCase):
             path = args[1] if len(args) > 1 else ''
             if 'git/trees' in path:
                 return tree
+            if 'git/commits/' in path:
+                # Review-evidence tree lookup for the PR head (issue #48); the tree itself is not used here.
+                return {'sha': path.rsplit('/', 1)[-1], 'tree': {'sha': '7' * 40}}
             if '.agents/STANDARD_VERSION' in path:
                 return version
             if path.startswith('repos/org/repo/issues?'):
@@ -213,6 +216,9 @@ class BootstrapBlocksOrdinaryWork(ControllerCase):
         self.p(self.w, 'related_pr', return_value=bootstrap_pr(merged=False))
         self.p(m, 'pr_ci_state', return_value='failed')
         self.gh_json.side_effect = self.bootstrap_tree_fixture()
+        # This test is about the CI gate; the review gate is given a trusted candidate for the head.
+        self.p(self.w, 'review_evidence', return_value=({'sha': SHA, 'tree': '7' * 40,
+                                                         'session': 'ses_oracle', 'root': 'ses_root'}, ''))
         self.w._cycle('issue', BOOT, issue_url(BOOT), None)
         self.agent.assert_not_called()
         self.assertEqual(m.json_read(self.w.cycle_state)['phase'], 'code')

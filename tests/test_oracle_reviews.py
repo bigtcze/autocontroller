@@ -182,7 +182,8 @@ class OracleReviewsTests(unittest.TestCase):
             self.run_listing(api)
 
     def test_cli_api_error_exits_nonzero_with_message(self):
-        import subprocess, sys
+        import subprocess
+        import sys
         env = {**os.environ, 'AUTONOMY_PROJECT_ROOT': self.tmp, 'AUTONOMY_PROJECT_NAME': PROJECT,
                'AUTONOMY_PENDING_MARKER': self.tmp + '/pending.json', 'AUTONOMY_OPENCODE': '/bin/false'}
         proc = subprocess.run([sys.executable, str(WRAPPER), '--oracle-reviews', 'kind', '5'],

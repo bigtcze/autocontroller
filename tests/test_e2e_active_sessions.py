@@ -129,7 +129,9 @@ class DescendantSettleTests(ActiveSessionBase):
         ])
         # Recovery turn 1 finishes the PR and spawns a late subagent; turn 2 has no further work.
         self.world.script_resume('alpha', 'code', [
-            {'actions': [pr_action(issue)], 'descendants': [{'title': 'late', 'active_polls': 2}]},
+            {'actions': [pr_action(issue)], 'descendants': [{'title': 'late', 'active_polls': 2},
+                                                            {'title': 'review', 'agent': 'oracle',
+                                                             'outcome': 'succeeded', 'snapshot_tree': 'head'}]},
             {},
         ])
         self.drive('alpha', 1)  # selection
@@ -179,7 +181,9 @@ class InterruptionRestartTests(ActiveSessionBase):
              'descendants': [{'title': 'explore', 'active_polls': -1}]},
             {'output': 'AUTOCONTROLLER_SELECT_ISSUE #%d' % second},
         ])
-        self.world.script_resume('alpha', 'code', [{'actions': [pr_action(first)]}])
+        self.world.script_resume('alpha', 'code', [
+            {'actions': [pr_action(first)],
+             'descendants': [{'title': 'review', 'agent': 'oracle', 'outcome': 'succeeded', 'snapshot_tree': 'head'}]}])
         self.world.cycle_timeout_seconds = 4
 
         self.drive('alpha', 1)  # selection -> In Progress

@@ -32,10 +32,17 @@ class Gates(unittest.TestCase):
         self.merge_calls=[]
         self.merge_rejects=None  # optional callable(pr): may mutate self.pr, then raise
         self.agent_output=(0,'Orchestrator: fixer completed; oracle reviewed, no blockers')
+        # Independent review evidence, as the gate would return it for the current head. Tests that
+        # exercise the gate itself set self.review = None (absence) or a specific candidate.
+        self.review='default'
 
     def stage(self, phase, **extra):
         cp={'kind':'issue','number':11,'url':URL,'phase':phase,
             'pr_number':21,'retry_same_task':True,**extra}
+        # A checkpoint that carries a ready_sha past CI holds the review evidence the gate stored for it.
+        ready=cp.get('ready_sha')
+        if ready and 'review_evidence' not in cp and phase in ('merge','postmerge'):
+            cp['review_evidence']={'sha':ready,'tree':'t'*40,'session':'ses_oracle','root':'ses_root'}
         self.w.save_checkpoint(cp)
 
     def patches(self,ci='passed',main='passed',real_related=False):
@@ -62,7 +69,14 @@ class Gates(unittest.TestCase):
         stack.enter_context(patch.object(self.w.project,'set_status'))
         stack.enter_context(patch.object(self.w.project,'items',return_value=[self.item]))
         stack.enter_context(patch.object(m,'issue_state',return_value='closed'))
+        stack.enter_context(patch.object(self.w,'review_evidence',side_effect=self._review_for))
         return stack
+
+    def _review_for(self,kind,number,head_sha):
+        """Stand-in for the wrapper listing + git tree lookup: a trusted candidate for this head, or none."""
+        if self.review is None:
+            return None,'no completed, idle, inactive oracle session with a complete snapshot (test: absent)'
+        return {'sha':head_sha,'tree':'t'*40,'session':'ses_oracle','root':'ses_root'},''
 
     def test_full_flow_one_omo_session_and_real_github_gates(self):
         self.patches()
@@ -217,11 +231,17 @@ class Gates(unittest.TestCase):
         cp=m.json_read(self.w.cycle_state)
         self.assertEqual((cp['phase'],cp['pr_number'],cp['repairing']),('ci',22,True))
 
-    def test_old_completed_review_merge_checkpoint_still_recovers(self):
-        self.stage('merge',reviewed_sha=SHA)  # before migration: independent gate was completed
+    def test_old_completed_review_merge_checkpoint_without_evidence_fails_closed(self):
+        # Before issue #48 a completed `reviewed_sha` merge checkpoint merged without stored evidence.
+        # Such a checkpoint can no longer prove an oracle reviewed the head tree, so it must not merge.
+        self.stage('merge',reviewed_sha=SHA)
         self.patches()
         self.w._cycle('issue',11,URL,None)
-        self.assertEqual(m.json_read(self.w.cycle_state)['phase'],'postmerge')
+        cp=m.json_read(self.w.cycle_state)
+        self.assertEqual(cp['phase'],'code')
+        self.assertNotIn('ready_sha',cp)
+        self.assertIn('evidence',cp['review_feedback'])
+        self.assertEqual(self.merge_calls,[])
 
     def test_closed_unmerged_renovate_not_false_positive(self):
         self.pr.update(state='closed',merged_at=None,user={'login':'renovate[bot]','type':'Bot','id':29139614},
