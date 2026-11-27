@@ -105,7 +105,7 @@ Public repositories: membership in the configured GitHub Project (with a nonterm
 | `log_max_bytes` | `2147483648` | Total size cap (2 GiB) for per-project cycle logs. |
 | `cycle_timeout_seconds` | `14400` | Time limit for one agent session. On expiry the process group gets SIGTERM, then SIGKILL after 30 seconds. |
 | `selection_timeout_seconds` | `900` | Time limit for the backlog selection session. |
-| `drain_timeout_seconds` | `600` | How long a worker waits for its process group to end during a drain request before stopping descendants. Distinct from the `--drain-timeout` CLI option (default 3600) of `update`, `rollback`, `remove` and `uninstall`. |
+| `drain_timeout_seconds` | `600` | After an agent session exits, how long the worker waits for remaining processes in its process group before sending SIGTERM, then SIGKILL. Unrelated to the `--drain-timeout` CLI option (default 3600) of `update`, `rollback`, `remove` and `uninstall`. |
 | `retry_max_seconds` | `14400` | Upper bound on the backoff between retries after a failure. |
 | `update_repository` | `bigtcze/autocontroller` | Release source for `autocontroller update` (`OWNER/REPOSITORY` only; never a URL). |
 | `projects` | `[]` | List of per-repository objects (below). Must contain at least one enabled project to run. |
@@ -122,9 +122,9 @@ Public repositories: membership in the configured GitHub Project (with a nonterm
 | `project_owner` | required | Owner of the dedicated GitHub Project. |
 | `project_number` | required | Number of the dedicated GitHub Project. |
 | `required_check` | `required` | Status check that must pass before a PR merges. |
-| `required_workflow` | `required.yml` | Workflow file whose `main` run gates releases. |
+| `required_workflow` | `required.yml` | Workflow whose run on the merged `main` commit must pass before a task completes (and before a release). |
 | `merge_method` | `squash` | `squash`, `merge` or `rebase`; any other value stops the merge. |
-| `bootstrap_issue` | written by onboarding | Issue that establishes the repository contract. |
+| `bootstrap_issue` | `0` (absent or `0` means no bootstrap gate); onboarding always writes it | Issue that establishes the repository contract; the controller runs it first until its completion is verified. |
 | `standard_version` | written by onboarding | Golden Standard version the bootstrap targets. |
 | `conflicting_services` | `[]` (optional) | systemd user units that must not be active while this project runs. |
 | `legacy_pending_markers` | `[]` (optional) | Paths of legacy checkpoints; work is deferred while any exists. |
@@ -157,8 +157,8 @@ Contributor and agent rules live in [AGENTS.md](AGENTS.md) and `.agents/`. A sou
 ```sh
 mise run ci                   # syntax checks + Ruff lint + full offline regression suite
 mise run lint                 # Ruff only (version pinned in mise.toml; config in ruff.toml)
-bash scripts/check-syntax.sh  # same checks without mise
-bash scripts/offline-tests.sh
+bash scripts/check-syntax.sh  # syntax checks without mise (no Ruff lint: needs mise or a pinned ruff)
+bash scripts/offline-tests.sh # offline test suite without mise (needs python3 >= 3.11, bash, git)
 ```
 
 The tests use a simulated GitHub/OpenCode/Engram backend, an isolated temporary `HOME`, no tokens and blocking shims for `gh`, `opencode`, `systemctl`, `loginctl`, `sudo`, `curl` and `engram`; they spend no AI tokens and never write to GitHub. Onboarding is tested against simulated `gh`/OpenCode/systemctl stand-ins; see [docs/ONBOARDING_TESTING.md](docs/ONBOARDING_TESTING.md) for the simulation contract, the fault-injection matrix and the designed (unimplemented) sandbox live-test path. End-to-end acceptance tests (`tests/test_e2e_controller.py`, 46 tests, about a minute; plus `tests/test_e2e_real_wrapper.py` and `tests/test_e2e_memory_cli.py`) drive the real controller against stateful GitHub and OMO agent doubles, offline and hermetic, through the real safe wrapper and the real `memory.cli()`; Engram is a stand-in unless `E2E_ENGRAM_BINARY` names a verified upstream copy; see [docs/E2E_TESTING.md](docs/E2E_TESTING.md) for the scenario mapping, what is simulated and what is verified (nothing is verified against live services yet). `scripts/live-smoke.py` is an opt-in live smoke for one disposable sandbox repository: its body is implemented and exercised offline through fake `gh`/`git`/`opencode` shims, but it has never been executed against a real service, is never run by CI, and spends tokens only when run by the owner with explicit flags. The `required` GitHub check runs them on clean Debian 12/13 and Ubuntu 24.04/26.04 containers (OS/Python compatibility, not a systemd VM test). A separate scheduled/manual VM suite (`vmtest/`, see [docs/VM_TESTING.md](docs/VM_TESTING.md)) boots disposable pinned cloud images in QEMU to exercise real systemd, lingering and reboot; it runs on a disposable VM only, never on a production host. See [validation and limitations](docs/VALIDATION.md) for what still requires live VM/GitHub acceptance before a public release.

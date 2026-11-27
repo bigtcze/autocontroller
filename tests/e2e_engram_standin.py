@@ -89,7 +89,7 @@ class Handler(BaseHTTPRequestHandler):
             body = self._json_body()
             if self.path == '/sessions':
                 sid, project = str(body['id']), str(body['project'])
-                if not body.get('isolated') is True or body.get('ownership_mode') != 'project_owned':
+                if body.get('isolated') is not True or body.get('ownership_mode') != 'project_owned':
                     return self._send(400, {'error': 'session must be isolated and project_owned'})
                 with LOCK:
                     db.execute('INSERT INTO sessions(id,project) VALUES(?,?) '

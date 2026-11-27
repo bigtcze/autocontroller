@@ -1,9 +1,12 @@
 # Ruff lint configuration (version pinned in mise.toml; run via `mise run lint`).
 #
-# Deliberately a correctness-focused rule set. The default E7/E4 style rules flag
-# roughly 500 intentional compact-style statements (E701/E702 semicolon and one-line
-# bodies); enforcing them would be repo-wide churn with no correctness gain.
+# Correctness-focused: pyflakes (F), bugbear (B), pycodestyle errors and
+# correctness subset (E4, E7, E9, PLE). The compact one-line style (E701/E702/E703:
+# `if x: y` and `a; b`) and the established lambda and short-name style (E731/E741)
+# are excluded on purpose: the codebase uses them intentionally, and enforcing them
+# would be repo-wide churn with no correctness gain.
 target-version = "py311"
 
 [lint]
-select = ["E9", "F", "B", "PLE"]
+select = ["E4", "E7", "E9", "F", "B", "PLE"]
+ignore = ["E701", "E702", "E703", "E731", "E741"]

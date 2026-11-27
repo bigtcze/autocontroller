@@ -10,7 +10,7 @@ from unittest.mock import patch
 DIR=Path(__file__).resolve().parents[1]
 spec=importlib.util.spec_from_file_location('controller_releases', DIR/'autonomy-controller.py')
 ctl=importlib.util.module_from_spec(spec);spec.loader.exec_module(ctl)
-import release_policy as rp
+import release_policy as rp  # noqa: E402  (follows the controller module load above)
 
 SHA='a'*40
 OLD='b'*40

@@ -48,7 +48,8 @@ Requires `python3` ≥ 3.11, `bash` and `git`. Fully offline.
 ```sh
 mise run ci                  # syntax + Ruff lint + full offline regression suite
 mise run lint                # Ruff only (pinned in mise.toml; dev/CI only, not a runtime dependency)
-# equivalent without mise:
+# without mise: syntax and tests only; Ruff lint needs `mise run lint` or a pinned ruff.
+# The first mise tool install needs network; the offline guarantee applies to the test suite.
 bash scripts/check-syntax.sh
 bash scripts/offline-tests.sh
 ```
