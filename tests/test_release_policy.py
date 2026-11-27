@@ -202,6 +202,7 @@ class ControllerReleaseTests(unittest.TestCase):
         self.assertEqual(ctl.json_read(self.w.cycle_state)['phase'],'release-publish')
         notices=ctl.json_read(self.w.notices_file)
         self.assertIn("does not exist", notices['release-blocked:v1.2.5']['message'])
+        self.assertIn("create label 'release-blocker' in org/demo if it is missing", notices['release-blocked:v1.2.5']['message'])
     def test_verify_waits_for_artifacts(self):
         cp={'kind':'maintenance','number':0,'url':'v1.2.5','phase':'release-verify',
             'release_tag':'v1.2.5','release_sha':SHA,'previous_release_tag':'v1.2.4'}

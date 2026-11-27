@@ -152,6 +152,11 @@ class ReleaseBlockerLabelTests(unittest.TestCase):
             o.ensure_release_blocker_label('org/demo')
         run.assert_not_called()
 
+    def test_case_variant_label_is_refused_not_created_or_edited(self):
+        with patch.object(o.c,'gh_api_pages',return_value=[{'name':'Release-Blocker'}]),patch.object(o,'run') as run:
+            with self.assertRaisesRegex(ValueError,"rename it to 'release-blocker'"):o.ensure_release_blocker_label('org/demo')
+        run.assert_not_called()
+
     def test_similar_label_name_does_not_count_as_existing(self):
         with patch.object(o.c,'gh_api_pages',return_value=[{'name':'release-blockers'}]),patch.object(o,'run') as run:
             o.ensure_release_blocker_label('org/demo')

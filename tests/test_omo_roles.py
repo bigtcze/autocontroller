@@ -80,6 +80,7 @@ class FollowUpIssueContract(unittest.TestCase):
         p = mod.work_prompt('org/project', 'issue', 42, ISSUE_URL, blocker_label='ship-blocker', **PROJECT)
         self.assertIn('created with label `ship-blocker`', p)
         self.assertIn('the label is not authorization', p)
+        self.assertIn('If that label does not exist, report it as a blocker; never create or edit labels.', p)
         self.assertNotIn('`release-blocker`', p)
         default = mod.work_prompt('org/project', 'issue', 42, ISSUE_URL, **PROJECT)
         self.assertIn('created with label `release-blocker`', default)

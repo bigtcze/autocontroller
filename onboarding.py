@@ -300,6 +300,9 @@ def ensure_release_blocker_label(repo):
     """Create the release-blocker label only when absent; an existing label is never modified."""
     labels=c.gh_api_pages(f'repos/{repo}/labels?per_page=100')
     if any(isinstance(x,dict) and x.get('name')==releases.RELEASE_BLOCKER_LABEL for x in labels): return
+    # A look-alike label (different case) is not created: the owner must rename it, or the gate would never match.
+    if any(isinstance(x,dict) and str(x.get('name','')).lower()==releases.RELEASE_BLOCKER_LABEL.lower() for x in labels):
+        raise ValueError(f"Label '{releases.RELEASE_BLOCKER_LABEL}' is needed but a differently cased label exists in {repo}; rename it to '{releases.RELEASE_BLOCKER_LABEL}' and rerun onboarding")
     run('gh','label','create',releases.RELEASE_BLOCKER_LABEL,'--repo',repo,'--color','B60205','--description','Blocks stable release qualification')
 
 
@@ -386,7 +389,7 @@ def onboard(url=None):
         warn_if_not_enforced(existing)
         print('Repository already configured. Resuming service.'); run('systemctl','--user','enable','--now','autocontroller.service'); return
     # Show the material authorization once, before any remote mutation.
-    print(f'AutoController will clone {requested}, create a dedicated GitHub Project, import open issues authored by the owner, members or collaborators, create a bootstrap issue, and autonomously run AI coding sessions and merge reviewed green PRs. Onboarding verifies that the default branch requires the \'required\' status check and adds a ruleset only with separate consent. Existing branch protection is never weakened. An empty repository will receive a minimal first commit. AI and CI can incur costs.')
+    print(f'AutoController will clone {requested}, create a dedicated GitHub Project, import open issues authored by the owner, members or collaborators, create a bootstrap issue, and autonomously run AI coding sessions and merge reviewed green PRs. Onboarding verifies that the default branch requires the \'required\' status check and adds a ruleset only with separate consent. Onboarding also creates the `release-blocker` label if it is absent. Existing branch protection is never weakened. An empty repository will receive a minimal first commit. AI and CI can incur costs.')
     if input('Enable autonomous development? [y/N] ').strip().lower() not in ('y','yes'): raise ValueError('Setup cancelled; no repository mutation performed.')
     info,repo,branch,method=repo_details(requested)
     if any(x['repo'].lower()==repo.lower() for x in config['projects']): raise ValueError('Repository already configured under canonical identity')
