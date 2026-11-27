@@ -382,6 +382,7 @@ class RunnerSemanticsTests(TempDirTest):
     def test_empty_report_is_failed(self):
         self.assertEqual(runner.Report(distro='debian-13').to_dict()['overall'], 'failed')
 
+
 class HarnessWiringTests(unittest.TestCase):
     def test_only_the_final_collect_step_is_flagged_and_it_is_last(self):
         steps = harness.steps()

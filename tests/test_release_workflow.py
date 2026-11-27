@@ -16,7 +16,7 @@ IMAGES = ('debian:12', 'debian:13', 'ubuntu:24.04', 'ubuntu:26.04')
 
 
 def job_keys(text):
-    return re.findall(r'(?m)^  ([a-z-]+):$', text.split('\njobs:\n', 1)[1])
+    return re.findall(r'(?m)^  ([A-Za-z0-9_-]+):$', text.split('\njobs:\n', 1)[1])
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
@@ -87,6 +87,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         block = job_block(self.text, 'publish')
         self.assertIn('needs.artifacts.outputs.sha256', block)
         self.assertIn('release_artifacts.py build', block)
+        self.assertIn('[[ "$actual" != "$EXPECTED_SHA256" ]]', block)
 
     def test_publish_job_scopes_are_exactly_contents_write_and_issues_read(self):
         # N2: the blocker re-check reads Issues, so publish needs issues: read; nothing broader.

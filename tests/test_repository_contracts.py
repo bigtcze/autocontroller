@@ -187,6 +187,7 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn('DISTRO: ${{ matrix.distro }}', env_part)
         self.assertNotIn('${{', run_part, 'run: must not interpolate expressions directly')
         self.assertIn('"$DISTRO"', run_part)
+        self.assertIn('python3 -m vmtest.harness run', run_part)
 
     def test_vm_lifecycle_checkout_does_not_persist_credentials(self):
         block = job_block(workflow_text('vm-lifecycle.yml'), 'vm')
