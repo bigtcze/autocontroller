@@ -5,6 +5,7 @@ import importlib.util
 import json
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -29,6 +30,7 @@ class Gates(unittest.TestCase):
         self.item={'number':11,'status':'In Progress','item_id':'item','url':URL}
         self.agent_calls=[]
         self.merge_calls=[]
+        self.merge_rejects=None  # optional callable(pr): may mutate self.pr, then raise
         self.agent_output=(0,'Orchestrator: fixer completed; oracle reviewed, no blockers')
 
     def stage(self, phase, **extra):
@@ -36,9 +38,10 @@ class Gates(unittest.TestCase):
             'pr_number':21,'retry_same_task':True,**extra}
         self.w.save_checkpoint(cp)
 
-    def patches(self,ci='passed',main='passed'):
+    def patches(self,ci='passed',main='passed',real_related=False):
         stack=ExitStack();self.addCleanup(stack.close)
-        stack.enter_context(patch.object(self.w,'related_pr',side_effect=lambda *a:dict(self.pr)))
+        if not real_related:
+            stack.enter_context(patch.object(self.w,'related_pr',side_effect=lambda *a:dict(self.pr)))
         stack.enter_context(patch.object(m,'pr_data',side_effect=lambda *a:dict(self.pr)))
         def fake_agent(prompt,kind,number,**kw):
             self.agent_calls.append((prompt,kw))
@@ -49,6 +52,8 @@ class Gates(unittest.TestCase):
         def fake_command(argv,**kwargs):
             if argv[:3]==['gh','pr','merge']:
                 self.merge_calls.append(argv)
+                if self.merge_rejects:
+                    self.merge_rejects(self.pr)
                 self.pr.update(state='closed',merged_at='2026-11-24T10:00:00Z',merge_commit_sha=MERGE)
             return ''
         stack.enter_context(patch.object(m,'command',side_effect=fake_command))
@@ -220,5 +225,176 @@ class Gates(unittest.TestCase):
             self.assertEqual(m.pr_ci_state('org/demo',21),'failed')
         with patch.object(m.subprocess,'run',return_value=run([{'name':'required','bucket':'pass'},{'name':'lint','bucket':'pass'}])):
             self.assertEqual(m.pr_ci_state('org/demo',21),'passed')
+
+    def test_merge_behind_base_returns_to_omo_reconciliation_not_retry_loop(self):
+        self.stage('merge',ready_sha=SHA);self.pr['mergeable_state']='behind';self.patches()
+        self.w._cycle('issue',11,URL,None)
+        cp=m.json_read(self.w.cycle_state)
+        self.assertEqual(cp['phase'],'code')
+        self.assertNotIn('ready_sha',cp)
+        self.assertEqual(cp['diverged_head'],SHA)
+        self.assertIn('behind',cp['review_feedback'])
+        self.assertIn('origin/main',cp['review_feedback'])
+        self.assertIn('`oracle`',cp['review_feedback'])
+        self.assertIn('Never force-push',cp['review_feedback'])
+        self.assertFalse(self.merge_calls)
+        self.assertEqual(self.agent_calls,[])
+        self.assertNotIn('issue:11',self.w.retry_map())
+
+    def test_ci_phase_conflicting_pr_returns_to_code_instead_of_pending(self):
+        self.stage('ci');self.pr['mergeable_state']='dirty';self.patches(ci='pending')
+        self.w._cycle('issue',11,URL,None)
+        cp=m.json_read(self.w.cycle_state)
+        self.assertEqual(cp['phase'],'code')
+        self.assertIn('merge conflict',cp['review_feedback'])
+        self.assertNotIn('ready_sha',cp)
+        self.assertFalse(self.merge_calls)
+        self.assertEqual(self.agent_calls,[])
+
+    def test_merge_race_behind_after_clean_precheck_routes_to_code(self):
+        def reject(pr):
+            pr['mergeable_state']='behind'
+            raise m.ControllerError('Pull request is not mergeable: base branch was modified')
+        self.stage('merge',ready_sha=SHA);self.pr['mergeable_state']='clean'
+        self.merge_rejects=reject;self.patches()
+        self.w._cycle('issue',11,URL,None)  # must not raise
+        cp=m.json_read(self.w.cycle_state)
+        self.assertEqual(cp['phase'],'code')
+        self.assertNotIn('ready_sha',cp)
+        self.assertIn('behind',cp['review_feedback'])
+        self.assertEqual(len(self.merge_calls),1)
+
+    def test_merge_race_without_divergence_keeps_ordinary_backoff(self):
+        for state in (None,'unknown','blocked'):
+            with self.subTest(state=state):
+                self.merge_calls.clear()
+                self.stage('merge',ready_sha=SHA);self.pr['mergeable_state']='clean'
+                def reject(pr,state=state):
+                    pr['mergeable_state']=state
+                    raise m.ControllerError('transient GitHub API failure')
+                self.merge_rejects=reject;self.patches()
+                with self.assertRaises(m.ControllerError) as ctx:
+                    self.w._cycle('issue',11,URL,None)
+                if state=='blocked':
+                    self.assertIn('not branch divergence',str(ctx.exception))
+                cp=m.json_read(self.w.cycle_state)
+                self.assertEqual((cp['phase'],cp['ready_sha']),('merge',SHA))
+                self.assertNotIn('diverged_head',cp)
+                self.assertEqual(self.agent_calls,[])
+
+    def test_recovered_new_head_requires_fresh_agent_review_and_ci(self):
+        new='c'*40
+        self.stage('merge',ready_sha=SHA);self.pr['mergeable_state']='behind';self.patches(ci='pending')
+        self.w._cycle('issue',11,URL,None)
+        self.assertEqual(m.json_read(self.w.cycle_state)['phase'],'code')
+        # The agent pushes a reconciled head; GitHub now reports it clean.
+        self.pr.update(head={'sha':new,'repo':{'full_name':'org/demo'}},mergeable_state='clean')
+        self.w._cycle('issue',11,URL,None)
+        self.assertEqual(len(self.agent_calls),1)
+        self.assertEqual(m.json_read(self.w.cycle_state)['phase'],'ci')
+        self.w._cycle('issue',11,URL,None)  # CI pending on the new head: no merge
+        self.assertEqual(m.json_read(self.w.cycle_state)['phase'],'ci')
+        self.assertEqual(self.merge_calls,[])
+        with patch.object(m,'pr_ci_state',return_value='passed'):
+            self.w._cycle('issue',11,URL,None)
+            self.assertEqual(m.json_read(self.w.cycle_state)['ready_sha'],new)
+            self.w._cycle('issue',11,URL,None)
+        self.assertEqual(self.merge_calls[0][-1],new)
+        self.assertIn('--match-head-commit',self.merge_calls[0])
+
+    def test_repair_pr_divergence_keeps_repair_linkage_not_merged_original(self):
+        repair={'number':22,'state':'open','merged_at':None,'draft':False,
+                'head':{'sha':'e'*40,'repo':{'full_name':'org/demo'}},
+                'base':{'ref':'main'},'merge_commit_sha':None,'mergeable_state':'dirty'}
+        self.pr.update(state='closed',merged_at='2026-11-24T10:00:00Z',merge_commit_sha=MERGE)
+        self.w.save_checkpoint({'kind':'issue','number':11,'url':URL,'phase':'ci',
+                                'pr_number':22,'repairing':True,'retry_same_task':True})
+        self.patches(real_related=True)
+        with patch.object(m,'pr_data',side_effect=lambda repo,n:dict(repair if n==22 else self.pr)):
+            with patch.object(m,'linked_issue_pr',return_value={'number':21}):
+                self.w._cycle('issue',11,URL,None)  # ci: dirty repair PR -> code
+                self.assertEqual(m.json_read(self.w.cycle_state)['phase'],'code')
+                self.w._cycle('issue',11,URL,None)  # code: agent works the repair PR, not PR #21
+        cp=m.json_read(self.w.cycle_state)
+        self.assertEqual((cp['phase'],cp['pr_number']),('ci',22))
+        self.assertEqual(len(self.agent_calls),1)
+        self.assertFalse(self.merge_calls)
+
+    def test_closed_unmerged_repair_pr_keeps_main_is_red_checkpoint(self):
+        closed_repair={'number':22,'state':'closed','merged_at':None,'draft':False,
+                       'head':{'sha':'e'*40,'repo':{'full_name':'org/demo'}},
+                       'base':{'ref':'main'},'merge_commit_sha':None}
+        self.pr.update(state='closed',merged_at='2026-11-24T10:00:00Z',merge_commit_sha=MERGE)
+        self.w.save_checkpoint({'kind':'issue','number':11,'url':URL,'phase':'ci',
+                                'pr_number':22,'repairing':True,'retry_same_task':True})
+        self.patches(real_related=True)
+        with patch.object(m,'pr_data',side_effect=lambda repo,n:dict(closed_repair if n==22 else self.pr)):
+            with patch.object(m,'linked_issue_pr',return_value={'number':21}):
+                self.w._cycle('issue',11,URL,None)  # ci: closed repair PR -> code, reopen feedback
+                cp=m.json_read(self.w.cycle_state)
+                self.assertEqual(cp['phase'],'code')
+                self.assertIn('Repair PR #22 was closed without merge; reopen it',cp['review_feedback'])
+                self.w._cycle('issue',11,URL,None)  # code: agent runs; PR still closed
+        self.assertEqual(len(self.agent_calls),1)
+        cp=m.json_read(self.w.cycle_state)
+        self.assertIsNotNone(cp,'main-is-red repair obligation must survive a closed repair PR')
+        self.assertEqual((cp['pr_number'],cp['repairing']),(22,True))
+        self.assertIn('issue:11',self.w.retry_map())
+        self.assertFalse(self.merge_calls)
+
+    def test_repair_agent_failure_keeps_main_is_red_checkpoint(self):
+        repair={'number':22,'state':'open','merged_at':None,'draft':False,
+                'head':{'sha':'e'*40,'repo':{'full_name':'org/demo'}},
+                'base':{'ref':'main'},'merge_commit_sha':None}
+        self.pr.update(state='closed',merged_at='2026-11-24T10:00:00Z',merge_commit_sha=MERGE)
+        self.w.save_checkpoint({'kind':'issue','number':11,'url':URL,'phase':'code',
+                                'pr_number':22,'repairing':True,'retry_same_task':True})
+        self.patches(real_related=True)
+        self.agent_output=(1,'boom')
+        with patch.object(m,'pr_data',side_effect=lambda repo,n:dict(repair if n==22 else self.pr)):
+            with patch.object(m,'linked_issue_pr',return_value={'number':21}):
+                self.w._cycle('issue',11,URL,None)
+        self.assertEqual(len(self.agent_calls),1)
+        cp=m.json_read(self.w.cycle_state)
+        self.assertIsNotNone(cp,'failed repair agent run must not discard the main-is-red obligation')
+        self.assertEqual((cp['pr_number'],cp['repairing']),(22,True))
+        self.assertIn('issue:11',self.w.retry_map())
+        self.assertFalse(self.merge_calls)
+
+    def test_merge_race_reread_failure_reports_both_errors(self):
+        def reject(pr):
+            raise m.ControllerError('merge rejected by GitHub')
+        self.stage('merge',ready_sha=SHA);self.pr['mergeable_state']='clean'
+        self.merge_rejects=reject;self.patches()
+        with patch.object(m,'pr_data',side_effect=m.ControllerError('re-read unavailable')):
+            with self.assertRaises(m.ControllerError) as ctx:
+                self.w._cycle('issue',11,URL,None)
+        self.assertIn('merge rejected by GitHub',str(ctx.exception))
+        self.assertIn('re-read unavailable',str(ctx.exception))
+        self.assertIn('merge rejected by GitHub',str(ctx.exception.__cause__))
+        self.assertEqual(m.json_read(self.w.cycle_state)['phase'],'merge')
+
+    def test_repeated_divergence_at_same_head_blocks_and_backs_off(self):
+        self.stage('merge',ready_sha=SHA,diverged_head=SHA)
+        self.pr['mergeable_state']='behind';self.patches()
+        before=time.time()
+        self.w._cycle('issue',11,URL,None)
+        cp=m.json_read(self.w.cycle_state)
+        self.assertEqual(cp['phase'],'code')
+        self.assertEqual(self.agent_calls,[])
+        self.assertFalse(self.merge_calls)
+        self.assertGreaterEqual(self.w.retry_map()['issue:11']['until'],before+3500)
+        notice=m.json_read(self.w.notices_file)['diverged-unresolved:issue:11']['message']
+        self.assertIn('BLOCKER',notice)
+        self.assertIn('still behind',notice)
+
+class BranchDivergenceTests(unittest.TestCase):
+    def test_only_explicit_behind_or_dirty_is_divergence(self):
+        self.assertEqual(m.branch_divergence({'mergeable_state':'behind'}),'behind')
+        self.assertEqual(m.branch_divergence({'mergeable_state':'DIRTY'}),'dirty')
+        for state in (None,'unknown','blocked','unstable','clean','has_hooks','draft'):
+            with self.subTest(state=state):
+                self.assertIsNone(m.branch_divergence({'mergeable_state':state}))
+        self.assertIsNone(m.branch_divergence({}))
 
 if __name__=='__main__':unittest.main()
