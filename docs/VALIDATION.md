@@ -92,6 +92,7 @@ Release-specific qualification status and evidence are tracked in the GitHub rel
 - Enroll a second repo while the first has in-flight work; ensure checkpoints resume and memory scopes never mix. Verify routine task, Renovate, idle no AI calls, real learned entry and confirmed reuse. Verify memory fail-closed runtime behavior and recovery, and Engram boot update with safe rollback.
 - Verify release authorization, actual artifact expectations, project permissions/SSO and failure messages; run a clean unattended reboot and check GitHub state. Test package-source paths, proxy restrictions, shell PATH, externally managed OpenCode service, and systemd user environment on each target.
 - Review privacy, safety, supply chain, dependency and license provenance before publishing. No uncontrolled self-update of controller code. No credentials, runtime config, state, logs or personal paths in repository.
+- Outdated or conflicting PRs (GitHub `mergeable_state` `behind`/`dirty`, and the precedence of divergence over `blocked`): recovery is simulated only in `tests/test_quality_gates.py`. Confirm against a live strictly protected repository that the merge refusal and `mergeable_state` values match, and that the agent reconciles the existing branch without a duplicate PR.
 
 ## Current known limitations
 

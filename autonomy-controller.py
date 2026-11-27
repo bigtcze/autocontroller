@@ -312,12 +312,16 @@ def pr_data(repo: str, number: int) -> dict:
     return data
 
 
+def mergeable_state(pr: dict) -> str:
+    return str(pr.get("mergeable_state") or "").lower()
+
+
 def branch_divergence(pr: dict) -> str | None:
     """Only GitHub's explicit 'behind' or 'dirty' states prove base divergence.
 
     'unknown' (not computed yet) and every other state are NOT divergence.
     """
-    state = str(pr.get("mergeable_state") or "").lower()
+    state = mergeable_state(pr)
     return state if state in ("behind", "dirty") else None
 
 
@@ -1257,6 +1261,10 @@ class ProjectWorker:
         # additional post-merge repair PRs), not whichever PR appears newest.
         if checkpoint.get("phase") in ("ci", "merge", "postmerge", "release-approval", "release-publish", "release-verify") and checkpoint.get("pr_number"):
             return pr_data(self.repo, int(checkpoint["pr_number"]))
+        # A red-main repair must stay on its repair PR in every phase; the
+        # original Issue linkage points at the already-merged, failing PR.
+        if checkpoint.get("repairing") and checkpoint.get("pr_number") and kind != "renovate":
+            return pr_data(self.repo, int(checkpoint["pr_number"]))
         if kind == "renovate":
             return pr_data(self.repo, number)
         if kind == "maintenance":
@@ -1630,14 +1638,19 @@ class ProjectWorker:
                 # Re-read before deciding; otherwise keep the ordinary backoff.
                 # A merge that GitHub actually applied (lost response) is left
                 # to the merged-PR recovery on the next cycle.
-                live=pr_data(self.repo,pr["number"])
+                try:
+                    live=pr_data(self.repo,pr["number"])
+                except ControllerError as reread:
+                    raise ControllerError(
+                        f"merge of PR #{pr['number']} failed ({exc}); re-read also failed ({reread})"
+                    ) from exc
                 if not live.get("merged_at"):
                     if str((live.get("head") or {}).get("sha") or "") != sha:
                         self.route_new_head(checkpoint)
                         return
                     if self.route_divergence(checkpoint,live,key):
                         return
-                    if str(live.get("mergeable_state") or "").lower()=="blocked":
+                    if mergeable_state(live)=="blocked":
                         raise ControllerError(
                             f"PR #{pr['number']} merge blocked by review or branch protection, not branch divergence"
                         ) from exc

@@ -38,9 +38,10 @@ class Gates(unittest.TestCase):
             'pr_number':21,'retry_same_task':True,**extra}
         self.w.save_checkpoint(cp)
 
-    def patches(self,ci='passed',main='passed'):
+    def patches(self,ci='passed',main='passed',real_related=False):
         stack=ExitStack();self.addCleanup(stack.close)
-        stack.enter_context(patch.object(self.w,'related_pr',side_effect=lambda *a:dict(self.pr)))
+        if not real_related:
+            stack.enter_context(patch.object(self.w,'related_pr',side_effect=lambda *a:dict(self.pr)))
         stack.enter_context(patch.object(m,'pr_data',side_effect=lambda *a:dict(self.pr)))
         def fake_agent(prompt,kind,number,**kw):
             self.agent_calls.append((prompt,kw))
@@ -300,6 +301,37 @@ class Gates(unittest.TestCase):
             self.w._cycle('issue',11,URL,None)
         self.assertEqual(self.merge_calls[0][-1],new)
         self.assertIn('--match-head-commit',self.merge_calls[0])
+
+    def test_repair_pr_divergence_keeps_repair_linkage_not_merged_original(self):
+        repair={'number':22,'state':'open','merged_at':None,'draft':False,
+                'head':{'sha':'e'*40,'repo':{'full_name':'org/demo'}},
+                'base':{'ref':'main'},'merge_commit_sha':None,'mergeable_state':'dirty'}
+        self.pr.update(state='closed',merged_at='2026-11-24T10:00:00Z',merge_commit_sha=MERGE)
+        self.w.save_checkpoint({'kind':'issue','number':11,'url':URL,'phase':'ci',
+                                'pr_number':22,'repairing':True,'retry_same_task':True})
+        self.patches(real_related=True)
+        with patch.object(m,'pr_data',side_effect=lambda repo,n:dict(repair if n==22 else self.pr)):
+            with patch.object(m,'linked_issue_pr',return_value={'number':21}):
+                self.w._cycle('issue',11,URL,None)  # ci: dirty repair PR -> code
+                self.assertEqual(m.json_read(self.w.cycle_state)['phase'],'code')
+                self.w._cycle('issue',11,URL,None)  # code: agent works the repair PR, not PR #21
+        cp=m.json_read(self.w.cycle_state)
+        self.assertEqual((cp['phase'],cp['pr_number']),('ci',22))
+        self.assertEqual(len(self.agent_calls),1)
+        self.assertFalse(self.merge_calls)
+
+    def test_merge_race_reread_failure_reports_both_errors(self):
+        def reject(pr):
+            raise m.ControllerError('merge rejected by GitHub')
+        self.stage('merge',ready_sha=SHA);self.pr['mergeable_state']='clean'
+        self.merge_rejects=reject;self.patches()
+        with patch.object(m,'pr_data',side_effect=m.ControllerError('re-read unavailable')):
+            with self.assertRaises(m.ControllerError) as ctx:
+                self.w._cycle('issue',11,URL,None)
+        self.assertIn('merge rejected by GitHub',str(ctx.exception))
+        self.assertIn('re-read unavailable',str(ctx.exception))
+        self.assertIn('merge rejected by GitHub',str(ctx.exception.__cause__))
+        self.assertEqual(m.json_read(self.w.cycle_state)['phase'],'merge')
 
     def test_repeated_divergence_at_same_head_blocks_and_backs_off(self):
         self.stage('merge',ready_sha=SHA,diverged_head=SHA)
