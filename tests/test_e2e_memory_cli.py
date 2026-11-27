@@ -240,8 +240,8 @@ class MemoryCliMetricsTests(MemoryCliBase):
         beta = 'example-owner/beta'
         self.world.add_project('alpha', R, 1)
         self.world.add_project('beta', beta, 2)
-        issue_a = self.gh.add_issue(R, title='Alpha bug', body='x', project='example-owner/1', status='Todo')
-        issue_b = self.gh.add_issue(beta, title='Beta bug', body='y', project='example-owner/2', status='Todo')
+        issue_a = self.gh.add_issue(R, title='Alpha bug', body='x', project='example-owner/1', status='Backlog')
+        issue_b = self.gh.add_issue(beta, title='Beta bug', body='y', project='example-owner/2', status='Backlog')
         lesson = {'title': 'Verify cwd before edits', 'trigger': 'working directory mismatch before edit',
                   'lesson': 'Verify the working directory before modifying files.',
                   'proof': 'Reproduced the wrong cwd and verified the corrected path.',

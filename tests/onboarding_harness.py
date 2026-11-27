@@ -27,7 +27,7 @@ ORG = 'example-org'
 USER_ID = 1001
 BOT = {'login': 'renovate[bot]', 'type': 'Bot', 'id': 29139614}
 ROOT_FILES = ('onboarding.py', 'autonomy-controller.py', 'bootstrap_policy.py',
-              'release_policy.py', 'release_artifacts.py', 'lifecycle.py', 'memory.py', 'followup.py',
+              'release_policy.py', 'release_artifacts.py', 'lifecycle.py', 'memory.py',
               'config.example.json')
 TIMEOUT = 120
 
