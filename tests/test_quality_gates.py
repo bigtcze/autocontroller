@@ -195,6 +195,28 @@ class Gates(unittest.TestCase):
         self.assertIn('Autocontroller-Repair-For: #21',self.agent_calls[0][0])
         self.assertIn('`oracle`',self.agent_calls[0][0])
 
+    def test_reopened_issue_repair_checkpoint_stays_on_exact_repair_linkage(self):
+        # PR #21 merged and main CI failed; the Issue was reopened afterwards. The
+        # repair phase must keep resolving the merged PR #21 by its exact number, not
+        # treat it as historical (which would leave the repair gate with no PR to find).
+        self.pr.update(number=21,state='closed',merged_at='2026-11-26T21:11:46Z',merge_commit_sha=MERGE)
+        nodes=[self._closing_node(21,'MERGED','2026-11-26T21:11:46Z')]
+        repair={'number':22,'state':'open','merged_at':None,'draft':False,
+                'head':{'sha':'e'*40,'repo':{'full_name':'org/demo'}},
+                'base':{'ref':'main'},'merge_commit_sha':None,'mergeable_state':'clean'}
+        self.w.save_checkpoint({'kind':'issue','number':11,'url':URL,'phase':'repair',
+                                'pr_number':21,'review_feedback':'Fix failing main CI','retry_same_task':True})
+        self.patches(real_related=True)
+        with self._linked_graph(nodes,reopened_at='2026-11-26T21:28:31Z'), \
+             patch.object(m,'issue_state',return_value='open'), \
+             patch.object(m,'repair_pr',return_value=repair), \
+             patch.object(m,'pr_data',side_effect=lambda repo,n:dict(repair if n==22 else self.pr)):
+            self.w._cycle('issue',11,URL,None)
+        self.assertEqual(len(self.agent_calls),1)
+        self.assertIn('Autocontroller-Repair-For: #21',self.agent_calls[0][0])
+        cp=m.json_read(self.w.cycle_state)
+        self.assertEqual((cp['phase'],cp['pr_number'],cp['repairing']),('ci',22,True))
+
     def test_old_completed_review_merge_checkpoint_still_recovers(self):
         self.stage('merge',reviewed_sha=SHA)  # before migration: independent gate was completed
         self.patches()
@@ -360,6 +382,82 @@ class Gates(unittest.TestCase):
         self.assertEqual((cp['pr_number'],cp['repairing']),(22,True))
         self.assertIn('issue:11',self.w.retry_map())
         self.assertFalse(self.merge_calls)
+
+    def _linked_graph(self, nodes, reopened_at=None):
+        """GraphQL linkage for Issue #11 with the real parser (only gh_json is faked)."""
+        timeline={'totalCount':0,'nodes':[]}
+        if reopened_at:
+            timeline={'totalCount':1,'nodes':[{'createdAt':reopened_at}]}
+        graph={'data':{'repository':{'issue':{'timelineItems':timeline,
+               'closedByPullRequestsReferences':{'nodes':nodes,'pageInfo':{'hasNextPage':False}}}}}}
+        return patch.object(m,'gh_json',side_effect=lambda *a,**k: graph if 'graphql' in a else {})
+
+    @staticmethod
+    def _closing_node(number,state,merged_at=None):
+        return {'number':number,'url':f'https://github.com/org/demo/pull/{number}','state':state,
+                'mergedAt':merged_at,'headRefOid':SHA,'baseRefName':'main','isCrossRepository':False,
+                'headRepository':{'nameWithOwner':'org/demo'},'mergeCommit':None}
+
+    def test_reopened_issue_historical_merged_pr_runs_fresh_agent(self):
+        # Issue #19 / PR #26 merged, Issue reopened later, revert #27 not linked: a new attempt.
+        self.pr.update(number=26,state='closed',merged_at='2026-11-26T21:11:46Z',merge_commit_sha=MERGE)
+        nodes=[self._closing_node(26,'MERGED','2026-11-26T21:11:46Z')]
+        self.patches(real_related=True)
+        with self._linked_graph(nodes,reopened_at='2026-11-26T21:28:31Z'), \
+             patch.object(m,'issue_state',return_value='open'):
+            self.w._cycle('issue',11,URL,None)
+        self.assertEqual(len(self.agent_calls),1)
+        self.assertIn('Native OMO Slim',self.agent_calls[0][0])
+        # The fake agent opens no PR, so the ordinary post-agent check (not the historical merge error) applies.
+        self.assertIn('No open linked PR',self.w.retry_map()['issue:11']['reason'])
+        self.assertFalse(self.merge_calls)
+
+    def test_reopened_issue_replacement_pr_goes_through_normal_ci_gate(self):
+        replacement={'number':40,'state':'open','merged_at':None,'draft':False,
+                     'head':{'sha':'e'*40,'repo':{'full_name':'org/demo'}},
+                     'base':{'ref':'main'},'merge_commit_sha':None,'mergeable_state':'clean'}
+        nodes=[self._closing_node(26,'MERGED','2026-11-26T21:11:46Z'),self._closing_node(40,'OPEN')]
+        self.patches(real_related=True)
+        with self._linked_graph(nodes,reopened_at='2026-11-26T21:28:31Z'), \
+             patch.object(m,'issue_state',return_value='open'), \
+             patch.object(m,'pr_data',side_effect=lambda repo,n:dict(replacement if n==40 else self.pr)):
+            self.w._cycle('issue',11,URL,None)
+        cp=m.json_read(self.w.cycle_state)
+        self.assertEqual((cp['phase'],cp['pr_number']),('ci',40))
+        self.assertEqual(len(self.agent_calls),1)
+        self.assertFalse(self.merge_calls)
+
+    def test_reopened_issue_restart_from_persisted_code_checkpoint_runs_agent(self):
+        # A checkpoint persisted by earlier failed attempts must resume a normal agent run.
+        self.pr.update(number=26,state='closed',merged_at='2026-11-26T21:11:46Z',merge_commit_sha=MERGE)
+        self.w.save_checkpoint({'kind':'issue','number':11,'url':URL,'phase':'code',
+                                'started':0,'review_feedback':'previous attempt failed'})
+        nodes=[self._closing_node(26,'MERGED','2026-11-26T21:11:46Z')]
+        self.patches(real_related=True)
+        with self._linked_graph(nodes,reopened_at='2026-11-26T21:28:31Z'), \
+             patch.object(m,'issue_state',return_value='open'):
+            self.w._cycle('issue',11,URL,None)
+        self.assertEqual(len(self.agent_calls),1)
+        self.assertIn('No open linked PR',self.w.retry_map()['issue:11']['reason'])
+
+    def test_external_merge_during_current_attempt_still_raises(self):
+        # Merged AFTER the latest reopen: never retrofit a merge that bypassed the CI gate.
+        self.pr.update(number=26,state='closed',merged_at='2026-11-26T22:05:00Z',merge_commit_sha=MERGE)
+        nodes=[self._closing_node(26,'MERGED','2026-11-26T22:05:00Z')]
+        self.patches(real_related=True)
+        with self._linked_graph(nodes,reopened_at='2026-11-26T21:28:31Z'):
+            with self.assertRaisesRegex(m.ControllerError,'already merged before controller'):
+                self.w._cycle('issue',11,URL,None)
+        self.assertEqual(self.agent_calls,[])
+
+    def test_never_reopened_merged_pr_still_raises(self):
+        self.pr.update(number=26,state='closed',merged_at='2026-11-26T21:11:46Z',merge_commit_sha=MERGE)
+        nodes=[self._closing_node(26,'MERGED','2026-11-26T21:11:46Z')]
+        self.patches(real_related=True)
+        with self._linked_graph(nodes):
+            with self.assertRaisesRegex(m.ControllerError,'already merged before controller'):
+                self.w._cycle('issue',11,URL,None)
+        self.assertEqual(self.agent_calls,[])
 
     def test_merge_race_reread_failure_reports_both_errors(self):
         def reject(pr):

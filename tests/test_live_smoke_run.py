@@ -75,8 +75,8 @@ if argv[:1] == ['api'] and any('issues/' in a for a in argv) and 'graphql' not i
     print(json.dumps({'state': 'open', 'number': doc['issue']})); sys.exit(0)
 if argv[:2] == ['api', 'graphql']:
     nodes = doc.get('pr_nodes', [])
-    print(json.dumps({'data': {'repository': {'issue': {'closedByPullRequestsReferences': {
-        'nodes': nodes, 'pageInfo': {'hasNextPage': False}}}}}})); sys.exit(0)
+    print(json.dumps({'data': {'repository': {'issue': {'timelineItems': {'totalCount': 0, 'nodes': []},
+        'closedByPullRequestsReferences': {'nodes': nodes, 'pageInfo': {'hasNextPage': False}}}}}})); sys.exit(0)
 if argv[:1] == ['api'] and 'actions/workflows' in ' '.join(argv):
     print(json.dumps({'workflow_runs': doc.get('runs', [])})); sys.exit(0)
 fail(f'unmodelled gh call: {argv}', 97)
