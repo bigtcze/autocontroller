@@ -47,8 +47,9 @@ rm -rf -- "$H"
 | `tests/e2e_world.py` | Disposable world: temp state, bare remotes, real git clones, transport patch, memory socket guard, external-access guard. `World(tmp, real_wrapper=True)` selects the real wrapper; `E2E_ENGRAM_BINARY` selects the Engram binary |
 | `tests/e2e_github.py` | Stateful, multi-repo, thread-safe **GitHub service double** patched at the `gh` argv level (loaded from `autonomy-controller.py` by path) |
 | `tests/e2e_agent.py` | **Scripted step engine** (`perform_step`), shared by the scripted wrapper double and the fake OpenCode. Learning operations go through the real `memory.cli()` launcher |
-| `tests/e2e_real_wrapper.py` | Launcher that loads `opencode-project-safe.py` by path and runs its `main()`. Only settle timing is shortened: `QUIET_SECONDS=0` and `time.sleep` capped at 0.05 s |
-| `tests/e2e_opencode.py` | **Fake OpenCode V2 CLI** used only by the real wrapper: `api` discovery, session list/get, interrupt, `run --title`, `run --session`. `GET /api/session/active` always returns an empty list, so no session is ever active. Unmodelled forms exit 97 |
+| `tests/e2e_real_wrapper.py` | Launcher that loads `opencode-project-safe.py` by path and runs its `main()`. Only settle timing is shortened: `QUIET_SECONDS=0`, `time.sleep` capped at 0.05 s, and the `--interrupt-owned` drain deadline (`INTERRUPT_DRAIN_SECONDS`, 30 s in the product) set to 2 s |
+| `tests/e2e_opencode.py` | **Fake OpenCode V2 CLI** used only by the real wrapper: `api` discovery, session list/get, interrupt, `run --title`, `run --session`, and a stateful active-session model (owned root, nested descendants, foreign roots, poll-driven lifetimes, interrupts, persisted API faults). Unmodelled forms exit 97 |
+| `tests/test_e2e_active_sessions.py` | 15 tests on the real wrapper and real controller for owned-root adoption, descendant settling, interruption and restart, foreign and ambiguous refusal, API outage and `--interrupt-owned`. Described in the "Wrapper active-session paths" row below |
 | `tests/e2e_memory_cli.py` | Launcher that imports `memory` from the repository root and calls the real `memory.cli()`. Only `memory.ROOT` and `memory.socket_path` are redirected; it refuses an unset socket or one under `/run/user/` |
 | `tests/e2e_engram_standin.py` | **Engram stand-in** (not upstream Engram; the default backend): a SQLite-backed HTTP-over-Unix-socket server launched via the real `memory.Runtime.start_process` |
 
@@ -117,7 +118,7 @@ against a live service by the offline suite.
 | Real safe wrapper `opencode-project-safe.py` | Real code, fake OpenCode | `RealWrapperBase` tests run the real wrapper unchanged (settle timing shortened only, see `tests/e2e_real_wrapper.py`) against the fake OpenCode V2 CLI | A real OpenCode server and model run through the wrapper (the live smoke) |
 | Learning CLI `memory.cli()` | Real code, two seams redirected | `tests/e2e_memory_cli.py` runs the real `memory.cli()` in a subprocess. Only `memory.ROOT` (the world temp dir) and `memory.socket_path()` (the private stand-in socket) are redirected. Grant shape, token check, selection refusal, `failure` marker, stdin caps, JSON-object check, `operation()` budgets and `metrics.json` counters run unchanged inside `memory.cli()`. The launcher reproduces memory.py's `__main__` exception-to-exit mapping (MemoryError, ValueError, KeyError, TypeError, OSError → message on stderr, exit 1); memory.py's own `__main__` block and its `--health` path are not exercised | Live Engram behaviour (see the next row) |
 | Engram backend | Stand-in by default; upstream binary when opted in | Default: `tests/e2e_engram_standin.py`, a SQLite-backed stand-in, launched through the real `memory.Runtime.start_process`. With `E2E_ENGRAM_BINARY` set, a copy of that binary is launched through the same path instead. `EngramBackendIdentityTests` records which backend answered (`service`, `status`, `version`) and, with a binary, asserts the version is not the stand-in's and matches `E2E_ENGRAM_VERSION`, which is then required. The real download is refused (`Runtime.download`) | Real-binary run: on 2026-11-26 the full `scripts/offline-tests.sh` passed locally with `E2E_ENGRAM_BINARY` naming a copy of upstream Engram v3.7.2 `linux_amd64` (checksum verified against upstream `checksums.txt`). This was a manual run, and CI uses the stand-in; the evidence is on PR #17. The VM suite is the other real-binary check: `vmtest/runner.py` lists "Engram release binary downloaded from GitHub by memory.py (checksum verified)", run by `.github/workflows/vm-lifecycle.yml`; see `docs/VM_TESTING.md` |
-| Wrapper active-session paths | **NOT exercised** | The fake OpenCode and `tests/test_wrapper_recovery.py` both report `/api/session/active` as empty, so the wrapper's active-session paths never run: the settle loop while sessions are active, descendant re-reconciliation, adopting or interrupting an active owned session, and refusing a concurrent root session. This gap is inherited by `test_wrapper_recovery.py`, which hard-codes the same empty list | Live OpenCode, or a fake that models active and descendant sessions (not in this PR) |
+| Wrapper active-session paths | `tests/test_e2e_active_sessions.py` (15 tests) through the real `opencode-project-safe.py` and the real controller: the settle loop waiting on nested descendants and then on a late one; exactly one recovery turn plus one more for a descendant spawned during it; no second root; checkpoint and marker kept across a cycle-timeout kill (rc 124); restart adopting the same root (`Adopted interrupted active cycle`); no new selection until verified merge; foreign root refused, never interrupted; a foreign root alongside the adopted root, refused by settle (seeded before the run, not appearing mid-settle); a marker whose root differs from the active root; duplicate-title and legacy-two-root ambiguity; an active session in another directory does not block a new run; `--checkpoint` rc 2 when ambiguous and checkpointing a single root; API down during settle (exit 78, marker kept) and after recovery; `--interrupt-owned` root-first, descendants included, foreign untouched, ignored interrupt and API outage both fail closed; live previous guard refuses recovery | **Simulated.** The fake's active lifetimes are poll counts and interrupts take effect at once. The live OpenCode server, real subagent timing and real interrupt delivery are not verified. `tests/test_wrapper_recovery.py` still hard-codes the empty list and is not changed by this PR |
 | Memory `failure` marker | Real code | `memory.cli()` refuses with `Memory blocked` when `<state>/memory/failure` exists, and a dead backend's `MemoryError` creates it (`MemoryCliFailureTests`). The E2E controller also checks it through `memory_gate` → `runtime.check()` | None beyond the live Engram row |
 
 ### Real-Engram run (opt-in, owner or CI)
@@ -430,10 +431,19 @@ evidence.
 - The real safe wrapper runs for real in the `RealWrapper*` tests, but its OpenCode
   is the fake V2 CLI. Only its settle timing is shortened. The real OpenCode server and
   model are not used.
-- The fake OpenCode never reports an active session. The wrapper's active-session paths
-  (the settle loop with active sessions, descendant re-reconciliation, adopting or
-  interrupting an active owned session, refusing a concurrent root session) are not
-  exercised by the E2E suite or by `tests/test_wrapper_recovery.py`.
+- The active-session model in the fake OpenCode is deterministic: a session is active for a
+  fixed number of `GET /api/session/active` polls, or until interrupted. Real OpenCode timing,
+  real subagent durations and real interrupt delivery are NOT simulated and need the live
+  sandbox. `tests/test_e2e_active_sessions.py` proves the wrapper's and controller's decisions
+  against that model only.
+- The active-session tests shorten two product timings in the launcher: the settle quiet period
+  (`QUIET_SECONDS=0`) and the `--interrupt-owned` drain deadline (2 s instead of 30 s). The
+  deadline logic is the real one; only its length is shortened.
+- `previous_guard_alive` checks a live pid whose `/proc/<pid>/cmdline` contains
+  `opencode-project-safe`. The E2E test uses a stand-in process with that text in its argv. It
+  does not prove the real launcher's cmdline, which is only verified on a live host.
+- `tests/test_wrapper_recovery.py` still hard-codes an empty active list and is not changed by
+  this work.
 - The worker `run()` outage test (`WorkerRunLoopOutageTests`) sets `worker._validated = True`.
   The E2E checkouts sit outside `DEFAULT_ROOT`, so `validate()` would reject them. That
   test therefore does NOT cover checkout validation. The outage alone drives the

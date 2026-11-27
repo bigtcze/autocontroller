@@ -6,20 +6,36 @@ sys.executable. The real `opencode-project-safe.py` (started via tests/e2e_real_
 talks to it exactly as it would talk to OpenCode V2:
 
 - `api GET /api/info` -> {"data": {"version": "2.0.0"}}
-- `api GET /api/session/active` -> {"data": {}}: sessions run synchronously here, so none are active
+- `api GET /api/session/active` -> {"data": {<id>: {...}}}: the sessions whose active lifetime is
+  not over. Each call reports the current set and then advances every lifetime by one poll under
+  the same lock (`active_polls`: N > 0 = active for N more polls, -1 = active until interrupted,
+  0 = inactive). Every call is logged as an `active_poll` row with the ids it returned.
 - `api GET /api/session` -> list of sessions
 - `api GET /api/session/<id>` -> session, or exit 1 with "404" on stderr when unknown
-- `api POST /api/session/<id>/interrupt` -> {"data": {"ok": true}}
+- `api POST /api/session/<id>/interrupt` -> {"data": {"ok": true}} and logs an `interrupt` row; the
+  session becomes inactive unless flagged `ignore_interrupts`. Unknown id -> exit 1 with "404".
+- any `api` call may fail (exit 1, stderr "API unavailable") while the store's `faults.api` says so:
+  `{'path': P or null, 'skip': K, 'fail': N}` (N = -1: until cleared).
 - `run --title T [--auto] [--agent A] [--model M] PROMPT` -> creates a root session titled T (the
   wrapper's unique `[guard:...]` title) and performs the project's next scripted step through the
   same `perform_step` engine as the scripted-wrapper mode. A step with `unstarted_quota` prints the
-  quota text and exits 1 WITHOUT creating a session.
-- `run --session ID [--agent A] [--model M] PROMPT` -> recovery turn: logs a `resume` record and
-  prints the completion nonce found in the prompt (exactly one must be present).
+  quota text and exits 1 WITHOUT creating a session. Optional step keys: `root_active_polls`
+  (root's active lifetime, polls) and `descendants` (nested `{title, active_polls, children}` under
+  the root, same directory). The run itself is not delayed: a test that needs the controller to
+  kill the wrapper mid-settle scripts `active_polls: -1` instead, so the wrapper's own settle loop
+  is the thing that is running when the cycle timeout fires.
+- `run --session ID [--agent A] [--model M] PROMPT` -> recovery turn: logs a `resume` record,
+  applies the next scripted resume plan for (project, phase) (`descendants` spawned under the same
+  root, `actions` as GitHub mutations), and prints the completion nonce found in the prompt (exactly
+  one must be present). With no plan the behaviour is unchanged.
 
 Every invocation is logged in `<state>/e2e/invocations.jsonl` (sessions with kind `session`,
-recovery turns with kind `resume`). Session state lives in `<state>/e2e/opencode.json` under an
-flock. Any unmodelled form: stderr, exit 97. It never reaches a real service.
+recovery turns with kind `resume`, active polls with kind `active_poll`, interrupts with kind
+`interrupt`). Session state lives in `<state>/e2e/opencode.json` under a flock. Any unmodelled
+form: stderr, exit 97. It never reaches a real service.
+
+Simulated only: the active-session lifetimes are poll counts, not OpenCode's real timing; interrupts
+take effect instantly; descendant spawning is scripted. Live OpenCode behaviour needs the sandbox.
 """
 import fcntl
 import json
@@ -66,14 +82,61 @@ def emit(data) -> int:
     return 0
 
 
+def _consume_api_fault(root: Path, path: str) -> bool:
+    """`faults.api` = {'path': P or null, 'skip': K, 'fail': N}, persisted in the store.
+
+    Calls whose path equals P (every call when P is null) first pass K times, then fail N times
+    (N = -1: fail until the fault is cleared by removing the key). A failing call exits 1 with
+    stderr, like an unreachable OpenCode server.
+    """
+    def change(doc):
+        fault = doc.get('faults', {}).get('api')
+        if not fault or fault.get('path') not in (None, path):
+            return False
+        if int(fault.get('skip', 0)) > 0:
+            fault['skip'] = int(fault['skip']) - 1
+            return False
+        fail = int(fault.get('fail', 0))
+        if fail == 0:
+            return False
+        if fail > 0:
+            fault['fail'] = fail - 1
+        return True
+    return _locked(root, change)
+
+
+def _active_poll(root: Path) -> dict:
+    """One GET /api/session/active: report the active set, then advance each lifetime by one poll.
+
+    `active_polls` = N > 0: reports active for N more polls. -1: active until interrupted.
+    0 or absent: inactive. Report and decrement happen under one lock, so the state evolves
+    deterministically with the number of polls, never with wall-clock time.
+    """
+    def change(doc):
+        active = {}
+        for sid, session in doc['sessions'].items():
+            lifetime = int(session.get('active_polls', 0))
+            if lifetime != 0:
+                active[sid] = {'status': 'busy'}
+            if lifetime > 0:
+                session['active_polls'] = lifetime - 1
+        return active
+    active = _locked(root, change)
+    agent.log_invocation(root, {'kind': 'active_poll', 'ids': sorted(active), 'at': time.time()})
+    return active
+
+
 def api(root: Path, args: list[str]) -> int:
     if len(args) != 3:
         raise Unmodelled(f'api form {args}')
     method, path = args[1], args[2]
+    if _consume_api_fault(root, path):
+        print(f'fake OpenCode V2: API unavailable: {method} {path}', file=sys.stderr)
+        return 1
     if (method, path) == ('GET', '/api/info'):
         return emit({'version': '2.0.0'})
     if (method, path) == ('GET', '/api/session/active'):
-        return emit({})
+        return emit(_active_poll(root))
     if (method, path) == ('GET', '/api/session'):
         return emit(list(_locked(root)['sessions'].values()))
     match = re.fullmatch(r'/api/session/([^/]+)', path)
@@ -86,6 +149,19 @@ def api(root: Path, args: list[str]) -> int:
         return emit(session)
     match = re.fullmatch(r'/api/session/([^/]+)/interrupt', path)
     if method == 'POST' and match:
+        sid = unquote(match.group(1))
+
+        def change(doc):
+            session = doc['sessions'].get(sid)
+            if session is None:
+                return False
+            if not session.get('ignore_interrupts'):
+                session['active_polls'] = 0  # interrupted: inactive from the next poll on
+            return True
+        if not _locked(root, change):
+            print(f'session {sid} not found: 404', file=sys.stderr)
+            return 1
+        agent.log_invocation(root, {'kind': 'interrupt', 'session_id': sid, 'at': time.time()})
         return emit({'ok': True})
     raise Unmodelled(f'api {method} {path}')
 
@@ -119,6 +195,25 @@ def learning_present(prompt: str) -> bool:
     return bool(text) and text in prompt
 
 
+def _new_session(folder: Path, sid: str, title: str, parent: str | None, directory: str,
+                 active_polls: int, ignore_interrupts: bool = False) -> None:
+    """The one owner of the session record format in the store (tests seed through this too)."""
+    session = {'id': sid, 'title': title, 'parentID': parent, 'agent': None,
+               'location': {'directory': directory}, 'active_polls': active_polls}
+    if ignore_interrupts:
+        session['ignore_interrupts'] = True
+    _locked(folder, lambda doc: doc['sessions'].__setitem__(sid, session))
+
+
+def _spawn(folder: Path, directory: str, parent: str, specs: list[dict]) -> None:
+    """Descendant specs: {'title', 'active_polls', 'children': [...]}; any depth, same directory."""
+    for spec in specs:
+        sid = 'ses_' + secrets.token_hex(12)
+        _new_session(folder, sid, spec.get('title', 'subagent'), parent, directory,
+                     int(spec.get('active_polls', 0)))
+        _spawn(folder, directory, sid, spec.get('children', []))
+
+
 def run_new(folder: Path, opts: dict, prompt: str) -> int:
     title = opts['title']
     if not title:
@@ -137,9 +232,11 @@ def run_new(folder: Path, opts: dict, prompt: str) -> int:
         print(step.get('output', 'HTTP 429: quota reached'))
         return int(step.get('rc', 1))
     sid = 'ses_' + secrets.token_hex(12)
-    session = {'id': sid, 'title': title, 'parentID': None, 'agent': opts['agent'],
-               'location': {'directory': str(Path.cwd().resolve())}}
-    _locked(folder, lambda doc: doc['sessions'].__setitem__(sid, session))
+    directory = str(Path.cwd().resolve())
+    _new_session(folder, sid, title, None, directory, int(step.get('root_active_polls', 0)))
+    # _new_session stores agent None; keep the requested agent on the root record as before.
+    _locked(folder, lambda doc: doc['sessions'][sid].__setitem__('agent', opts['agent']))
+    _spawn(folder, directory, sid, step.get('descendants', []))
     agent.log_invocation(folder, {
         'kind': 'session', 'via': 'real_wrapper', 'session_id': sid, 'project': project,
         'phase': phase, 'agent': opts['agent'], 'title': title, 'prompt': prompt,
@@ -149,16 +246,37 @@ def run_new(folder: Path, opts: dict, prompt: str) -> int:
     return agent.perform_step(folder, marker.parent, project, step, title, None)
 
 
+def _pop_resume_plan(folder: Path, project: str, phase: str) -> dict:
+    """Next scripted recovery-turn plan for a project AND phase (store key `resume`).
+
+    Keyed by phase because every wrapper `run` (selection included) ends with its own recovery
+    turn; a plan for the coding session must never be consumed by the selection turn.
+    Empty = today's behaviour.
+    """
+    def change(doc):
+        plans = doc.setdefault('resume', {}).get(project, {}).get(phase, [])
+        return plans.pop(0) if plans else {}
+    return _locked(folder, change)
+
+
 def run_resume(folder: Path, opts: dict, prompt: str) -> int:
     sid = opts['session']
-    if sid not in _locked(folder)['sessions']:
+    session = _locked(folder)['sessions'].get(sid)
+    if session is None:
         print(f'session {sid} not found: 404', file=sys.stderr)
         return 1
+    project = os.environ.get('AUTONOMY_PROJECT_NAME', '')
     phase = os.environ.get('AUTONOMY_PHASE', 'code')
     agent.log_invocation(folder, {
         'kind': 'resume', 'via': 'real_wrapper', 'session_id': sid, 'agent': opts['agent'],
         'phase': phase, 'learning_instructions': learning_present(prompt), 'at': time.time(),
     })
+    plan = _pop_resume_plan(folder, project, phase)
+    # Descendants spawned during this recovery turn belong to the SAME root session.
+    _spawn(folder, session['location']['directory'], sid, plan.get('descendants', []))
+    # The recovery turn finishes the work: its scripted GitHub actions (e.g. the PR) apply here.
+    pdir = Path(os.environ['AUTONOMY_PENDING_MARKER']).parent
+    agent.perform_step(folder, pdir, project, {'actions': plan.get('actions', [])}, session['title'], None)
     nonces = NONCE.findall(prompt)
     if len(nonces) != 1:
         raise Unmodelled('recovery prompt must carry exactly one completion nonce')

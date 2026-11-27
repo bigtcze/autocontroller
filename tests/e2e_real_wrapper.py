@@ -14,7 +14,8 @@ marker, the unique `[guard:...]` title, session checkpointing, the recovery turn
 Only settle timing is shortened, and only inside this subprocess:
 
 - `mod.QUIET_SECONDS` is set to 0 (the wrapper waits 60 s of quiet after a session);
-- `time.sleep` is replaced by `min(requested, 0.05)` (the wrapper polls at 1 s and 5 s).
+- `time.sleep` is replaced by `min(requested, 0.05)` (the wrapper polls at 1 s and 5 s);
+- `mod.INTERRUPT_DRAIN_SECONDS` is 2 s instead of 30 s, so a drain-failure test stays fast.
 
 The OpenCode binary is `AUTONOMY_OPENCODE`, which the controller sets to the fake OpenCode V2
 shim (`tests/e2e_opencode.py`). No real OpenCode, network or production path is involved.
@@ -27,6 +28,8 @@ import time
 
 WRAPPER = Path(__file__).resolve().parent.parent / 'opencode-project-safe.py'
 SETTLE_SLEEP_CAP = 0.05
+# Drain deadline for --interrupt-owned in tests (product default: 30 s). Still a real deadline.
+INTERRUPT_DRAIN_SECONDS_E2E = 2
 
 
 def load_wrapper():
@@ -46,6 +49,7 @@ def main(argv: list[str]) -> int:
     time.sleep = lambda seconds: real_sleep(min(float(seconds), SETTLE_SLEEP_CAP))
     module = load_wrapper()
     module.QUIET_SECONDS = 0
+    module.INTERRUPT_DRAIN_SECONDS = INTERRUPT_DRAIN_SECONDS_E2E
     sys.argv = [str(WRAPPER), *argv]
     module.main()
     return 0

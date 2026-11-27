@@ -23,6 +23,7 @@ from unittest.mock import patch
 TESTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TESTS))
 import e2e_github as eg  # noqa: E402  (loads autonomy-controller as eg.ctl)
+import e2e_opencode  # noqa: E402  (the fake's store format: _locked, _new_session)
 
 ctl = eg.ctl
 AGENT = TESTS / 'e2e_agent.py'
@@ -242,6 +243,7 @@ class World:
         self.projects: dict[str, dict] = {}
         self.runtime = None
         self.engram_backend: dict | None = None  # which Engram binary ran, and its probe
+        self.cycle_timeout_seconds = 60  # tests lower this to interrupt a cycle mid-flight
 
     # ----- world construction ------------------------------------------------
     def add_project(self, name: str, repo: str, number: int, *, release: dict | None = None,
@@ -284,6 +286,41 @@ class World:
             change(doc)
             path.write_text(json.dumps(doc, sort_keys=True), encoding='utf-8')
 
+    def opencode_store(self, change) -> object:
+        """Apply `change(doc)` to the fake OpenCode store under its lock (the fake's own `_locked`)."""
+        return e2e_opencode._locked(self.e2e, change)
+
+    def set_fault(self, *, path: str | None = None, skip: int = 0, fail: int = 0):
+        """Fail the next `fail` API calls to `path` (-1 = until cleared), after `skip` healthy ones."""
+        def change(doc):
+            if fail == 0 and skip == 0:
+                doc.get('faults', {}).pop('api', None)
+            else:
+                doc.setdefault('faults', {})['api'] = {'path': path, 'skip': skip, 'fail': fail}
+        self.opencode_store(change)
+
+    def seed_opencode_session(self, sid: str, *, title: str, directory: str, parent: str | None = None,
+                              active_polls: int = 0, ignore_interrupts: bool = False) -> None:
+        """Insert a session through the fake's own record constructor (one owner of the format)."""
+        e2e_opencode._new_session(self.e2e, sid, title, parent, directory, active_polls,
+                                  ignore_interrupts=ignore_interrupts)
+
+    def set_active_polls(self, sid: str, polls: int) -> None:
+        def change(doc):
+            doc['sessions'][sid]['active_polls'] = polls
+        self.opencode_store(change)
+
+    def script_resume(self, project: str, phase: str, plans: list[dict]):
+        """Recovery-turn plans for one project and phase, consumed in order: each may carry
+        `descendants` (spawned during that turn under the resumed root) and `actions` (GitHub)."""
+        def change(doc):
+            doc.setdefault('resume', {}).setdefault(project, {})[phase] = list(plans)
+        self.opencode_store(change)
+
+    def opencode_sessions(self) -> dict:
+        """Every session in the fake OpenCode store, keyed by id."""
+        return self.opencode_store(lambda doc: dict(doc['sessions']))
+
     def sessions(self, phase: str | None = None) -> list[dict]:
         path = self.e2e / 'invocations.jsonl'
         if not path.exists():
@@ -295,7 +332,7 @@ class World:
     def global_cfg(self) -> dict:
         cfg = {'state_dir': str(self.state), 'wrapper': str(self.wrapper), 'opencode': str(self.opencode),
                'poll_seconds': 5, 'post_cycle_seconds': 0, 'ci_poll_seconds': 0,
-               'cycle_timeout_seconds': 60, 'selection_timeout_seconds': 60,
+               'cycle_timeout_seconds': self.cycle_timeout_seconds, 'selection_timeout_seconds': 60,
                'drain_timeout_seconds': 5, 'agent': 'orchestrator', 'retry_max_seconds': 14400}
         if self.runtime is not None:
             cfg['_memory_runtime'] = self.runtime
