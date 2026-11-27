@@ -3,6 +3,7 @@
 Deliberately simple: workflows are checked by text patterns rather than a YAML
 parser so the suite stays dependency-free.
 """
+import json
 import os
 from pathlib import Path
 import re
@@ -282,6 +283,17 @@ class RepositoryContractTests(unittest.TestCase):
         for name in ('README.md', 'docs/VALIDATION.md', '.agents/PRODUCT_SCOPE.md'):
             with self.subTest(path=name):
                 self.assertNotRegex((ROOT / name).read_text(encoding='utf-8'), pattern)
+
+    def test_renovate_config_honours_golden_standard(self):
+        config = json.loads((ROOT / 'renovate.json').read_text(encoding='utf-8'))
+        extends = config.get('extends', [])
+        self.assertIn('config:recommended', extends)
+        self.assertIn('helpers:pinGitHubActionDigests', extends)  # SECURITY.md: SHA-pinned actions
+        dashboard = config.get('dependencyDashboard')
+        if isinstance(dashboard, dict):  # migrated object form {"enabled": true}
+            dashboard = dashboard.get('enabled')
+        self.assertIs(dashboard, True, 'dependency dashboard must be enabled')
+        self.assertIsNot(config.get('automerge'), True, 'blanket automerge bypasses controller review')
 
 
 if __name__ == '__main__':
