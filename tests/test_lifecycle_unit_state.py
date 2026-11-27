@@ -161,9 +161,10 @@ class HealthWindowTest(unittest.TestCase):
     """healthy: every poll is active/running with the first poll's MainPID and NRestarts."""
 
     def healthy(self, model: UnitModel, seconds=3):
+        # Readiness is covered by tests/test_controller_readiness.py; this class pins the N1 window only.
         with mock.patch.object(lc.subprocess, 'run', side_effect=model.run):
             return lc.healthy(check=lambda: True, seconds=seconds, sleep=lambda s: None,
-                              clock=_FakeClock().now)
+                              clock=_FakeClock().now, ready=lambda pid: True)
 
     def test_stable_process_stays_healthy_for_the_whole_window(self):
         model = UnitModel()
@@ -214,7 +215,8 @@ class HealthWindowTest(unittest.TestCase):
         model.fields = dict(model.fields)
         model.on_poll = garbage
         with mock.patch.object(lc.subprocess, 'run', side_effect=model.run):
-            self.assertFalse(lc.healthy(check=lambda: True, seconds=3, sleep=lambda s: None, clock=_FakeClock().now))
+            self.assertFalse(lc.healthy(check=lambda: True, seconds=3, sleep=lambda s: None, clock=_FakeClock().now,
+                                        ready=lambda pid: True))
 
 
 class _FakeClock:

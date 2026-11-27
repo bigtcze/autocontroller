@@ -65,5 +65,6 @@ Git config, removes GitHub/provider tokens, and puts failing shims for `gh`,
 - Live OpenCode/OMO sessions, provider quotas and real Engram releases.
 - Release workflow publication (never triggered during development).
 - Managed `update` and `rollback` against real GitHub Releases: simulated only (fake GitHub API and `gh`, local archives). Digest presence on real release assets is not verified.
+- Startup readiness (`state/ready.json`): live systemd verification is not automated. Offline tests use a fake service and simulated `/proc` start ticks; they prove the health rule, not that a real controller publishes the marker under systemd.
 
 These are tracked in `docs/VALIDATION.md` and dedicated Issues.

@@ -59,6 +59,7 @@ class DrainTest(unittest.TestCase):
     def test_constants_match_controller(self):
         self.assertEqual(lc.DRAIN_REQUEST, ctl.DRAIN_REQUEST)
         self.assertEqual(lc.DRAIN_READY, ctl.DRAIN_READY)
+        self.assertEqual(lc.CONTROLLER_READY, ctl.CONTROLLER_READY)
 
     def test_request_visible_during_body_and_withdrawn_after(self):
         with lc.drain(self.state, **self.kwargs(sleep=self.controller_answers_after(2))) as nonce:
