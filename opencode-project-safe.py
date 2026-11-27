@@ -587,39 +587,20 @@ def run_capture(command):
 
 
 def recovery_prompt(nonce):
-    return f"""Resume and reconcile the interrupted autonomous task IN THIS EXISTING SESSION.
+    return f"""You are Mr. Orchestrator. Resume and reconcile the interrupted autonomous task IN THIS EXISTING SESSION.
 
-Repository: {ROOT}
-Use only the existing repository checkout (no clone or git worktree).
-Read AGENTS.md and relevant normal project documentation, but not legacy
-autonomous orchestration policies.
-
-Before changing anything, inspect git status, the current branch, local
-changes, the open GitHub Issue/PR associated with this session, and CI.
-Preserve uncommitted changes. Reconcile prior progress and resume the SAME
-task without choosing new work or adopting unrelated Issues.
-
-Recover only the phase that was interrupted. Current controller phase:
-{os.environ.get("AUTONOMY_PHASE", "code")}.
-For phase 'code' or 'repair', prepare and push the PR but DO NOT merge it.
-For phase 'review', independently review the PR read-only, with no edits,
-no merging and no issue transitions. The controller itself validates the
-review evidence and performs the merge after green CI.
-For phase 'selection', this was a READ-ONLY OMO backlog triage session, NOT an
-assigned coding Issue. Resume the same selection from the existing GitHub
-Project candidates if unfinished; never modify code, git state, Issues,
-Project fields or PRs. If you already emitted AUTOCONTROLLER_SELECT_ISSUE
-or AUTOCONTROLLER_NO_ACTION in this session, preserve that result and do not
-change the decision merely due to the recovery turn. If the decision was
-not yet emitted, finish the triage and emit exactly one such marker before
-the recovery completion nonce. Never start coding during selection.
-Never claim merge/completion without checking live GitHub state.
-If externally blocked, report exact evidence; do not retry blindly or
-bypass branch protection. Do not change the controller.
+Repository: {ROOT} (existing checkout only; no clone or git worktree).
+Controller phase: {os.environ.get("AUTONOMY_PHASE", "code")}.
+- Read AGENTS.md and relevant .agents contracts; ignore legacy autonomous orchestration policies.
+- Before changing anything, inspect git status, branch, local changes, this session's GitHub Issue/PR and CI. Preserve uncommitted changes. Resume the SAME task; never choose new work or adopt unrelated Issues.
+- Recover only the interrupted phase:
+  - For phase 'code' or 'repair': finish and push the PR through the existing fixer/independent oracle workflow; DO NOT merge. The controller verifies CI and merges.
+  - For phase 'selection': this was READ-ONLY OMO backlog triage, NOT an assigned coding Issue. Never modify code, git state, Issues, Project fields or PRs. Never start coding during selection. If AUTOCONTROLLER_SELECT_ISSUE or AUTOCONTROLLER_NO_ACTION was already emitted in this session, keep that decision unchanged; otherwise finish triage from the existing Project candidates and emit exactly one such marker before the recovery completion nonce.
+- Never claim merge/completion without checking live GitHub state. If externally blocked, report exact evidence; no blind retries, no branch-protection bypass, no controller changes.
 
 {os.environ.get("AUTOCONTROLLER_LEARNING_INSTRUCTIONS", "")}
 
-Only once the reconciliation turn is complete, emit this as the final line:
+Only once reconciliation is complete, emit this as the final line:
 {nonce}
 """
 

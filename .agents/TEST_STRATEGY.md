@@ -42,7 +42,6 @@ Git config, removes GitHub/provider tokens, and puts failing shims for `gh`,
   acceptance coverage. Consolidate redundant or brittle tests only under
   the authorization described in GUARDRAILS.md; explain retained coverage
   and run the existing required checks. Do not optimize for test count.
-
 - Deterministic, isolated fixtures; no network, paid services, real GitHub,
   OpenCode, providers, production credentials or the installed controller.
 - Bug fixes and security fixes include a regression test that fails before
