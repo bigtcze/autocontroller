@@ -36,7 +36,7 @@
 All outside repositories under the install root: `config.json`,
 `state/projects/<name>/` (checkpoints, retry map, pending marker, logs, memory
 grant), `state/memory/` (Engram generations, active pointer, failure marker),
-`state/drain.request` and `state/drain.ready` (drain handshake between the lifecycle
+`state/ready.json` (startup readiness of the running controller process: pid and start ticks; written after Engram and worker initialization, removed on startup and shutdown), `state/drain.request` and `state/drain.ready` (drain handshake between the lifecycle
 commands and the running workers), `updates/` (staging and `history.json`),
 `rollback/previous/` (the one kept earlier release), and `lifecycle.lock` /
 `onboarding.lock` (operation locks).

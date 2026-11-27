@@ -45,8 +45,22 @@ class FakeClock:
         self.now += seconds
 
 
+def fake_start_ticks(pid: int) -> int:
+    """Deterministic stand-in for /proc/<pid>/stat starttime; Base patches lc.process_start_ticks to it."""
+    return 100000 + pid
+
+
+def good_marker(pid: int) -> dict:
+    return {'schema': 1, 'pid': pid, 'started': fake_start_ticks(pid), 'at': 1}
+
+
 class FakeService:
-    """Stands in for systemctl --user. Start fails when the installed VERSION is in fail_start_for."""
+    """Stands in for systemctl --user. Start fails when the installed VERSION is in fail_start_for.
+
+    Startup readiness: a successful start publishes state/ready.json for its new pid, as the controller
+    does after Engram and workers initialize. Per installed tag, `silent_tags` publishes nothing and
+    `marker_for[tag]` returns the marker to write (a dict, a raw string, or None for no file).
+    """
 
     def __init__(self, install: Path):
         self.install = install
@@ -56,6 +70,20 @@ class FakeService:
         self.pid = 1000  # N1: each start gets a new PID, as systemd does
         self.restarts = 0
         self.show_override = None
+        self.silent_tags: set[str] = set()
+        self.marker_for: dict[str, object] = {}
+
+    def publish_readiness(self):
+        tag = self.installed_tag()
+        if tag in self.silent_tags:
+            return
+        make = self.marker_for.get(tag, good_marker)
+        doc = make(self.pid) if callable(make) else make
+        if doc is None:
+            return
+        state = self.install / 'state'
+        state.mkdir(mode=0o700, exist_ok=True)
+        (state / lc.CONTROLLER_READY).write_text(doc if isinstance(doc, str) else json.dumps(doc), encoding='utf-8')
 
     def installed_tag(self):
         try:
@@ -86,6 +114,7 @@ class FakeService:
             return False
         self.active = True
         self.pid += 1
+        self.publish_readiness()
         return True
 
 
@@ -227,12 +256,14 @@ class Base(unittest.TestCase):
         self.world = World()
         self.addCleanup(self.world.cleanup)
         self.service = self.world.service
-        saved = {n: getattr(lc, n) for n in ('service_active', 'unit_state', 'stop_service', 'start_service')}
+        saved = {n: getattr(lc, n) for n in ('service_active', 'unit_state', 'stop_service', 'start_service',
+                                             'process_start_ticks')}
         self.addCleanup(lambda: [setattr(lc, n, v) for n, v in saved.items()])
         lc.service_active = self.service.is_active
         lc.unit_state = self.service.unit_state  # N1: no fixture may reach the real systemctl show
         lc.stop_service = self.service.stop
         lc.start_service = self.service.start
+        lc.process_start_ticks = fake_start_ticks  # startup readiness: no fixture reads the real /proc
 
     def update(self, **kw):
         return lc.update(self.world.install, REPO, **self.world.update_kw(**kw))
@@ -420,6 +451,18 @@ class HealthAndRollbackTest(Base):
         with self.assertRaisesRegex(lc.LifecycleError, 'NOT healthy'):
             self.update(check=lambda: False)
         self.assertEqual(self.history()[-1]['result'], 'rollback_unhealthy')
+
+    def test_new_code_and_restore_both_fail_records_the_restore_reason(self):
+        # The new release fails its check; the restored previous release never publishes readiness.
+        # The history keeps the original 'reason' and adds 'restore_reason' for the restore failure.
+        self.service.silent_tags.add('v1.0.0')
+        with self.assertRaisesRegex(lc.LifecycleError,
+                                    'restored but NOT healthy.*did not publish startup readiness'):
+            self.update(check=lambda: self.world.tag() == 'v1.0.0', ready_timeout=5)
+        entry = self.history()[-1]
+        self.assertEqual(entry['result'], 'rollback_unhealthy')
+        self.assertEqual(entry['reason'], '--check failed')
+        self.assertIn('did not publish startup readiness', entry['restore_reason'])
 
     def test_unreadable_state_inside_health_window_rolls_back_and_restores_previous(self):
         # R1: a `show` read that fails inside the window must not escape update. It is a failed check:
