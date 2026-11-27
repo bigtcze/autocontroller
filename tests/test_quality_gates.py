@@ -320,6 +320,28 @@ class Gates(unittest.TestCase):
         self.assertEqual(len(self.agent_calls),1)
         self.assertFalse(self.merge_calls)
 
+    def test_closed_unmerged_repair_pr_keeps_main_is_red_checkpoint(self):
+        closed_repair={'number':22,'state':'closed','merged_at':None,'draft':False,
+                       'head':{'sha':'e'*40,'repo':{'full_name':'org/demo'}},
+                       'base':{'ref':'main'},'merge_commit_sha':None}
+        self.pr.update(state='closed',merged_at='2026-11-24T10:00:00Z',merge_commit_sha=MERGE)
+        self.w.save_checkpoint({'kind':'issue','number':11,'url':URL,'phase':'ci',
+                                'pr_number':22,'repairing':True,'retry_same_task':True})
+        self.patches(real_related=True)
+        with patch.object(m,'pr_data',side_effect=lambda repo,n:dict(closed_repair if n==22 else self.pr)):
+            with patch.object(m,'linked_issue_pr',return_value={'number':21}):
+                self.w._cycle('issue',11,URL,None)  # ci: closed repair PR -> code, reopen feedback
+                cp=m.json_read(self.w.cycle_state)
+                self.assertEqual(cp['phase'],'code')
+                self.assertIn('Repair PR #22 was closed without merge; reopen it',cp['review_feedback'])
+                self.w._cycle('issue',11,URL,None)  # code: agent runs; PR still closed
+        self.assertEqual(len(self.agent_calls),1)
+        cp=m.json_read(self.w.cycle_state)
+        self.assertIsNotNone(cp,'main-is-red repair obligation must survive a closed repair PR')
+        self.assertEqual((cp['pr_number'],cp['repairing']),(22,True))
+        self.assertIn('issue:11',self.w.retry_map())
+        self.assertFalse(self.merge_calls)
+
     def test_merge_race_reread_failure_reports_both_errors(self):
         def reject(pr):
             raise m.ControllerError('merge rejected by GitHub')

@@ -1424,9 +1424,14 @@ class ProjectWorker:
                 self.cycle_state.unlink(missing_ok=True)
                 return
             if checkpoint.get("phase") != "code":
-                checkpoint.update(phase="code",review_feedback=(
-                    f"Previous linked PR #{pr['number']} closed without merge; reopen it "
-                    "or create a replacement linked PR, but do not mark the Issue done."))
+                if checkpoint.get("repairing"):
+                    # The checkpoint tracks this exact repair PR; a replacement is never picked up.
+                    feedback=(f"Repair PR #{pr['number']} was closed without merge; reopen it. "
+                              "Do not create a replacement, and do not mark the Issue done.")
+                else:
+                    feedback=(f"Previous linked PR #{pr['number']} closed without merge; reopen it "
+                              "or create a replacement linked PR, but do not mark the Issue done.")
+                checkpoint.update(phase="code",review_feedback=feedback)
                 self.save_checkpoint(checkpoint)
                 self.retry(key,"Issue PR closed without merge; replace/reopen",min_seconds=900)
                 return
@@ -1455,7 +1460,7 @@ class ProjectWorker:
                 self.notice(f"closed-unverified:{number}",
                             f"Issue #{number} is closed but has no linked reviewed PR; NOT Done")
                 self.retry(key,"Issue closed without linked PR evidence",min_seconds=900)
-                if self.checkout_neutral() and not self.pending.exists():
+                if not checkpoint.get("repairing") and self.checkout_neutral() and not self.pending.exists():
                     self.cycle_state.unlink(missing_ok=True)
                 return
             started=time.time()
@@ -1492,7 +1497,8 @@ class ProjectWorker:
             pr=self.related_pr(kind,number,checkpoint)
             if not pr or pr.get("state") != "open":
                 self.retry(key,"No open linked PR ready for verification (closing an Issue alone is insufficient)",min_seconds=600)
-                if not self.pending.exists() and self.checkout_neutral():
+                # A repair checkpoint carries the main-is-red obligation: never discard it.
+                if not checkpoint.get("repairing") and not self.pending.exists() and self.checkout_neutral():
                     self.cycle_state.unlink(missing_ok=True)
                 return
             if pr.get("draft"):
