@@ -20,10 +20,10 @@ talks to it exactly as it would talk to OpenCode V2:
   wrapper's unique `[guard:...]` title) and performs the project's next scripted step through the
   same `perform_step` engine as the scripted-wrapper mode. A step with `unstarted_quota` prints the
   quota text and exits 1 WITHOUT creating a session. Optional step keys: `root_active_polls`
-  (root's active lifetime after the CLI returns), `descendants` (nested `{title, active_polls,
-  children}` under the root, same directory), `foreign` (extra ROOT sessions in the project
-  directory, or another `directory`), `block_seconds` (the process sleeps, capped at 30 s, so a
-  controller cycle timeout can kill it mid-cycle; applied after the step's GitHub actions).
+  (root's active lifetime, polls) and `descendants` (nested `{title, active_polls, children}` under
+  the root, same directory). The run itself is not delayed: a test that needs the controller to
+  kill the wrapper mid-settle scripts `active_polls: -1` instead, so the wrapper's own settle loop
+  is the thing that is running when the cycle timeout fires.
 - `run --session ID [--agent A] [--model M] PROMPT` -> recovery turn: logs a `resume` record,
   applies the next scripted resume plan for (project, phase) (`descendants` spawned under the same
   root, `actions` as GitHub mutations), and prints the completion nonce found in the prompt (exactly
@@ -57,7 +57,6 @@ NONCE = re.compile(r'PROJECT_RECOVERY_COMPLETE_[0-9a-f]{24}')
 VALUE_FLAGS = ('--title', '--agent', '--model', '--session')
 BOOL_FLAGS = ('--auto',)
 UNMODELLED_RC = 97
-BLOCK_CAP_SECONDS = 30  # a scripted `block_seconds` is capped so a test can never hang
 
 
 class Unmodelled(Exception):
@@ -197,9 +196,12 @@ def learning_present(prompt: str) -> bool:
 
 
 def _new_session(folder: Path, sid: str, title: str, parent: str | None, directory: str,
-                 active_polls: int) -> None:
+                 active_polls: int, ignore_interrupts: bool = False) -> None:
+    """The one owner of the session record format in the store (tests seed through this too)."""
     session = {'id': sid, 'title': title, 'parentID': parent, 'agent': None,
                'location': {'directory': directory}, 'active_polls': active_polls}
+    if ignore_interrupts:
+        session['ignore_interrupts'] = True
     _locked(folder, lambda doc: doc['sessions'].__setitem__(sid, session))
 
 
@@ -210,14 +212,6 @@ def _spawn(folder: Path, directory: str, parent: str, specs: list[dict]) -> None
         _new_session(folder, sid, spec.get('title', 'subagent'), parent, directory,
                      int(spec.get('active_polls', 0)))
         _spawn(folder, directory, sid, spec.get('children', []))
-
-
-def _spawn_foreign(folder: Path, directory: str, specs: list[dict]) -> None:
-    """Foreign ROOT sessions: {'title', 'active_polls', 'directory' (default: the project dir)}."""
-    for spec in specs:
-        sid = 'ses_' + secrets.token_hex(12)
-        _new_session(folder, sid, spec.get('title', 'foreign'), None, spec.get('directory', directory),
-                     int(spec.get('active_polls', 0)))
 
 
 def run_new(folder: Path, opts: dict, prompt: str) -> int:
@@ -239,22 +233,16 @@ def run_new(folder: Path, opts: dict, prompt: str) -> int:
         return int(step.get('rc', 1))
     sid = 'ses_' + secrets.token_hex(12)
     directory = str(Path.cwd().resolve())
-    session = {'id': sid, 'title': title, 'parentID': None, 'agent': opts['agent'],
-               'location': {'directory': directory}, 'active_polls': int(step.get('root_active_polls', 0))}
-    _locked(folder, lambda doc: doc['sessions'].__setitem__(sid, session))
+    _new_session(folder, sid, title, None, directory, int(step.get('root_active_polls', 0)))
+    # _new_session stores agent None; keep the requested agent on the root record as before.
+    _locked(folder, lambda doc: doc['sessions'][sid].__setitem__('agent', opts['agent']))
     _spawn(folder, directory, sid, step.get('descendants', []))
-    _spawn_foreign(folder, directory, step.get('foreign', []))
     agent.log_invocation(folder, {
         'kind': 'session', 'via': 'real_wrapper', 'session_id': sid, 'project': project,
         'phase': phase, 'agent': opts['agent'], 'title': title, 'prompt': prompt,
         'argv': sys.argv[1:], 'learning_instructions': learning_present(prompt),
         'env': {k: os.environ.get(k) for k in agent.ENV_KEYS}, 'pid': os.getpid(), 'at': time.time(),
     })
-    block = min(float(step.get('block_seconds', 0)), BLOCK_CAP_SECONDS)
-    if block > 0:
-        # Simulates a CLI still running after its session exists: the controller cycle timeout
-        # SIGTERMs the wrapper's process group during this sleep.
-        time.sleep(block)
     return agent.perform_step(folder, marker.parent, project, step, title, None)
 
 
@@ -287,7 +275,8 @@ def run_resume(folder: Path, opts: dict, prompt: str) -> int:
     # Descendants spawned during this recovery turn belong to the SAME root session.
     _spawn(folder, session['location']['directory'], sid, plan.get('descendants', []))
     # The recovery turn finishes the work: its scripted GitHub actions (e.g. the PR) apply here.
-    agent.perform_step(folder, folder, project, {'actions': plan.get('actions', [])}, session['title'], None)
+    pdir = Path(os.environ['AUTONOMY_PENDING_MARKER']).parent
+    agent.perform_step(folder, pdir, project, {'actions': plan.get('actions', [])}, session['title'], None)
     nonces = NONCE.findall(prompt)
     if len(nonces) != 1:
         raise Unmodelled('recovery prompt must carry exactly one completion nonce')

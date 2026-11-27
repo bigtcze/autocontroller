@@ -23,6 +23,7 @@ from unittest.mock import patch
 TESTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TESTS))
 import e2e_github as eg  # noqa: E402  (loads autonomy-controller as eg.ctl)
+import e2e_opencode  # noqa: E402  (the fake's store format: _locked, _new_session)
 
 ctl = eg.ctl
 AGENT = TESTS / 'e2e_agent.py'
@@ -286,17 +287,8 @@ class World:
             path.write_text(json.dumps(doc, sort_keys=True), encoding='utf-8')
 
     def opencode_store(self, change) -> object:
-        """Apply `change(doc)` to the fake OpenCode store (`e2e/opencode.json`) under its lock."""
-        import fcntl
-        with (self.e2e / 'opencode.lock').open('a') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            path = self.e2e / 'opencode.json'
-            doc = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {'sessions': {}}
-            result = change(doc)
-            tmp = self.e2e / 'opencode.json.tmp'
-            tmp.write_text(json.dumps(doc, sort_keys=True), encoding='utf-8')
-            tmp.replace(path)
-        return result
+        """Apply `change(doc)` to the fake OpenCode store under its lock (the fake's own `_locked`)."""
+        return e2e_opencode._locked(self.e2e, change)
 
     def set_fault(self, *, path: str | None = None, skip: int = 0, fail: int = 0):
         """Fail the next `fail` API calls to `path` (-1 = until cleared), after `skip` healthy ones."""
@@ -309,12 +301,9 @@ class World:
 
     def seed_opencode_session(self, sid: str, *, title: str, directory: str, parent: str | None = None,
                               active_polls: int = 0, ignore_interrupts: bool = False) -> None:
-        """Insert a session into the fake OpenCode store (used for foreign and ambiguous fixtures)."""
-        session = {'id': sid, 'title': title, 'parentID': parent, 'agent': None,
-                   'location': {'directory': directory}, 'active_polls': active_polls}
-        if ignore_interrupts:
-            session['ignore_interrupts'] = True
-        self.opencode_store(lambda doc: doc['sessions'].__setitem__(sid, session))
+        """Insert a session through the fake's own record constructor (one owner of the format)."""
+        e2e_opencode._new_session(self.e2e, sid, title, parent, directory, active_polls,
+                                  ignore_interrupts=ignore_interrupts)
 
     def set_active_polls(self, sid: str, polls: int) -> None:
         def change(doc):

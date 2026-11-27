@@ -20,6 +20,8 @@ from test_e2e_controller import R, SHA_ISSUE
 
 WRAPPER_RC_BLOCKED = 78
 WRAPPER_RC_REFUSED_CHECKPOINT = 2
+
+
 def pr_action(issue: int) -> dict:
     """The coding session's PR, linked to its Issue exactly as the controller expects."""
     return {'gh': ['gh', 'pr', 'create', '--repo', R, '--title', 'Feature', '--body', f'Closes #{issue}',
@@ -55,15 +57,27 @@ class ActiveSessionBase(RealWrapperBase):
                 out.append(session)
         return out
 
-    def children_of(self, sid: str) -> list[dict]:
-        return [s for s in self.world.opencode_sessions().values() if s.get('parentID') == sid]
+    def world_child_id(self, title: str) -> str:
+        """The id of the one fake session with this title (descendant titles are unique per test)."""
+        matches = [s['id'] for s in self.world.opencode_sessions().values() if s.get('title') == title]
+        self.assertEqual(len(matches), 1, f'exactly one session titled {title!r}')
+        return matches[0]
 
     def marker_doc(self) -> dict:
         return json.loads(self.pending_marker().read_text(encoding='utf-8'))
 
     def wrapper_log_text(self) -> str:
+        """Text of the latest cycle log."""
         logs = sorted((self.world.state / 'projects' / 'alpha' / 'logs').glob('*.log'))
         return logs[-1].read_text(encoding='utf-8') if logs else ''
+
+    def cycle_log_text(self, title_part: str) -> str:
+        """Text of the one cycle log that started a guarded cycle whose title contains `title_part`."""
+        logs = sorted((self.world.state / 'projects' / 'alpha' / 'logs').glob('*.log'))
+        matches = [p.read_text(encoding='utf-8') for p in logs
+                   if f'Starting guarded V2 cycle: alpha {title_part}' in p.read_text(encoding='utf-8')]
+        self.assertEqual(len(matches), 1, f'exactly one cycle log for {title_part!r}')
+        return matches[0]
 
     def add_backlog(self, title: str) -> int:
         return self.gh.add_issue(R, title=title, body=title, project='example-owner/1', status='Backlog')
@@ -87,7 +101,7 @@ class ActiveSessionBase(RealWrapperBase):
         """A pending marker as a previous guard left it (its pid is not alive)."""
         path = self.pending_marker()
         path.parent.mkdir(parents=True, exist_ok=True)
-        marker = {'status': status, 'title': title, 'pid': 999999, 'boot_id': None, 'opencode': 'v2',
+        marker = {'status': status, 'title': title, 'pid': 0, 'boot_id': None, 'opencode': 'v2',
                   'agent': 'orchestrator'}
         if session_id:
             marker['session_id'] = session_id
@@ -154,36 +168,46 @@ class DescendantSettleTests(ActiveSessionBase):
 
 
 class InterruptionRestartTests(ActiveSessionBase):
-    def test_timeout_kills_mid_cycle_then_restart_adopts_the_same_root_and_only_then_selects_next(self):
+    def test_timeout_kills_wrapper_inside_settle_then_restart_adopts_the_same_root_and_only_then_selects_next(self):
         first = self.add_backlog('Feature B')
         second = self.add_backlog('Feature C')
         self.world.script('alpha', [
             {'output': 'AUTOCONTROLLER_SELECT_ISSUE #%d' % first},
-            # The root and a subagent are still active when the cycle timeout SIGTERMs the wrapper.
-            {'root_active_polls': 3, 'block_seconds': 30,
-             'descendants': [{'title': 'explore', 'active_polls': 2}]},
+            # The root and a subagent never go inactive on their own: the wrapper is still inside its
+            # settle loop when the short cycle timeout SIGTERMs it.
+            {'root_active_polls': -1, 'output': 'coding handed off',
+             'descendants': [{'title': 'explore', 'active_polls': -1}]},
             {'output': 'AUTOCONTROLLER_SELECT_ISSUE #%d' % second},
         ])
         self.world.script_resume('alpha', 'code', [{'actions': [pr_action(first)]}])
         self.world.cycle_timeout_seconds = 4
 
         self.drive('alpha', 1)  # selection -> In Progress
-        self.drive('alpha', 1)  # coding: the wrapper is killed mid-cycle (rc 124 path)
+        self.drive('alpha', 1)  # coding: killed by the cycle timeout while settling (rc 124 path)
         self.world.cycle_timeout_seconds = 60
 
+        # The kill really happened inside the wrapper's settle loop: the killed cycle's log (the first
+        # cycle log; the restart writes a later one) shows the wrapper polling active sessions.
+        killed_log = self.cycle_log_text('issue #')
+        self.assertIn('Still active:', killed_log, 'the wrapper was settling when it was killed')
+        self.assertNotIn('Adopted interrupted', killed_log)
         root = self.marker_doc()['session_id']
         self.assertEqual(self.marker_doc()['status'], 'running', 'the checkpointed marker survives the kill')
         self.assertEqual(self.checkpoint()['kind'], 'issue')
         self.assertEqual(self.checkpoint()['number'], first)
         retry = json.loads(self.world.worker('alpha').retries_file.read_text(encoding='utf-8'))
         self.assertIn('OpenCode exit 124', retry[f'issue:{first}']['reason'])
-        self.assertEqual(self.world.opencode_sessions()[root]['active_polls'], 3, 'the root is still active')
+        self.assertEqual(self.world.opencode_sessions()[root]['active_polls'], -1, 'the root is still active')
 
         # Inside the retry backoff: no new selection, no second task, despite the other Backlog Issue.
         self.drive('alpha', 2)
         self.assertEqual(len(self.sessions('selection')), 1)
         self.assertEqual(len(self.sessions('code')), 1)
         self.assertEqual(len(self.roots('alpha issue #')), 1)
+
+        # The surviving work finishes: after a few polls the root and subagent go inactive.
+        self.world.set_active_polls(root, 2)
+        self.world.set_active_polls(self.world_child_id('explore'), 3)
 
         # A restarted worker adopts the SAME active root, waits for the subagent, resumes it once.
         self.expire_retries('alpha')
@@ -193,8 +217,8 @@ class InterruptionRestartTests(ActiveSessionBase):
         self.assertEqual(len(self.sessions('code')), 1, 'no second coding session')
         resumes = [i for i, r in enumerate(self.log_rows()) if r.get('kind') == 'resume' and r['session_id'] == root]
         self.assertEqual(len(resumes), 1)
-        explore = next(s['id'] for s in self.world.opencode_sessions().values() if s.get('title') == 'explore')
-        self.assertLess(max(self.polls_containing(explore)), resumes[0], 'resume waits for the subagent')
+        self.assertLess(max(self.polls_containing(self.world_child_id('explore'))), resumes[0],
+                        'resume waits for the subagent')
         self.assertEqual(self.checkpoint()['phase'], 'ci')
 
         # Still in CI: the next Backlog Issue is NOT selected until this task verifiably completes.
@@ -225,14 +249,15 @@ class ApiOutageTests(ActiveSessionBase):
     def test_api_down_during_settle_exits_78_keeps_the_marker_then_the_same_root_resumes(self):
         self.seed_marker('ses_outage_root', status='running')
         self.seed_root('ses_outage_root', active_polls=1)
-        # The first API call (version check) passes; the settle poll then fails.
+        # Path-scoped fault: the first /api/session/active poll (recovery adoption) passes and reports
+        # the root active, consuming its last lifetime poll; the next poll (the settle loop) fails.
         self.world.set_fault(path='/api/session/active', skip=1, fail=1)
         rc, out = self.direct('run', '--auto', '--title', 'x', 'PROMPT')
         self.assertEqual(rc, WRAPPER_RC_BLOCKED, out)
         marker = self.marker_doc()
         self.assertEqual(marker['session_id'], 'ses_outage_root')
         self.assertEqual(self.world.opencode_sessions()['ses_outage_root']['active_polls'], 0,
-                         'the owned root settled through the wrapper before the outage was reached')
+                         'the first poll reported the root active and consumed its last lifetime poll')
         self.assertFalse(self.world.sessions('code'), 'no new work was started')
 
         # API back: the same root is resumed once and the marker is removed.
@@ -248,8 +273,8 @@ class ApiOutageTests(ActiveSessionBase):
         issue = self.add_backlog('Feature E')
         self.world.script('alpha', [
             {'output': 'AUTOCONTROLLER_SELECT_ISSUE #%d' % issue},
-            # The cycle is killed (timeout) while the root is still active: marker + checkpoint remain.
-            {'root_active_polls': 3, 'block_seconds': 30},
+            # The root never goes inactive on its own, so the cycle timeout kills the wrapper mid-settle.
+            {'root_active_polls': -1, 'output': 'coding handed off'},
             {'output': 'AUTOCONTROLLER_SELECT_ISSUE #999'},
         ])
         self.world.script_resume('alpha', 'code', [{'actions': [pr_action(issue)]}])
@@ -275,7 +300,7 @@ class ApiOutageTests(ActiveSessionBase):
         self.assertEqual(self.checkpoint()['kind'], 'issue', 'the checkpoint is preserved')
         self.assertEqual(self.marker_doc()['session_id'], root, 'the pending marker still names the same root')
 
-    def test_interrupt_owned_with_api_down_fails_closed_and_keeps_the_pending_interrupt(self):
+    def test_interrupt_owned_with_api_down_fails_closed_and_keeps_the_marker(self):
         self.seed_marker('ses_api_root', status='running')
         self.seed_root('ses_api_root', active_polls=-1)
         self.world.set_fault(path=None, fail=-1)
@@ -286,6 +311,8 @@ class ApiOutageTests(ActiveSessionBase):
         self.assertEqual(rc, 2, out)
         self.assertIn('INTERRUPT NOT VERIFIED', out)
         self.assertFalse([r for r in self.log_rows() if r.get('kind') == 'interrupt'], 'nothing was interrupted')
+        self.assertEqual(self.marker_doc()['session_id'], 'ses_api_root', 'the marker still names the owned root')
+        self.assertTrue(self.pending_marker().exists(), 'the pending marker is kept for a later retry')
 
 
 class InterruptOwnedTests(ActiveSessionBase):
@@ -342,8 +369,9 @@ class ForeignAndAmbiguousTests(ActiveSessionBase):
         self.assertFalse(self.pending_marker().exists(), 'no marker is written for a refused run')
         self.assertFalse([r for r in self.log_rows() if r.get('kind') == 'interrupt'], 'foreign is never interrupted')
 
-    def test_foreign_root_appearing_during_settle_blocks_and_preserves_the_marker(self):
-        # The owned root is still active; a foreign root appears in the project dir during the settle.
+    def test_foreign_root_alongside_the_adopted_root_is_refused_by_settle_and_keeps_the_marker(self):
+        # The owned root and a foreign root are both active in the project dir before the run starts;
+        # settle sees two roots and refuses. (The foreign root is seeded up front, not mid-settle.)
         self.seed_marker('ses_owned_root', status='running')
         self.seed_root('ses_owned_root', active_polls=-1)
         self.world.seed_opencode_session('ses_intruder', title='intruder', directory=self.checkout, active_polls=-1)
@@ -372,7 +400,7 @@ class ForeignAndAmbiguousTests(ActiveSessionBase):
         self.assertNotIn('session_id', self.marker_doc(), 'an ambiguous title is never checkpointed')
 
     def test_legacy_marker_with_two_active_roots_is_refused_by_recovery(self):
-        legacy = {'status': 'running', 'pid': 999999, 'boot_id': None, 'opencode': 'v2', 'agent': 'orchestrator'}
+        legacy = {'status': 'running', 'pid': 0, 'boot_id': None, 'opencode': 'v2', 'agent': 'orchestrator'}
         self.pending_marker().parent.mkdir(parents=True, exist_ok=True)
         self.pending_marker().write_text(json.dumps(legacy), encoding='utf-8')
         self.seed_root('ses_legacy_a', title='one', active_polls=-1)
@@ -382,15 +410,18 @@ class ForeignAndAmbiguousTests(ActiveSessionBase):
         self.assertIn('Legacy pending marker is ambiguous', out)
         self.assertNotIn('session_id', self.marker_doc())
 
-    def test_session_in_another_directory_is_ignored_by_the_wrapper(self):
+    def test_active_session_in_another_directory_does_not_block_a_new_run(self):
+        # No pending marker, so the run's pre-check must consult the active set. The only active
+        # session is outside the project checkout, so the real wrapper must run the task normally.
         other_dir = str(self.tmp / 'elsewhere')
         self.world.seed_opencode_session('ses_elsewhere', title='elsewhere', directory=other_dir, active_polls=-1)
-        self.seed_marker('ses_mine')
-        self.seed_root('ses_mine', active_polls=0)
-        rc, out = self.direct('--checkpoint')
+        self.world.script('alpha', [{'output': 'AUTOCONTROLLER_NO_ACTION'}])
+        self.world.script_resume('alpha', 'code', [{}])
+        rc, out = self.direct('run', '--auto', '--title', 'x', 'PROMPT')
         self.assertEqual(rc, 0, out)
-        self.assertEqual(self.marker_doc()['session_id'], 'ses_mine')
-        self.assertFalse([r for r in self.log_rows() if r.get('kind') == 'interrupt'])
+        self.assertNotIn('Active project sessions', out)
+        self.assertEqual(len(self.sessions('code')), 1, 'the new run started its own root')
+        self.assertFalse([r for r in self.log_rows() if r.get('kind') == 'interrupt'], 'the other session is untouched')
 
     def test_checkpoint_with_single_active_root_checkpoints_it(self):
         self.seed_marker(None, title='alpha issue #7 [guard:1-3]')
