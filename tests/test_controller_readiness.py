@@ -105,6 +105,11 @@ class ControllerReadyTest(unittest.TestCase):
         with mock.patch.object(lc, 'process_start_ticks', return_value=None):
             self.assertFalse(lc.controller_ready(self.state, 1234))
 
+    def test_deeply_nested_marker_is_not_ready_without_raising(self):
+        # json.loads raises RecursionError here; a probe must answer "not ready", never escape.
+        self.write('[' * 100000)
+        self.assertFalse(lc.controller_ready(self.state, 1234))
+
 
 class SyncControllerReadyTest(unittest.TestCase):
     """autonomy-controller.sync_controller_ready: publish only when every worker is initialized."""
@@ -389,6 +394,35 @@ class ProbeRequirementTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertTrue(any('changed during the health window (MainPID/NRestarts)' in r for r in reasons), reasons)
 
+    def test_marker_withdrawn_at_the_final_poll_fails_the_window(self):
+        # Readiness was seen early; the controller's finally then removed ready.json while the unit stayed
+        # active with the same MainPID. The window ends on the poll where the marker is gone: it must fail.
+        clock = FakeClock()
+        reasons: list[str] = []
+        with mock.patch.object(lc, 'unit_state', side_effect=lambda: dict(HEALTHY_STATE)):
+            ok = lc.healthy(check=lambda: True, seconds=3, sleep=clock.sleep, clock=clock,
+                            ready=lambda pid: clock.now < 3, ready_timeout=10, reasons=reasons)
+        self.assertFalse(ok)
+        self.assertEqual(clock.now, 3)
+        self.assertEqual(reasons, ['controller pid 4242 withdrew startup readiness during the health window'])
+
+    def test_marker_withdrawn_mid_window_fails_with_the_withdrawal_reason(self):
+        clock = FakeClock()
+        reasons: list[str] = []
+        with mock.patch.object(lc, 'unit_state', side_effect=lambda: dict(HEALTHY_STATE)):
+            ok = lc.healthy(check=lambda: True, seconds=5, sleep=clock.sleep, clock=clock,
+                            ready=lambda pid: clock.now < 1, ready_timeout=10, reasons=reasons)
+        self.assertFalse(ok)
+        self.assertEqual(reasons, ['controller pid 4242 withdrew startup readiness during the health window'])
+
+    def test_a_ready_probe_that_raises_counts_as_not_ready(self):
+        def broken(pid):
+            raise RuntimeError('probe broke')
+        ok, reasons, clock = self.run_healthy(broken)
+        self.assertFalse(ok)
+        self.assertEqual(clock.now, 10, 'a raising probe is simply never ready, so the bound applies')
+        self.assertIn('did not publish startup readiness', reasons[0])
+
 
 class UpdateReadinessTest(Base):
     """update/rollback with the fake service: stale, missing and inactive readiness, plus reasons in history."""
@@ -421,6 +455,10 @@ class UpdateReadinessTest(Base):
 
     def test_garbage_marker_is_stale(self):
         self.expect_stale_rollback('{not json')
+
+    def test_deeply_nested_marker_is_stale_and_rolls_back_without_escaping(self):
+        # A RecursionError from the probe must not skip abort_swap: the update rolls back with a reason.
+        self.expect_stale_rollback('[' * 100000)
 
     def test_missing_readiness_times_out_and_rolls_back_with_a_reason(self):
         self.service.silent_tags.add('v1.1.0')

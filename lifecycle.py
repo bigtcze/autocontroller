@@ -336,8 +336,16 @@ def controller_ready(state_dir: Path, pid: int) -> bool:
     """True only when ready.json names THIS pid and the start ticks of its current process.
 
     A marker from an earlier process (other pid, or same pid reused after a restart, which changes
-    starttime) is stale. Missing, unreadable or unknown-schema markers are not ready.
+    starttime) is stale. Missing, unreadable or unknown-schema markers are not ready. Fail closed: any
+    exception while reading the marker (for example RecursionError on a deeply nested document) is not ready.
     """
+    try:
+        return _marker_matches(state_dir, pid)
+    except Exception:
+        return False
+
+
+def _marker_matches(state_dir: Path, pid: int) -> bool:
     doc = _read_json(state_dir / CONTROLLER_READY)
     if not isinstance(doc, dict) or doc.get('schema') != 1:
         return False
@@ -730,7 +738,9 @@ def healthy(*, check, seconds: int, sleep=time.sleep, clock=time.monotonic, read
     Readiness: the controller process must also publish state/ready.json for its own pid and start
     ticks (see controller_ready). That is startup readiness only, not proof of continuous task progress.
     It passes once readiness was observed AND `seconds` elapsed; it fails when readiness is not observed
-    within max(seconds, ready_timeout). The reason for a failure is appended to `reasons`.
+    within max(seconds, ready_timeout). Readiness must persist: once observed, every later poll (including
+    the final one before returning True) must still see it, so a marker withdrawn during the window fails
+    it. A probe that raises counts as not ready. The reason for a failure is appended to `reasons`.
     """
     def fail(reason: str) -> bool:
         if reasons is not None:
@@ -745,13 +755,22 @@ def healthy(*, check, seconds: int, sleep=time.sleep, clock=time.monotonic, read
         if not can_drain(first):
             return fail('service not running after start')
         pid = first['MainPID']
+
+        def ready_now() -> bool:
+            try:
+                return bool(ready(pid))
+            except Exception:
+                return False
         start = clock()
         window_end = start + seconds
         bound = start + max(seconds, ready_timeout)
         is_ready = False
         while True:
             now_t = clock()
-            if not is_ready and ready(pid):
+            if is_ready:
+                if not ready_now():
+                    return fail(f'controller pid {pid} withdrew startup readiness during the health window')
+            elif ready_now():
                 is_ready = True
             if is_ready and now_t >= window_end:
                 return True
@@ -929,16 +948,23 @@ def update(target: Path, repo: str, *, gh, tag: str | None = None, yes: bool = F
         reason = '; '.join(reasons) or 'health check failed'
         _stop_unhealthy(target)
         abort_swap(target)
+        restore_reasons: list[str] = []
         restored = verified(target, active=active, health_seconds=health_seconds, check=check, sleep=sleep,
-                            clock=clock, ready_timeout=ready_timeout)
-        append_history(target, {'action': 'update', 'from': before, 'to': stage['tag'],
-                                'result': 'rolled_back' if restored else 'rollback_unhealthy', 'reason': reason})
+                            clock=clock, ready_timeout=ready_timeout, reasons=restore_reasons)
+        restore_reason = '; '.join(restore_reasons) or 'restore health check failed'
+        entry = {'action': 'update', 'from': before, 'to': stage['tag'],
+                 'result': 'rolled_back' if restored else 'rollback_unhealthy', 'reason': reason}
+        if not restored:
+            entry['restore_reason'] = restore_reason
+        append_history(target, entry)
         _remove(staging)
         if active:
             state = 'restored and running' if restored else 'restored but NOT healthy; inspect the service'
         else:
             state = ('restored (service was stopped and is not started; its check passes)' if restored
                      else 'restored but its check FAILS; inspect the install')
+        if not restored:
+            state += f' ({restore_reason})'
         raise LifecycleError(f'update to {stage["tag"]} failed its health check ({reason}); '
                              f'previous {before or "version"} {state}')
 
@@ -983,13 +1009,19 @@ def rollback(target: Path, *, yes: bool = False, environ, ask=input, drain_timeo
             install_program_files(swap, target, *snapshot_program(swap))
             _prune(target, prev_program, current)
             _remove(swap)
+            restore_reasons: list[str] = []
             restored = verified(target, active=active, health_seconds=health_seconds, check=check, sleep=sleep,
-                                clock=clock, ready_timeout=ready_timeout)
-            append_history(target, {'action': 'rollback', 'from': before, 'to': target_tag,
-                                    'result': 'failed_restored' if restored else 'failed_unhealthy',
-                                    'reason': reason})
-            raise LifecycleError(f'rollback to {target_tag} failed its health check ({reason}); '
-                                 'the current release was restored')
+                                clock=clock, ready_timeout=ready_timeout, reasons=restore_reasons)
+            restore_reason = '; '.join(restore_reasons) or 'restore health check failed'
+            entry = {'action': 'rollback', 'from': before, 'to': target_tag,
+                     'result': 'failed_restored' if restored else 'failed_unhealthy',
+                     'reason': reason}
+            if not restored:
+                entry['restore_reason'] = restore_reason
+            append_history(target, entry)
+            outcome = ('the current release was restored' if restored else
+                       f'the current release was restored but NOT healthy ({restore_reason})')
+            raise LifecycleError(f'rollback to {target_tag} failed its health check ({reason}); {outcome}')
         # The previous store now holds the release we just left, so a rollback can itself be undone.
         # N4: the old store is renamed aside, not deleted first, so a crash at any point leaves a
         # recoverable state: previous, previous.old or swap always holds the release that was replaced.

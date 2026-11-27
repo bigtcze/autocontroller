@@ -452,6 +452,18 @@ class HealthAndRollbackTest(Base):
             self.update(check=lambda: False)
         self.assertEqual(self.history()[-1]['result'], 'rollback_unhealthy')
 
+    def test_new_code_and_restore_both_fail_records_the_restore_reason(self):
+        # The new release fails its check; the restored previous release never publishes readiness.
+        # The history keeps the original 'reason' and adds 'restore_reason' for the restore failure.
+        self.service.silent_tags.add('v1.0.0')
+        with self.assertRaisesRegex(lc.LifecycleError,
+                                    'restored but NOT healthy.*did not publish startup readiness'):
+            self.update(check=lambda: self.world.tag() == 'v1.0.0', ready_timeout=5)
+        entry = self.history()[-1]
+        self.assertEqual(entry['result'], 'rollback_unhealthy')
+        self.assertEqual(entry['reason'], '--check failed')
+        self.assertIn('did not publish startup readiness', entry['restore_reason'])
+
     def test_unreadable_state_inside_health_window_rolls_back_and_restores_previous(self):
         # R1: a `show` read that fails inside the window must not escape update. It is a failed check:
         # the new code is stopped, the staged swap is aborted, the previous release is restored byte-identical,
