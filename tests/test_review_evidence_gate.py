@@ -54,7 +54,10 @@ class ReviewGate(unittest.TestCase):
         self.on_agent = lambda: None
         stack = ExitStack()
         self.addCleanup(stack.close)
-        stack.enter_context(patch.object(self.w, 'related_pr', side_effect=lambda *a: dict(self.pr)))
+        self.related_pr_stub = patch.object(self.w, 'related_pr', side_effect=lambda *a: dict(self.pr))
+        self.related_pr_stub.start()
+        self.related_pr_active = True
+        self.addCleanup(self.stop_related_pr_stub)
         stack.enter_context(patch.object(m, 'pr_data', side_effect=lambda *a: dict(self.pr)))
         stack.enter_context(patch.object(self.w, 'checkout_state', return_value=('main', False)))
         stack.enter_context(patch.object(m, 'command', side_effect=self._command))
@@ -71,6 +74,9 @@ class ReviewGate(unittest.TestCase):
         if argv[:3] == ['gh', 'pr', 'merge']:
             self.merges.append(argv)
             self.pr.update(state='closed', merged_at='2026-11-26T12:00:00Z', merge_commit_sha='m' * 40)
+            stored = getattr(self, 'pr_store', {}).get(int(argv[3]))
+            if stored is not None:
+                stored.update(state='closed', merged_at='2026-11-26T12:00:00Z', merge_commit_sha='m' * 40)
         return ''
 
     def _gh_json(self, *args, timeout=180):
@@ -243,6 +249,76 @@ class ReviewGate(unittest.TestCase):
         self.assertIn('BLOCKER', notices['review-missing:issue:68']['message'])
         self.assertEqual(self.merges, [])
         self.assertEqual(len(self.lookups), 2)
+
+    # ----- (B2) red-main repair PR without evidence must not deadlock ---------------
+    def repair_setup(self):
+        """Renovate repair checkpoint at ci (issue #48 review B2).
+
+        The repair PR (pr_number, open, head SHA) is what `related_pr` pins in ci. The original Renovate
+        PR (number 68 here, merged) is what the `code` branch would fall back to: the bug path.
+        """
+        # The original Renovate PR is a genuine verified bot PR (so the code-branch identity guard passes
+        # and the reaching of the "already merged" raise is the only thing that could fail).
+        renovate_repo = {'full_name': 'org/demo'}
+        original = {'number': 68, 'state': 'closed', 'merged_at': '2026-11-26T11:00:00Z',
+                    'base': {'ref': 'main', 'repo': renovate_repo}, 'draft': False,
+                    'user': {'login': 'renovate[bot]', 'type': 'Bot', 'id': 29139614},
+                    'head': {'sha': 'c' * 40, 'repo': renovate_repo}}
+        self.pr_store = {68: original, 94: dict(self.pr, number=94)}
+        # setUp stubs related_pr with a fixed PR; this test needs the real rule (repair pin in ci).
+        # patch.object on an instance sets an attribute; stopping it restores the class method.
+        self.stop_related_pr_stub()
+        pr_stub = patch.object(m, 'pr_data', side_effect=lambda repo, n: dict(self.pr_store[int(n)]))
+        pr_stub.start()
+        self.addCleanup(pr_stub.stop)
+        cp = {'kind': 'renovate', 'number': 68, 'url': 'https://github.com/org/demo/pull/68',
+              'phase': 'ci', 'pr_number': 94, 'repairing': True, 'retry_same_task': True,
+              'started': m.time.time()}
+        self.w.save_checkpoint(cp)
+
+    def stop_related_pr_stub(self):
+        if self.related_pr_active:
+            self.related_pr_stub.stop()
+            self.related_pr_active = False
+
+    def cycle_renovate(self):
+        self.w._cycle('renovate', 68, 'https://github.com/org/demo/pull/68', None)
+
+    def test_b2_repair_checkpoint_without_evidence_stays_in_ci_and_does_not_deadlock(self):
+        self.candidates = []
+        self.repair_setup()
+        self.cycle_renovate()  # must not raise "already merged before controller's CI/merge gate"
+        self.cycle_renovate()  # the repeat cycle must also not raise
+        cp = self.cp()
+        self.assertEqual(cp['phase'], 'ci', 'a repair checkpoint never routes to code on missing evidence')
+        self.assertEqual(cp['pr_number'], 94)
+        self.assertNotIn('ready_sha', cp)
+        self.assertEqual(self.prompts, [], 'no AI call for missing evidence on a repair checkpoint')
+        self.assertEqual(self.merges, [])
+        notices = json.loads(self.w.notices_file.read_text())
+        self.assertIn('BLOCKER', notices['review-missing:renovate:68']['message'])
+        self.assertGreater(self.w.retry_map()['renovate:68']['until'] - m.time.time(), 3000,
+                           'the hourly retry applies to a missing repair review')
+
+    def test_b2_repair_checkpoint_proceeds_once_evidence_appears(self):
+        self.candidates = []
+        self.repair_setup()
+        self.cycle_renovate()  # missing evidence: stays in ci with the BLOCKER retry
+        self.assertEqual(self.cp()['phase'], 'ci')
+        # A completed oracle review of the repair PR head now exists; the retry window is cleared.
+        self.candidates = [cand()]
+        self.w.clear_retry('renovate:68')
+        self.cycle_renovate()
+        cp = self.cp()
+        self.assertEqual(cp['review_evidence']['sha'], SHA, 'the next cycle stores evidence for the head')
+        self.assertEqual(cp['phase'], 'merge', 'with evidence and green CI the repair proceeds to merge')
+        self.assertEqual(cp['ready_sha'], SHA)
+        self.cycle_renovate()  # merge phase: the exact pinned head is merged
+        # The post-merge read in the controller sees the repair PR merged in the store.
+        self.assertEqual(len(self.merges), 1)
+        self.assertEqual(self.merges[0][3], '94', 'the repair PR is the one merged')
+        self.assertEqual(self.merges[0][-2:], ['--match-head-commit', SHA], 'merge pins the exact reviewed head')
+        self.assertEqual(self.prompts, [], 'no AI call on the way to merge')
 
     # ----- (h) negative completed review, fixer correction, new tree ---------------
     def test_h_review_of_old_tree_is_invalid_after_fixer_changes_the_tree(self):

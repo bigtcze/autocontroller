@@ -3,6 +3,7 @@ import importlib.util
 import os
 import tempfile
 import unittest
+import urllib.parse
 from pathlib import Path
 from unittest.mock import patch
 
@@ -53,7 +54,8 @@ class FakeApi:
             return {'data': [], 'cursor': {'next': None}} if envelope else []
         if path.endswith('/message') or '/message?' in path:
             sid = path.split('/')[3]
-            cursor = path.split('?cursor=')[1] if '?cursor=' in path else None
+            query = urllib.parse.parse_qs(path.split('?', 1)[1]) if '?' in path else {}
+            cursor = query.get('cursor', [None])[0]
             page = self.messages[sid][self.page_index(cursor)]
             return page if envelope else page['data']
         sid = path.split('/')[3]
@@ -105,6 +107,24 @@ class OracleReviewsTests(unittest.TestCase):
         self.assertEqual(candidate['outcome'], 'succeeded')
         self.assertEqual(candidate['trees'], ['T1'])
         self.assertTrue(candidate['snapshot_complete'])
+
+    def test_issued_api_paths_encode_search_directory_and_parent_and_request_assistant_messages(self):
+        sessions = self.base_sessions(ses_o=child('ses_o'))
+        api = FakeApi(self.tmp, sessions,
+                      messages={'ses_o': [{'data': [assistant('T1', 'T1')]}]},
+                      pages={'parentID=null': [{'data': [root('ses_root', directory=self.tmp)], 'cursor': {'next': None}}],
+                             'parentID=ses_root': [{'data': [child('ses_o')], 'cursor': {'next': None}}]})
+        self.run_listing(api)
+        root_list = next(p for p in api.calls if p.startswith('/api/session?') and 'parentID=null' in p)
+        self.assertIn('search=demo%20kind%20%235', root_list, 'the # in the title is percent-encoded as %23')
+        self.assertIn(f'directory={urllib.parse.quote(self.tmp, safe="")}', root_list,
+                      'the wrapper root is percent-encoded in full, with no unencoded slashes')
+        self.assertNotIn(f'directory={self.tmp}', root_list)
+        self.assertIn('parentID=ses_root', next(p for p in api.calls if p.startswith('/api/session?parentID=ses_root')))
+        message_calls = [p for p in api.calls if p.endswith('/message') or '/message?' in p]
+        self.assertTrue(message_calls)
+        self.assertTrue(all('type=assistant' in p and 'limit=200' in p for p in message_calls),
+                        'every message page asks for assistant messages only, with the same type on each cursor')
 
     def test_title_and_directory_mismatch_roots_are_excluded(self):
         other_dir = str(Path(self.tmp).parent / 'other')

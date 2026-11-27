@@ -15,6 +15,16 @@ SHA='a'*40
 MERGE='b'*40
 URL='https://github.com/org/demo/issues/11'
 
+
+def trusted_review_stub(kind, number, head_sha):
+    """Fixture for tests of OTHER gates (CI, divergence, merge, postmerge): trusted review evidence for the head.
+
+    It replaces the wrapper listing and git-tree lookup. The review gate's own behaviour, including
+    absence and mismatch, is tested in tests/test_review_evidence_gate.py, not here.
+    """
+    return {'sha':head_sha,'tree':'t'*40,'session':'ses_oracle','root':'ses_root'},''
+
+
 class Gates(unittest.TestCase):
     def setUp(self):
         tmp=tempfile.TemporaryDirectory();self.addCleanup(tmp.cleanup)
@@ -32,9 +42,6 @@ class Gates(unittest.TestCase):
         self.merge_calls=[]
         self.merge_rejects=None  # optional callable(pr): may mutate self.pr, then raise
         self.agent_output=(0,'Orchestrator: fixer completed; oracle reviewed, no blockers')
-        # Independent review evidence, as the gate would return it for the current head. Tests that
-        # exercise the gate itself set self.review = None (absence) or a specific candidate.
-        self.review='default'
 
     def stage(self, phase, **extra):
         cp={'kind':'issue','number':11,'url':URL,'phase':phase,
@@ -69,14 +76,8 @@ class Gates(unittest.TestCase):
         stack.enter_context(patch.object(self.w.project,'set_status'))
         stack.enter_context(patch.object(self.w.project,'items',return_value=[self.item]))
         stack.enter_context(patch.object(m,'issue_state',return_value='closed'))
-        stack.enter_context(patch.object(self.w,'review_evidence',side_effect=self._review_for))
+        stack.enter_context(patch.object(self.w,'review_evidence',side_effect=trusted_review_stub))
         return stack
-
-    def _review_for(self,kind,number,head_sha):
-        """Stand-in for the wrapper listing + git tree lookup: a trusted candidate for this head, or none."""
-        if self.review is None:
-            return None,'no completed, idle, inactive oracle session with a complete snapshot (test: absent)'
-        return {'sha':head_sha,'tree':'t'*40,'session':'ses_oracle','root':'ses_root'},''
 
     def test_full_flow_one_omo_session_and_real_github_gates(self):
         self.patches()

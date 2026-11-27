@@ -1138,17 +1138,20 @@ def oracle_reviews(kind, number):
             messages = []
             cursor = None
             for _ in range(ORACLE_PAGE_CAP):
-                path = f"/api/session/{urllib.parse.quote(child['id'], safe='')}/message"
+                # type=assistant filters before pagination; the spec requires the same type on every cursor page.
+                query = "type=assistant&limit=200"
                 if cursor:
-                    path += f"?cursor={urllib.parse.quote(cursor, safe='')}"
+                    query += f"&cursor={urllib.parse.quote(cursor, safe='')}"
+                path = f"/api/session/{urllib.parse.quote(child['id'], safe='')}/message?{query}"
                 page = opencode_api("GET", path, envelope=True)
                 if not isinstance(page, dict) or not isinstance(page.get("data"), list):
                     raise RuntimeError("Invalid message page")
                 messages.extend(page["data"])
-                nxt = (page.get("cursor") or {}).get("next") if isinstance(page.get("cursor"), dict) else None
+                cursor_info = page.get("cursor")
+                nxt = cursor_info.get("next") if isinstance(cursor_info, dict) else None
                 if not nxt:
                     break
-                if nxt == cursor:
+                if not isinstance(nxt, str) or nxt == cursor:
                     raise RuntimeError("Invalid message cursor")
                 cursor = nxt
             else:

@@ -1507,14 +1507,24 @@ class ProjectWorker:
         return {"sha": head_sha, "tree": tree, "session": latest["session"], "root": latest["root"]}, ""
 
     def route_missing_review(self, checkpoint: dict, key: str, head: str, reason: str):
-        """Return to the agent for the final oracle review. A repeat at the same head is a BLOCKER."""
+        """Hold the task until a completed oracle review of this exact tree exists. A repeat at the same head is a BLOCKER.
+
+        A red-main repair checkpoint stays in `ci` (issue #48 review B2): its `code` phase would resolve the
+        original, already-merged Renovate PR and raise on every cycle. Other tasks return to the agent.
+        """
         repeated = bool(head) and checkpoint.get("review_missing_head") == head
-        checkpoint.update(phase="code", review_missing_head=head, review_feedback=(
-            f"Independent review evidence is missing for PR head {head[:12]} ({reason}). The controller "
-            "accepts only a completed native OMO `oracle` subagent session whose OpenCode snapshot equals "
-            "the git tree of the exact final PR head. Run the final `oracle` review on a clean checkout of "
-            "the exact pushed head after the last commit (PR description edits are fine), route its findings "
-            "to `fixer`, and do not request repeated reviews of an unchanged tree merely to satisfy this check."))
+        feedback = (
+            f"A completed native OMO `oracle` review of this exact tree is required before merge. Independent "
+            f"review evidence is missing for PR head {head[:12]} ({reason}). The controller accepts only a completed `oracle` "
+            "subagent session whose OpenCode snapshot equals the git tree of the exact final PR head. "
+            "Run that review on the pushed head after the last commit (PR description edits do not change the "
+            "tree). Route its findings to `fixer`. Findings already handled on an unchanged tree do not need "
+            "a new review.")
+        repair = bool(checkpoint.get("repairing")) and checkpoint.get("kind") == "renovate"
+        if repair:
+            checkpoint.update(phase="ci", review_missing_head=head)
+        else:
+            checkpoint.update(phase="code", review_missing_head=head, review_feedback=feedback)
         checkpoint.pop("ready_sha", None)
         checkpoint.pop("review_evidence", None)
         self.save_checkpoint(checkpoint)

@@ -142,9 +142,9 @@ def api(root: Path, args: list[str]) -> int:
         return emit(list(_locked(root)['sessions'].values()))
     if method == 'GET' and path.startswith('/api/session?'):
         return _list_page(root, path)
-    match = re.fullmatch(r'/api/session/([^/?]+)/message(?:\?cursor=(\S+))?', path)
+    match = re.fullmatch(r'/api/session/([^/?]+)/message(?:\?(\S+))?', path)
     if method == 'GET' and match:
-        return _message_page(root, unquote(match.group(1)), match.group(2))
+        return _message_page(root, unquote(match.group(1)), urllib.parse.parse_qs(match.group(2) or '', keep_blank_values=True))
     match = re.fullmatch(r'/api/session/([^/]+)', path)
     if method == 'GET' and match:
         sid = unquote(match.group(1))
@@ -288,16 +288,32 @@ def session_dir(session: dict) -> str | None:
     return (session.get('location') or {}).get('directory')
 
 
-def _message_page(root: Path, sid: str, cursor: str | None) -> int:
-    """GET /api/session/<id>/message: newest-first assistant messages; one page per call (cap-free fake)."""
+def _message_page(root: Path, sid: str, query: dict) -> int:
+    """GET /api/session/<id>/message?type&limit&cursor: newest-first; `type` filters BEFORE pagination.
+
+    Accepts the query the wrapper sends (`type=assistant&limit=200`, then the same type with a cursor).
+    An unknown `type` is refused, like the real API's enum.
+    """
     if sid not in _locked(root)['sessions']:
         print(f'session {sid} not found: 404', file=sys.stderr)
         return 1
+    message_type = query.get('type', [None])[0]
+    if message_type is not None and message_type not in MESSAGE_TYPES:
+        print(f'invalid message type {message_type!r}: 400', file=sys.stderr)
+        return 1
+    limit = int(query.get('limit', ['50'])[0])
+    start = int(query.get('cursor', ['0'])[0])
     messages = list(reversed(_locked(root).get('messages', {}).get(sid, [])))
-    start = int(cursor or 0)
-    page = messages[start:start + 50]
-    nxt = start + 50 if start + 50 < len(messages) else None
+    if message_type is not None:
+        messages = [m for m in messages if m.get('type') == message_type]
+    page = messages[start:start + limit]
+    nxt = start + limit if start + limit < len(messages) else None
     return _envelope(page, cursor={'previous': None, 'next': None if nxt is None else str(nxt)})
+
+
+# The message `type` enum from the OpenCode V2 OpenAPI document (GET /api/session/{sessionID}/message).
+MESSAGE_TYPES = frozenset({'agent-switched', 'model-switched', 'location-switched', 'user', 'synthetic', 'system',
+                           'skill', 'shell', 'assistant', 'compaction', 'idle'})
 
 
 def run_new(folder: Path, opts: dict, prompt: str) -> int:
