@@ -15,6 +15,8 @@ REAL = os.environ.get("AUTONOMY_OPENCODE", str(Path.home() / ".opencode/bin/open
 STATE = Path(os.environ["AUTONOMY_PENDING_MARKER"]).expanduser()
 
 QUIET_SECONDS = 60
+# How long --interrupt-owned waits for the owned sessions to drain before failing closed.
+INTERRUPT_DRAIN_SECONDS = 30
 
 
 def log(message):
@@ -1050,7 +1052,7 @@ def interrupt_owned():
     if root is None:
         if active_sessions(): raise RuntimeError("Pending root unresolved; cannot safely interrupt")
         return 0
-    deadline=time.monotonic()+30
+    deadline=time.monotonic()+INTERRUPT_DRAIN_SECONDS
     while True:
         active=active_sessions()
         owned=[sid for sid in active if root_session_id(sid)==root]

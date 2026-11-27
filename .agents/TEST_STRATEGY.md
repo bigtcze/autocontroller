@@ -19,7 +19,9 @@ Git config, removes GitHub/provider tokens, and puts failing shims for `gh`,
   selection verdicts, Renovate identity, config validation).
 - **Simulated integration**: `ProjectWorker` cycles with patched GitHub
   responses; real temporary Git repositories; the real safe wrapper against a
-  fake OpenCode API process; Engram runtime with fake binaries and temporary
+  fake OpenCode API process, including simulated active, descendant, foreign and
+  API-fault sessions (`tests/test_e2e_active_sessions.py`; live OpenCode timing
+  remains a gap); Engram runtime with fake binaries and temporary
   SQLite stores and a private temporary socket.
 - **Repository contracts**: `tests/test_repository_contracts.py` checks this
   repository's own bootstrap contract files, workflow safety properties
@@ -61,7 +63,7 @@ Git config, removes GitHub/provider tokens, and puts failing shims for `gh`,
 - Installer and systemd lifecycle on fresh VMs, reboot survival, lingering.
 - Live GitHub: device authorization, Project provisioning, branch protection,
   merge methods, real CI interaction, Renovate App behaviour.
-- Live OpenCode/OMO sessions, provider quotas and real Engram releases.
+- Live OpenCode/OMO sessions, provider quotas and real Engram releases. This includes the real server's active-session semantics, real subagent timing, real interrupt delivery and the real `/proc` cmdline of a launched guard: only the fake's poll-driven model is tested.
 - Live agent follow-up admission (orchestrator `item-add` / `item-edit` / verification of Issues it creates): only the work-prompt contract and a simulated admission in the E2E double are tested.
 - Release workflow publication (never triggered during development).
 - Managed `update` and `rollback` against real GitHub Releases: simulated only (fake GitHub API and `gh`, local archives). Digest presence on real release assets is not verified.
