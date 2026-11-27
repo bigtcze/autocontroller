@@ -428,6 +428,19 @@ class NoAutoAdmission(ControllerCase):
         # trip or hide the check. Only executable string literals count.
         tree = ast.parse((ROOT / 'autonomy-controller.py').read_text(encoding='utf-8'))
         self.assertEqual(executable_strings_containing(tree, 'item-add'), [])
+        # The work_prompt exclusion must cover instruction text only: no executable call inside it.
+        work = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'work_prompt']
+        self.assertEqual(len(work), 1)
+        banned = {'command', 'gh_json', 'gh_api_pages', 'run'}
+        for call in (n for n in ast.walk(work[0]) if isinstance(n, ast.Call)):
+            fn = call.func
+            name = fn.id if isinstance(fn, ast.Name) else getattr(fn, 'attr', None)
+            root = fn
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            self.assertNotIn(name, banned, f'work_prompt line {call.lineno} calls {name}')
+            self.assertFalse(isinstance(root, ast.Name) and root.id == 'subprocess',
+                             f'work_prompt line {call.lineno} calls subprocess')
 
     def test_item_add_checker_has_positive_and_negative_controls(self):
         # Positive: a real argv literal is caught, including inside a nested list.

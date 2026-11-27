@@ -12,8 +12,13 @@ ISSUE_URL = 'https://github.com/org/project/issues/42'
 
 
 def follow_up_commands(owner, number):
-    return [f'gh project item-add {number} --owner {owner} --url <issue-url>',
-            f'gh project item-list {number} --owner {owner} --format json']
+    """Exact command strings the work prompt must carry (B1, B2)."""
+    return [
+        f'gh project item-add {number} --owner {owner} --url <issue-url> --format json',
+        f'gh project view {number} --owner {owner} --format json',
+        f'gh project field-list {number} --owner {owner} --format json',
+        f'gh project item-list {number} --owner {owner} --format json --limit 1000',
+    ]
 
 
 class FollowUpIssueContract(unittest.TestCase):
@@ -21,14 +26,21 @@ class FollowUpIssueContract(unittest.TestCase):
 
     def assert_follow_up_contract(self, p, owner, number):
         self.assertIn(f'owner `{owner}`, number {number}', p)
-        self.assertIn(f'gh project item-add {number} --owner {owner} --url <issue-url>', p)
+        for command in follow_up_commands(owner, number):
+            self.assertIn(command, p)
+        # item-edit must carry all four flags, with the IDs sourced as stated.
         edit = [line for line in p.splitlines() if 'gh project item-edit' in line]
         self.assertEqual(len(edit), 1)
-        self.assertIn(f'`{owner}`/{number}', edit[0])
-        self.assertIn(f'gh project item-list {number} --owner {owner} --format json', p)
+        for flag in ('--id <item id>', f'--project-id <id from: gh project view {number} --owner {owner} --format json>',
+                     '--field-id <Status field id>', '--single-select-option-id <option id>'):
+            self.assertIn(flag, edit[0])
+        self.assertIn(f'`gh project field-list {number} --owner {owner} --format json`', p)
+        self.assertIn('totalCount', p)
+        self.assertIn('verification blocker', p)
+        self.assertIn('leave Status unset', p)
+        self.assertIn('never add a Ready step', p)
         self.assertIn('Todo', p)
         self.assertIn('Backlog', p)
-        self.assertIn('No manual Ready step', p)
         self.assertIn('reason', p)
         self.assertIn('never create a duplicate', p)
         self.assertIn('report the exact Issue URL and blocker', p)

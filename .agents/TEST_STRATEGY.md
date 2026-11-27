@@ -62,6 +62,7 @@ Git config, removes GitHub/provider tokens, and puts failing shims for `gh`,
 - Live GitHub: device authorization, Project provisioning, branch protection,
   merge methods, real CI interaction, Renovate App behaviour.
 - Live OpenCode/OMO sessions, provider quotas and real Engram releases.
+- Live agent follow-up admission (orchestrator `item-add` / `item-edit` / verification of Issues it creates): only the work-prompt contract and a simulated admission in the E2E double are tested.
 - Release workflow publication (never triggered during development).
 - Managed `update` and `rollback` against real GitHub Releases: simulated only (fake GitHub API and `gh`, local archives). Digest presence on real release assets is not verified.
 - Startup readiness (`state/ready.json`): live systemd verification is not automated. Offline tests use a fake service and simulated `/proc` start ticks; they prove the health rule, not that a real controller publishes the marker under systemd.
