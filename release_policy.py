@@ -182,6 +182,12 @@ HEX64 = re.compile(r'[0-9a-f]{64}')
 
 def open_release_blockers(repo: str, pages: Callable, label: str = RELEASE_BLOCKER_LABEL) -> list[dict]:
     """Open Issues (never PRs) carrying `label`. A non-list listing fails closed."""
+    # GitHub lists no Issues for a label that does not exist, which would look like "no blockers".
+    labels = pages(f'repos/{repo}/labels?per_page=100')
+    if not isinstance(labels, list):
+        raise ValueError('Release blocker label listing unavailable; refusing release')
+    if not any(isinstance(x, dict) and x.get('name') == label for x in labels):
+        raise ValueError(f"Release blocker label '{label}' does not exist in {repo}; refusing release")
     # The label is URL-encoded: the controller allows spaces in blocker_label, which would otherwise
     # produce a malformed query and an unparseable listing.
     rows = pages(f'repos/{repo}/issues?state=open&labels={urllib.parse.quote(label, safe="")}&per_page=100')

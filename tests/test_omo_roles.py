@@ -76,6 +76,15 @@ class FollowUpIssueContract(unittest.TestCase):
         self.assertNotIn('--owner org', other)
         self.assertNotIn('item-list 7 ', other)
 
+    def test_follow_up_blocker_rule_uses_the_configured_label(self):
+        p = mod.work_prompt('org/project', 'issue', 42, ISSUE_URL, blocker_label='ship-blocker', **PROJECT)
+        self.assertIn('created with label `ship-blocker`', p)
+        self.assertIn('the label is not authorization', p)
+        self.assertIn('If that label does not exist, report it as a blocker; never create or edit that label.', p)
+        self.assertNotIn('`release-blocker`', p)
+        default = mod.work_prompt('org/project', 'issue', 42, ISSUE_URL, **PROJECT)
+        self.assertIn('created with label `release-blocker`', default)
+
     def test_missing_project_identity_fails_closed(self):
         with self.assertRaises(TypeError):
             mod.work_prompt('org/project', 'issue', 42, ISSUE_URL)

@@ -1166,6 +1166,41 @@ class ReleaseGateTests(E2EBase):
         self.assertEqual(self.sessions(), [], 'a blocked release never starts an AI session')
         self.assertEqual(self.gh.issue(R, blocker)['state'], 'open')
 
+    def test_missing_blocker_label_prevents_tag_with_notice_and_never_starts_ai(self):
+        issue = self._release_candidate('v1.1.0', self.SHA)
+        self.gh.set_labels(R, ())  # the label was deleted: GitHub would list no blockers at all
+        self._checkpoint_at('release-publish', issue, 'v1.1.0', self.SHA)
+        worker = self.world.worker('alpha')
+        worker.one_iteration()
+        self.assertEqual(self._phase(), 'release-publish')
+        self.assertIsNone(self.gh.tag(R, 'v1.1.0'), 'no tag may exist without the blocker label')
+        self.assertEqual(self.sessions(), [], 'a missing label never starts an AI session')
+        notices = ew.ctl.json_read(worker.notices_file)
+        self.assertIn("label 'release-blocker' does not exist", notices['release-blocked:v1.1.0']['message'])
+
+    def test_custom_blocker_label_is_queried_and_blocks_for_other_repositories(self):
+        release = dict(self.RELEASE, blocker_label='ship-blocker')
+        self.world.add_project('alpha', R, 1, release=release)
+        self.gh.set_labels(R, ('release-blocker', 'ship-blocker'))
+        self.gh.set_release(R, 'v1.0.0', days_ago=20)
+        issue = self.gh.add_issue(R, title='Release v1.1.0 feature', body='r',
+                                  project='example-owner/1', status='In Progress')
+        self.gh.add_push_run(R, self.SHA, 'completed', 'success')
+        ignored = self.gh.add_issue(R, title='Other label', labels=('release-blocker',))  # not the configured label
+        blocker = self.gh.add_issue(R, title='Crash on upgrade', labels=('ship-blocker',))
+        self._checkpoint_at('release-publish', issue, 'v1.1.0', self.SHA)
+        worker = self.world.worker('alpha')
+        worker.one_iteration()
+        self.assertIsNone(self.gh.tag(R, 'v1.1.0'), 'the configured label gates publication')
+        notices = ew.ctl.json_read(worker.notices_file)
+        self.assertIn(f'#{blocker}', notices['release-blocked:v1.1.0']['message'])
+        self.assertNotIn(f'#{ignored}', notices['release-blocked:v1.1.0']['message'])
+        self.gh.set_issue_state(R, blocker, 'closed')
+        worker.one_iteration()
+        self.assertEqual(self._phase(), 'release-verify')
+        self.assertEqual(self.gh.issue(R, ignored)['state'], 'open', 'the other label never blocked')
+        self.assertEqual(self.sessions(), [])
+
     def test_closing_the_blocker_lets_publication_continue(self):
         issue = self._release_candidate('v1.1.0', self.SHA)
         blocker = self.gh.add_issue(R, title='Crash on upgrade', labels=('release-blocker',))
