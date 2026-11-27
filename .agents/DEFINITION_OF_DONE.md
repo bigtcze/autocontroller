@@ -9,7 +9,9 @@ An Issue is the unit of work. It is done only when all hold:
 3. `bash scripts/check-syntax.sh` and `bash scripts/offline-tests.sh` (or
    `mise run ci`) pass locally with reported real output.
 4. An independent review (OMO `oracle`) assessed the real diff against the
-   acceptance criteria and these contracts; blocking findings are fixed.
+   acceptance criteria and these contracts, including unnecessary complexity,
+   duplication and test relevance; avoidable overengineering introduced by the
+   PR is a blocking finding, and blocking findings are fixed.
 5. One PR containing `Closes #<n>`; the `required` check is green on the exact
    head SHA; the PR is ready (not draft) only after review.
 6. After merge, the `required.yml` push run on the exact merge commit is green.

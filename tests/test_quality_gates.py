@@ -69,7 +69,7 @@ class Gates(unittest.TestCase):
         self.assertFalse(self.w.cycle_state.exists())
         self.w.project.set_status.assert_called_once_with(self.item,'Done')
         self.assertEqual(len(self.agent_calls),1)
-        self.assertIn('native OMO',self.agent_calls[0][0])
+        self.assertIn('Native OMO Slim',self.agent_calls[0][0])
         self.assertIn('`oracle`',self.agent_calls[0][0])
         self.assertEqual(self.merge_calls[0][-1],SHA)
         self.assertIn('--match-head-commit',self.merge_calls[0])
