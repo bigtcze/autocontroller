@@ -1319,7 +1319,9 @@ class ProjectWorker:
     def related_pr(self, kind: str, number: int, checkpoint: dict) -> dict | None:
         # After discovery, lock the quality gate to the exact PR (including
         # additional post-merge repair PRs), not whichever PR appears newest.
-        if checkpoint.get("phase") in ("ci", "merge", "postmerge", "release-approval", "release-publish", "release-verify") and checkpoint.get("pr_number"):
+        # "repair" pins the already-merged failing PR (pr_number) so a reopened
+        # Issue's historical merge is not mistaken for a missing linkage.
+        if checkpoint.get("phase") in ("repair", "ci", "merge", "postmerge", "release-approval", "release-publish", "release-verify") and checkpoint.get("pr_number"):
             return pr_data(self.repo, int(checkpoint["pr_number"]))
         # A red-main repair must stay on its repair PR in every phase; the
         # original Issue linkage points at the already-merged, failing PR.

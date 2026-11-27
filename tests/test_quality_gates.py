@@ -195,6 +195,28 @@ class Gates(unittest.TestCase):
         self.assertIn('Autocontroller-Repair-For: #21',self.agent_calls[0][0])
         self.assertIn('`oracle`',self.agent_calls[0][0])
 
+    def test_reopened_issue_repair_checkpoint_stays_on_exact_repair_linkage(self):
+        # PR #21 merged and main CI failed; the Issue was reopened afterwards. The
+        # repair phase must keep resolving the merged PR #21 by its exact number, not
+        # treat it as historical (which would leave the repair gate with no PR to find).
+        self.pr.update(number=21,state='closed',merged_at='2026-11-26T21:11:46Z',merge_commit_sha=MERGE)
+        nodes=[self._closing_node(21,'MERGED','2026-11-26T21:11:46Z')]
+        repair={'number':22,'state':'open','merged_at':None,'draft':False,
+                'head':{'sha':'e'*40,'repo':{'full_name':'org/demo'}},
+                'base':{'ref':'main'},'merge_commit_sha':None,'mergeable_state':'clean'}
+        self.w.save_checkpoint({'kind':'issue','number':11,'url':URL,'phase':'repair',
+                                'pr_number':21,'review_feedback':'Fix failing main CI','retry_same_task':True})
+        self.patches(real_related=True)
+        with self._linked_graph(nodes,reopened_at='2026-11-26T21:28:31Z'), \
+             patch.object(m,'issue_state',return_value='open'), \
+             patch.object(m,'repair_pr',return_value=repair), \
+             patch.object(m,'pr_data',side_effect=lambda repo,n:dict(repair if n==22 else self.pr)):
+            self.w._cycle('issue',11,URL,None)
+        self.assertEqual(len(self.agent_calls),1)
+        self.assertIn('Autocontroller-Repair-For: #21',self.agent_calls[0][0])
+        cp=m.json_read(self.w.cycle_state)
+        self.assertEqual((cp['phase'],cp['pr_number'],cp['repairing']),('ci',22,True))
+
     def test_old_completed_review_merge_checkpoint_still_recovers(self):
         self.stage('merge',reviewed_sha=SHA)  # before migration: independent gate was completed
         self.patches()

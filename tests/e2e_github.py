@@ -79,6 +79,15 @@ class FakeGitHub:
         doc['next_id'] += 1
         return doc['next_id']
 
+    # One deterministic, strictly increasing clock per world. Every GitHub-side
+    # event (issue reopen, PR merge) takes the next tick, so event order in the
+    # fake always matches the order in which the calls happened.
+    _CLOCK_BASE = datetime(2026, 11, 26, 12, 0, 0, tzinfo=timezone.utc)
+
+    def _tick(self, doc: dict) -> str:
+        doc['clock'] = doc.get('clock', 0) + 1
+        return (self._CLOCK_BASE + timedelta(seconds=doc['clock'])).strftime('%Y-%m-%dT%H:%M:%SZ')
+
     # ----- world building (test-side) ----------------------------------------
     def add_repo(self, repo: str, *, default_branch: str = 'main', viewer: str = 'example-owner'):
         def change(d):
@@ -315,8 +324,7 @@ class FakeGitHub:
             issue = d['repos'][repo]['issues'][argv[3]]
             issue['state'] = 'closed' if argv[2] == 'close' else 'open'
             if argv[2] == 'reopen':
-                stamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-                d['repos'][repo].setdefault('reopens', {}).setdefault(argv[3], []).append(stamp)
+                d['repos'][repo].setdefault('reopens', {}).setdefault(argv[3], []).append(self._tick(d))
             return ''
         if argv[1:3] == ['pr', 'merge']:
             return self._merge(d, argv)
@@ -400,7 +408,7 @@ class FakeGitHub:
         # A squash/merge commit carries the head tree onto the default branch.
         trees = d['repos'][repo].setdefault('trees', {})
         trees[merge_sha] = dict(trees.get(pr['head']['sha'], {}))
-        pr.update(state='closed', merged_at='2026-11-26T10:00:00Z', merge_commit_sha=merge_sha)
+        pr.update(state='closed', merged_at=self._tick(d), merge_commit_sha=merge_sha)
         d['repos'][repo]['runs'].append({'id': self._id(d), 'run_number': len(d['repos'][repo]['runs']) + 1,
                                          'run_attempt': 1, 'head_sha': merge_sha, 'event': 'push',
                                          'status': 'queued', 'conclusion': None})

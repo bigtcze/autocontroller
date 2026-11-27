@@ -236,6 +236,13 @@ class LinkedIssuePrTests(unittest.TestCase):
         with patch.object(m,'gh_json',return_value=self._graph(nodes,self._reopened(REOPENED))):
             with self.assertRaisesRegex(m.ControllerError,'multiple current'):m.linked_issue_pr(REPO,7)
 
+    def test_never_reopened_merged_plus_open_pr_fails_closed(self):
+        # Intentional tightening: without a reopen, the merged PR is still current, so an
+        # open sibling makes the linkage ambiguous (the old code silently returned the open PR).
+        nodes=[self._merged(26,MERGED_BEFORE_REOPEN),self._node(40)]
+        with patch.object(m,'gh_json',return_value=self._graph(nodes)):
+            with self.assertRaisesRegex(m.ControllerError,'multiple current closing PRs'):m.linked_issue_pr(REPO,7)
+
     def test_two_current_merged_prs_fail_closed(self):
         nodes=[self._merged(40,MERGED_AFTER_REOPEN),self._merged(41,'2026-11-26T23:00:00Z')]
         with patch.object(m,'gh_json',return_value=self._graph(nodes,self._reopened(REOPENED))):

@@ -58,8 +58,6 @@ instance.
 - **GitHub content** (Issues, PRs, comments, branch names, fork PRs): untrusted.
   Renovate work requires the verified `renovate[bot]` Bot identity and a
   same-repository head; linked/repair/release PRs from forks are ignored.
-  Closing PRs merged before an Issue's latest reopen are historical and ignored;
-  ambiguous chronology or missing timeline metadata fails closed.
   Project membership plus a nonterminal status authorizes scheduling.
 - **Agents**: run with the controller user's privileges; not sandboxed. The
   controller independently verifies GitHub state rather than trusting agent
