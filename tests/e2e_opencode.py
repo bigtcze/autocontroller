@@ -45,6 +45,7 @@ import re
 import secrets
 import sys
 import time
+import urllib.parse
 from urllib.parse import unquote
 
 HERE = Path(__file__).resolve().parent
@@ -139,6 +140,11 @@ def api(root: Path, args: list[str]) -> int:
         return emit(_active_poll(root))
     if (method, path) == ('GET', '/api/session'):
         return emit(list(_locked(root)['sessions'].values()))
+    if method == 'GET' and path.startswith('/api/session?'):
+        return _list_page(root, path)
+    match = re.fullmatch(r'/api/session/([^/?]+)/message(?:\?(\S+))?', path)
+    if method == 'GET' and match:
+        return _message_page(root, unquote(match.group(1)), urllib.parse.parse_qs(match.group(2) or '', keep_blank_values=True))
     match = re.fullmatch(r'/api/session/([^/]+)', path)
     if method == 'GET' and match:
         sid = unquote(match.group(1))
@@ -206,12 +212,108 @@ def _new_session(folder: Path, sid: str, title: str, parent: str | None, directo
 
 
 def _spawn(folder: Path, directory: str, parent: str, specs: list[dict]) -> None:
-    """Descendant specs: {'title', 'active_polls', 'children': [...]}; any depth, same directory."""
+    """Descendant specs: {'title', 'active_polls', 'children', 'agent', 'outcome', 'snapshot_tree'}.
+
+    `agent`/`outcome` are recorded on the session (outcome is absent while it runs, as in OpenCode).
+    `snapshot_tree` = 'head' gives the spawned session one assistant message whose snapshot is the git
+    tree of the current PR head (resolved from the fake GitHub store); a literal 40-hex value is used as is.
+    Without it the session has no messages.
+    """
     for spec in specs:
         sid = 'ses_' + secrets.token_hex(12)
         _new_session(folder, sid, spec.get('title', 'subagent'), parent, directory,
                      int(spec.get('active_polls', 0)))
+
+        def change(doc, sid=sid, spec=spec):
+            session = doc['sessions'][sid]
+            session['agent'] = spec.get('agent')
+            if spec.get('outcome'):
+                session['outcome'] = spec['outcome']
+            session['time'] = {'created': time.time(), 'idle': time.time() if not spec.get('active_polls') else None}
+            if spec.get('snapshot_tree') is not None:
+                tree = _resolve_snapshot_tree(folder, spec['snapshot_tree'])
+                doc.setdefault('messages', {})[sid] = [
+                    {'type': 'assistant', 'agent': spec.get('agent'), 'finish': 'stop',
+                     'snapshot': {'start': tree, 'end': tree, 'files': []}}]
+        _locked(folder, change)
         _spawn(folder, directory, sid, spec.get('children', []))
+
+
+def _resolve_snapshot_tree(folder: Path, value: str) -> str:
+    """'head' -> tree of the PR head the scripted GitHub currently holds; otherwise a literal tree."""
+    if value != 'head':
+        return value
+    from e2e_github import FakeGitHub, tree_of
+    store = FakeGitHub(folder / 'github.json')
+    heads = [pr['head']['sha'] for repo in store.read()['repos'].values() for pr in repo['prs'].values()
+             if pr['state'] == 'open']
+    if len(heads) != 1:
+        raise Unmodelled(f"snapshot_tree 'head' needs exactly one open PR head, found {len(heads)}")
+    return tree_of(heads[0])
+
+
+def _list_page(root: Path, path: str) -> int:
+    """GET /api/session?<query>: parentID (incl. the literal `null`), directory, search prefix, limit, cursor."""
+    query = urllib.parse.parse_qs(path.split('?', 1)[1], keep_blank_values=True)
+    limit = int(query.get('limit', ['100'])[0])
+    parent_filter = query.get('parentID', [None])[0]
+    directory = query.get('directory', [None])[0]
+    search = query.get('search', [None])[0]
+    start = int(query.get('cursor', ['0'])[0])
+
+    rows = sorted(_locked(root, lambda doc: list(doc['sessions'].values())), key=lambda s: s['id'])
+    selected = []
+    for session in rows:
+        if parent_filter is not None:
+            if parent_filter == 'null' and session.get('parentID') is not None:
+                continue
+            if parent_filter != 'null' and session.get('parentID') != parent_filter:
+                continue
+        if directory is not None and session_dir(session) != directory:
+            continue
+        if search is not None and not session.get('title', '').startswith(search):
+            continue
+        selected.append(session)
+    page = selected[start:start + limit]
+    nxt = start + limit if start + limit < len(selected) else None
+    return _envelope(page, cursor={'previous': None, 'next': None if nxt is None else str(nxt)})
+
+
+def _envelope(data, *, cursor) -> int:
+    print(json.dumps({'data': data, 'cursor': cursor}))
+    return 0
+
+
+def session_dir(session: dict) -> str | None:
+    return (session.get('location') or {}).get('directory')
+
+
+def _message_page(root: Path, sid: str, query: dict) -> int:
+    """GET /api/session/<id>/message?type&limit&cursor: newest-first; `type` filters BEFORE pagination.
+
+    Accepts the query the wrapper sends (`type=assistant&limit=200`, then the same type with a cursor).
+    An unknown `type` is refused, like the real API's enum.
+    """
+    if sid not in _locked(root)['sessions']:
+        print(f'session {sid} not found: 404', file=sys.stderr)
+        return 1
+    message_type = query.get('type', [None])[0]
+    if message_type is not None and message_type not in MESSAGE_TYPES:
+        print(f'invalid message type {message_type!r}: 400', file=sys.stderr)
+        return 1
+    limit = int(query.get('limit', ['50'])[0])
+    start = int(query.get('cursor', ['0'])[0])
+    messages = list(reversed(_locked(root).get('messages', {}).get(sid, [])))
+    if message_type is not None:
+        messages = [m for m in messages if m.get('type') == message_type]
+    page = messages[start:start + limit]
+    nxt = start + limit if start + limit < len(messages) else None
+    return _envelope(page, cursor={'previous': None, 'next': None if nxt is None else str(nxt)})
+
+
+# The message `type` enum from the OpenCode V2 OpenAPI document (GET /api/session/{sessionID}/message).
+MESSAGE_TYPES = frozenset({'agent-switched', 'model-switched', 'location-switched', 'user', 'synthetic', 'system',
+                           'skill', 'shell', 'assistant', 'compaction', 'idle'})
 
 
 def run_new(folder: Path, opts: dict, prompt: str) -> int:
@@ -236,14 +338,26 @@ def run_new(folder: Path, opts: dict, prompt: str) -> int:
     _new_session(folder, sid, title, None, directory, int(step.get('root_active_polls', 0)))
     # _new_session stores agent None; keep the requested agent on the root record as before.
     _locked(folder, lambda doc: doc['sessions'][sid].__setitem__('agent', opts['agent']))
-    _spawn(folder, directory, sid, step.get('descendants', []))
+    # Descendants that carry a snapshot_tree review the head the step itself creates, so they
+    # are spawned after the step's GitHub actions (a real subagent runs after the PR exists).
+    early, late = _split_descendants(step.get('descendants', []))
+    _spawn(folder, directory, sid, early)
     agent.log_invocation(folder, {
         'kind': 'session', 'via': 'real_wrapper', 'session_id': sid, 'project': project,
         'phase': phase, 'agent': opts['agent'], 'title': title, 'prompt': prompt,
         'argv': sys.argv[1:], 'learning_instructions': learning_present(prompt),
         'env': {k: os.environ.get(k) for k in agent.ENV_KEYS}, 'pid': os.getpid(), 'at': time.time(),
     })
-    return agent.perform_step(folder, marker.parent, project, step, title, None)
+    rc = agent.perform_step(folder, marker.parent, project, step, title, None)
+    _spawn(folder, directory, sid, late)
+    return rc
+
+
+def _split_descendants(specs: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Specs that name a snapshot_tree are 'late' (spawned after the step's actions); others are 'early'."""
+    late = [s for s in specs if s.get('snapshot_tree') is not None]
+    early = [s for s in specs if s.get('snapshot_tree') is None]
+    return early, late
 
 
 def _pop_resume_plan(folder: Path, project: str, phase: str) -> dict:
@@ -272,11 +386,14 @@ def run_resume(folder: Path, opts: dict, prompt: str) -> int:
         'phase': phase, 'learning_instructions': learning_present(prompt), 'at': time.time(),
     })
     plan = _pop_resume_plan(folder, project, phase)
-    # Descendants spawned during this recovery turn belong to the SAME root session.
-    _spawn(folder, session['location']['directory'], sid, plan.get('descendants', []))
+    # Descendants spawned during this recovery turn belong to the SAME root session. Specs with a
+    # snapshot_tree review the head this turn creates, so they are spawned after its actions.
+    early, late = _split_descendants(plan.get('descendants', []))
+    _spawn(folder, session['location']['directory'], sid, early)
     # The recovery turn finishes the work: its scripted GitHub actions (e.g. the PR) apply here.
     pdir = Path(os.environ['AUTONOMY_PENDING_MARKER']).parent
     agent.perform_step(folder, pdir, project, {'actions': plan.get('actions', [])}, session['title'], None)
+    _spawn(folder, session['location']['directory'], sid, late)
     nonces = NONCE.findall(prompt)
     if len(nonces) != 1:
         raise Unmodelled('recovery prompt must carry exactly one completion nonce')

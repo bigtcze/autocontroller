@@ -63,6 +63,13 @@ class E2EBase(unittest.TestCase):
         """A new ProjectWorker instance over the same state directory (process restart)."""
         return self.world.worker(name)
 
+    @staticmethod
+    def _reviewed(output: str, pr: int, *, repo: str = R) -> dict:
+        """A scripted session whose native oracle reviewed the PR head (issue #48 evidence, explicit)."""
+        return {'output': output,
+                'oracle_review': {'kind': 'renovate', 'number': pr, 'repo': repo, 'pr': pr,
+                                  'session': f'ses_oracle_{pr}'}}
+
     def step_until(self, phase: str, name: str = 'alpha', limit: int = 6):
         """Fresh worker per iteration (a restart each time) until the checkpoint reaches `phase`."""
         for _ in range(limit):
@@ -207,10 +214,15 @@ class SchedulerHappyPathTests(E2EBase):
         self.gh.add_pr(R, title='Fork bump', body='', head_sha='f' * 40, head_repo='example-fork/alpha',
                        head_ref='renovate/fork', user=ew.eg.RENOVATE_USER)
         self.world.script('alpha', [
-            {'output': 'Orchestrator: renovate verified'},  # renovate code session
+            # The Renovate head was reviewed by a native oracle before the controller reaches CI.
+            {'output': 'Orchestrator: renovate verified',
+             'oracle_review': {'kind': 'renovate', 'number': renovate, 'repo': R, 'pr': renovate,
+                               'session': 'ses_oracle_renovate'}},  # renovate code session
             {'output': 'AUTOCONTROLLER_SELECT_ISSUE #%d' % issue},  # OMO selection
             {'actions': [{'gh': ['gh', 'pr', 'create', '--repo', R, '--title', 'Feature A',
                                  '--body', f'Closes #{issue}', '--head-sha', SHA_ISSUE]}],
+             'oracle_review': {'kind': 'issue', 'number': issue, 'repo': R, 'pr': None,
+                               'session': 'ses_oracle_issue'},
              'output': 'Orchestrator: fixer completed; oracle reviewed'},
         ])
         drive = self.drive
@@ -373,12 +385,19 @@ class ReviewAndCiGateTests(E2EBase):
         self.world.script('alpha', [
             {'output': 'session 1: left PR as draft'},
             {'actions': [{'gh': ['gh', 'pr', 'ready', str(renovate), '--repo', R]}],
+             'oracle_review': {'kind': 'renovate', 'number': renovate, 'repo': R, 'pr': renovate,
+                               'session': 'ses_oracle_ready'},
              'output': 'session 2: oracle approved; marked ready'},
+            # The corrective session pushes SHA_FIX; a fresh oracle review of that head is required too.
             {'actions': [{'gh': ['gh', 'pr', 'sync', str(renovate), '--repo', R, '--head-sha', SHA_FIX]}],
+             'oracle_review': {'kind': 'renovate', 'number': renovate, 'repo': R, 'pr': renovate,
+                               'session': 'ses_oracle_fix'},
              'output': 'session 3: fixer pushed correction'},
             {'actions': [{'gh': ['gh', 'pr', 'create', '--repo', R, '--title', 'Repair main',
                                  '--body', f'Autocontroller-Repair-For: #{renovate}\nfix main',
                                  '--head-sha', REPAIR_SHA]}],
+             'oracle_review': {'kind': 'renovate', 'number': renovate, 'repo': R, 'pr': None,
+                               'session': 'ses_oracle_repair'},
              'output': 'repair session: repair PR opened'},
         ])
 
@@ -593,7 +612,7 @@ class CiFailureBackoffTests(E2EBase):
         pr = self.gh.add_pr(R, title='Ready', body='', head_sha=SHA_FIX, head_ref='renovate/ready',
                             user=ew.eg.RENOVATE_USER)
         self.gh.set_checks(R, pr, SHA_FIX, [{'name': 'required', 'bucket': 'fail'}])
-        self.world.script('alpha', [{'output': 'renovate verified'}, {'output': 'fixer fixed'}])
+        self.world.script('alpha', [self._reviewed('renovate verified', pr), {'output': 'fixer fixed'}])
         self.restart().one_iteration()  # code session 1
         self.restart().one_iteration()  # ci: required failed -> back to code, retry window opens
         self.assertEqual(self.checkpoint()['phase'], 'code')
@@ -631,7 +650,7 @@ class MidFlowEngramTests(E2EBase):
         pr = self.gh.add_pr(R, title='Ready', body='', head_sha=SHA_FIX, head_ref='renovate/ready',
                             user=ew.eg.RENOVATE_USER)
         self.gh.set_checks(R, pr, SHA_FIX, [{'name': 'required', 'bucket': 'pass'}])
-        self.world.script('alpha', [{'output': 'renovate verified'}])
+        self.world.script('alpha', [self._reviewed('renovate verified', pr)])
         self.step_until('ci')  # code session done; the task waits at the merge gate
         sessions_before = len(self.sessions())
         grant = {'repo': R, 'kind': 'renovate', 'number': pr, 'used': 0, 'queries': [], 'records': 0,
@@ -830,8 +849,8 @@ class ConcurrentProjectsTests(E2EBase):
                             user=ew.eg.RENOVATE_USER)
         pb = self.gh.add_pr(beta, title='B bump', body='', head_sha='b1' * 20, head_ref='renovate/b',
                             user=ew.eg.RENOVATE_USER)
-        self.world.script('alpha', [{'output': 'alpha renovate verified'}])
-        self.world.script('beta', [{'output': 'beta renovate verified'}])
+        self.world.script('alpha', [self._reviewed('alpha renovate verified', pa, repo=R)])
+        self.world.script('beta', [self._reviewed('beta renovate verified', pb, repo=beta)])
         # Hold alpha's CI pending while beta's is green: beta must not inherit alpha's state.
         self.gh.set_checks(R, pa, 'a1' * 20, [{'name': 'required', 'bucket': 'pending'}])
         self.gh.set_checks(beta, pb, 'b1' * 20, [{'name': 'required', 'bucket': 'pass'}])
@@ -1009,7 +1028,7 @@ class CrashRecoveryTests(E2EBase):
     def test_lost_merge_response_then_restart_completes_without_second_merge(self):
         pr = self._ready_pr()
         self.gh.set_checks(R, pr, SHA_FIX, [{'name': 'required', 'bucket': 'pass'}])
-        self.world.script('alpha', [{'output': 'renovate verified'}])
+        self.world.script('alpha', [self._reviewed('renovate verified', pr)])
         self.step_until('ci')
         self._lose_merge_response()
         with self.assertRaises(ew.ctl.ControllerError):
@@ -1029,7 +1048,7 @@ class CrashRecoveryTests(E2EBase):
 
     def test_restart_at_ci_and_postmerge_never_duplicates_ai_or_merge(self):
         pr = self._ready_pr()
-        self.world.script('alpha', [{'output': 'renovate verified'}])
+        self.world.script('alpha', [self._reviewed('renovate verified', pr)])
         self.step_until('ci')
         self.gh.set_checks(R, pr, SHA_FIX, [{'name': 'required', 'bucket': 'pending'}])
         self.restart().one_iteration()  # restart at ci: still pending, no AI, no merge

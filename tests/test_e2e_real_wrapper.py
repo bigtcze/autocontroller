@@ -38,8 +38,11 @@ class RealWrapperHappyPathTests(RealWrapperBase):
                                   status='Backlog')
         self.world.script('alpha', [
             {'output': 'AUTOCONTROLLER_SELECT_ISSUE #%d' % issue},
+            # The coding session opens the PR, and its real `oracle` subagent reviews that exact head tree.
             {'actions': [{'gh': ['gh', 'pr', 'create', '--repo', R, '--title', 'Feature A',
                                  '--body', f'Closes #{issue}', '--head-sha', SHA_ISSUE]}],
+             'descendants': [{'title': 'review', 'agent': 'oracle', 'outcome': 'succeeded',
+                              'snapshot_tree': 'head'}],
              'output': 'fixer completed; oracle reviewed'},
         ])
         self.drive('alpha', 1)  # selection -> In Progress

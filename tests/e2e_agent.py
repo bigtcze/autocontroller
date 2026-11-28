@@ -143,14 +143,63 @@ def run_memory_ops(pdir: Path, ops: list[dict]) -> list[dict]:
     return results
 
 
+def oracle_reviews_listing(folder: Path, project: str, kind: str, number: str) -> dict:
+    """The `--oracle-reviews` answer for one project's task, from recorded review candidates only."""
+    def read(doc):
+        return list(doc.get('oracle_reviews', {}).get(project, {}).get(f'{kind}:{number}', []))
+    candidates = _locked_store(folder, read)
+    log_invocation(folder, {'kind': 'oracle_listing', 'project': project, 'task': f'{kind}:{number}',
+                            'candidates': len(candidates)})
+    return {'kind': kind, 'number': int(number), 'candidates': candidates}
+
+
+def _locked_store(folder: Path, change):
+    """Read/modify the scripted-GitHub-independent oracle record under the shared script lock."""
+    with (folder / 'script.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        path = folder / 'script.json'
+        doc = json.loads(path.read_text(encoding='utf-8'))
+        result = change(doc)
+        tmp = path.with_name('script.json.tmp')
+        tmp.write_text(json.dumps(doc, sort_keys=True), encoding='utf-8')
+        tmp.replace(path)
+    return result
+
+
+def record_oracle_review(folder: Path, project: str, kind: str, number: str, *, tree: str, session: str) -> None:
+    """Record a completed, succeeded, idle, inactive oracle candidate for the task (scripted only)."""
+    def change(doc):
+        bucket = doc.setdefault('oracle_reviews', {}).setdefault(project, {}).setdefault(f'{kind}:{number}', [])
+        bucket.append({'root': f'ses_root_{session}', 'session': session, 'created': len(bucket) + 1,
+                       'idle': len(bucket) + 2, 'outcome': 'succeeded', 'active': False,
+                       'trees': [tree], 'snapshot_complete': True})
+    _locked_store(folder, change)
+
+
 def perform_step(folder: Path, pdir: Path, project: str, step: dict, title: str,
                  marker: Path | None) -> int:
     """The single step engine shared by both modes. Returns the session rc."""
-    from e2e_github import FakeGitHub  # imported lazily: only needed when a step touches GitHub
-    if step.get('actions') or step.get('outage_after'):
+    from e2e_github import FakeGitHub, tree_of  # imported lazily: only needed when a step touches GitHub
+    if step.get('actions') or step.get('outage_after') or step.get('oracle_review'):
         store = FakeGitHub(folder / 'github.json')
         for action in step.get('actions', []):
             store.run_gh(action['gh'], actor='agent')
+        if step.get('oracle_review'):
+            # Explicit per step: the oracle reviewed the PR head this step's actions left in place.
+            # The task and PR are read from the store; no default-positive evidence is ever recorded.
+            target = step['oracle_review']  # {'kind','number','repo','session'[, 'pr']}
+            if target.get('pr') is not None:
+                head_sha = store.pr(target['repo'], int(target['pr']))['head']['sha']
+            else:
+                # Without a PR number: the head the step's own actions pushed or opened. It must be
+                # named exactly once among the step's `--head-sha` arguments; anything else is a test bug.
+                pushed = [a['gh'][a['gh'].index('--head-sha') + 1] for a in step.get('actions', [])
+                          if '--head-sha' in a['gh']]
+                if len(pushed) != 1:
+                    raise AssertionError(f'oracle_review without pr needs exactly one --head-sha, got {len(pushed)}')
+                head_sha = pushed[0]
+            record_oracle_review(folder, project, target['kind'], str(target['number']),
+                                 tree=tree_of(head_sha), session=target['session'])
         if step.get('outage_after'):
             store.set_outage(True)  # GitHub goes down right after this session
     if step.get('memory'):
@@ -176,6 +225,10 @@ def run_session(argv: list[str]) -> int:
         return rc
     if argv[:1] == ['--interrupt-owned']:
         log_invocation(folder, {'kind': 'interrupt', 'project': os.environ.get('AUTONOMY_PROJECT_NAME')})
+        return 0
+    if argv[:1] == ['--oracle-reviews'] and len(argv) == 3:
+        listing = oracle_reviews_listing(folder, os.environ['AUTONOMY_PROJECT_NAME'], argv[1], argv[2])
+        print(json.dumps(listing, sort_keys=True))
         return 0
     if argv[:2] != ['run', '--auto']:
         print(f'unscripted wrapper form: {argv[:3]}', file=sys.stderr)
