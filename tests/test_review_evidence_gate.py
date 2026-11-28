@@ -170,6 +170,24 @@ class ReviewGate(unittest.TestCase):
                 self.assertNotIn('review_evidence', self.cp())
                 self.assertEqual(self.merges, [])
 
+    def test_continued_oracle_session_across_trees_is_refused_and_asks_for_a_new_session(self):
+        # Live (N1): a continued oracle session accumulates snapshots [old tree, head tree]. It must never
+        # count as review of the head tree; the reason and feedback must say to start a NEW oracle session.
+        self.pr['head']['sha'] = SHA  # head tree is TREE1
+        self.candidates = [cand(session='ses_continued', trees=[TREE2, TREE1])]
+        self.checkpoint('ci')
+        self.cycle()
+        cp = self.cp()
+        self.assertNotIn('review_evidence', cp, 'a mixed-tree continued session is never accepted')
+        self.assertEqual(cp['phase'], 'code')
+        self.assertEqual(self.merges, [])
+        reason = self.w.retry_map()['issue:68']['reason']
+        self.assertIn('ses_continued', reason)
+        self.assertIn('continued across trees', reason)
+        self.assertIn('start a new oracle session', reason)
+        self.assertIn('a NEW `oracle` session', cp['review_feedback'])
+        self.assertIn('continued or resumed session', cp['review_feedback'])
+
     def test_c_wrapper_listing_failure_keeps_checkpoint_and_does_not_route_to_code(self):
         self.checkpoint('ci')
         with patch.object(m.subprocess, 'run', return_value=subprocess.CompletedProcess([], 2, '', 'api down')):
@@ -375,6 +393,9 @@ class ReviewGate(unittest.TestCase):
         self.assertTrue(self.prompts)
         self.assertIn('exact final PR head', self.prompts[0].replace('\n', ' '))
         self.assertIn('`oracle`', self.prompts[0])
+        flat = ' '.join(self.prompts[0].split())
+        self.assertIn('must be a NEW `oracle` subagent session started after the last commit', flat)
+        self.assertIn('a continued or resumed `oracle` session that also saw an earlier tree does not count', flat)
 
 
 if __name__ == '__main__':

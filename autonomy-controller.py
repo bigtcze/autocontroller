@@ -604,7 +604,7 @@ Rules:
 - Push a reviewable PR and preserve all repository-defined tests and required CI gates.
 - Evidence: never claim a test, Docker image, E2E suite or gate was run or exists unless it actually did.
 - Keep the PR DRAFT (or mark it draft) while independent review is incomplete or serious findings remain, and report the blocker. Mark ready only after completed independent review. Record a concise review summary and verification evidence on the PR; no separate report. Do not create custom review-verdict tokens.
-- The controller verifies from OpenCode session metadata that a completed native `oracle` subagent review's snapshot equals the exact final PR head tree; so run the final `oracle` review on a clean checkout of the final pushed head, after the last commit (PR description edits are fine), and never invent verdict text.
+- The controller verifies from OpenCode session metadata that a completed native `oracle` subagent review's snapshot equals the exact final PR head tree; so run the final `oracle` review on a clean checkout of the final pushed head, after the last commit (PR description edits are fine). The final review must be a NEW `oracle` subagent session started after the last commit; a continued or resumed `oracle` session that also saw an earlier tree does not count. Never invent verdict text.
 - Controller owns exact-SHA CI verification, merge, Issue closure and release publication. Do NOT merge or close the Issue; never bypass branch protection, required checks or approvals; NEVER run gh release create, push release tags, or skip a requested feature release approval.
 - Red main after a merge: fix through a new PR, never a direct push to main.
 Follow-up Issues (only for this authorized task; you own them, including needs found by subagents or oracle review):
@@ -1501,6 +1501,17 @@ class ProjectWorker:
                     and c.get("trees") == [tree]
                     and isinstance(c.get("session"), str) and isinstance(c.get("root"), str)]
         if not accepted:
+            # A continued oracle session that also saw an earlier tree is never accepted (the final review
+            # must be a fresh session on the head tree). Name that case so the agent starts a new session.
+            continued = [c for c in candidates if isinstance(c, dict)
+                         and c.get("outcome") == "succeeded" and number_of(c.get("idle")) > 0
+                         and c.get("active") is False and c.get("snapshot_complete") is True
+                         and isinstance(c.get("trees"), list) and tree in c.get("trees") and len(c["trees"]) > 1]
+            if continued:
+                session = str(continued[0].get("session") or "unknown")
+                others = len([t for t in continued[0]["trees"] if t != tree])
+                return None, (f"oracle session {session} was continued across trees (it also saw {others} "
+                              f"other tree(s)); start a new oracle session on head tree {tree[:12]}")
             return None, (f"no completed, idle, inactive oracle session with a complete snapshot "
                           f"where every snapshot equals tree {tree[:12]} ({len(candidates)} candidate(s) inspected)")
         latest = max(accepted, key=lambda c: (number_of(c.get("idle")), number_of(c.get("created"))))
@@ -1517,9 +1528,9 @@ class ProjectWorker:
             f"A completed native OMO `oracle` review of this exact tree is required before merge. Independent "
             f"review evidence is missing for PR head {head[:12]} ({reason}). The controller accepts only a completed `oracle` "
             "subagent session whose OpenCode snapshot equals the git tree of the exact final PR head. "
-            "Run that review on the pushed head after the last commit (PR description edits do not change the "
-            "tree). Route its findings to `fixer`. Findings already handled on an unchanged tree do not need "
-            "a new review.")
+            "The final review must be a NEW `oracle` session started after the last commit; a continued or "
+            "resumed session that also saw an earlier tree does not count. Route findings to `fixer`. "
+            "Findings already handled on an unchanged tree do not need a new review.")
         repair = bool(checkpoint.get("repairing")) and checkpoint.get("kind") == "renovate"
         if repair:
             checkpoint.update(phase="ci", review_missing_head=head)
@@ -1528,15 +1539,22 @@ class ProjectWorker:
         checkpoint.pop("ready_sha", None)
         checkpoint.pop("review_evidence", None)
         self.save_checkpoint(checkpoint)
-        if repeated:
+        if repeated and repair:
+            # No agent runs for a repair hold (it stays in ci), so the action belongs to the owner or a manual run.
+            self.notice(f"review-missing:{key}",
+                        f"BLOCKER: {key} repair PR head {head[:12]} has no independent oracle review evidence "
+                        f"({reason}). Actionable: run a NEW oracle review session on the exact repair head "
+                        "(manually or by the owner); retrying in one hour", warning=True)
+            self.retry(key, f"No independent oracle review evidence for repair head {head[:12]}", min_seconds=3600)
+        elif repeated:
             self.notice(f"review-missing:{key}",
                         f"BLOCKER: {key} still has no independent oracle review evidence for head {head[:12]} "
-                        f"after an agent pass ({reason}). Actionable: run the final oracle review on the exact "
+                        f"after an agent pass ({reason}). Actionable: run a NEW oracle review session on the exact "
                         "pushed head; retrying in one hour", warning=True)
             self.retry(key, f"No independent oracle review evidence for head {head[:12]} after agent pass",
                        min_seconds=3600)
         else:
-            self.retry(key, f"Independent oracle review evidence missing for head {head[:12]}", min_seconds=600)
+            self.retry(key, f"Independent oracle review evidence missing for head {head[:12]} ({reason})", min_seconds=600)
 
     def review_gate(self, kind: str, number: int, checkpoint: dict, key: str, pr: dict) -> bool:
         """Before CI and before ready_sha: stored evidence for this head is trusted; else look it up.

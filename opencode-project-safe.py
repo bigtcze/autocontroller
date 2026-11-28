@@ -1139,6 +1139,7 @@ def oracle_reviews(kind, number):
             cursor = None
             for _ in range(ORACLE_PAGE_CAP):
                 # type=assistant filters before pagination; the spec requires the same type on every cursor page.
+                # limit=200: max observed live (HTTP 400 above 200); not stated in openapi.json.
                 query = "type=assistant&limit=200"
                 if cursor:
                     query += f"&cursor={urllib.parse.quote(cursor, safe='')}"
